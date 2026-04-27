@@ -3326,6 +3326,11 @@ begin
         pinyin_key := Copy(pinyin_key, 1, Length(pinyin_key) - 1) + #39 + 'er';
     end;
 
+    if normalized_base_entry_exists(pinyin_key, text_key) then
+    begin
+        Exit(True);
+    end;
+
     syllables := split_full_pinyin_syllables(pinyin_key);
     text_units := split_text_units_local(text_key);
     if (Length(syllables) <= 0) or

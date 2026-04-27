@@ -4462,11 +4462,36 @@ var
                 candidate_units_local: TArray<string>;
                 unit_idx_local: Integer;
                 exact_results_local: TncCandidateList;
-                exact_idx_local: Integer;
                 encoded_path_local: string;
                 inferred_path_local: string;
                 inferred_score_local: Integer;
                 inferred_segments_local: Integer;
+
+                function full_query_exact_matches_text_local: Boolean;
+                var
+                    local_idx: Integer;
+                begin
+                    Result := False;
+                    if (m_dictionary = nil) or (Trim(text_value) = '') or
+                        (not m_dictionary.lookup_exact_full_pinyin(lookup_text,
+                        exact_results_local)) then
+                    begin
+                        Exit;
+                    end;
+
+                    for local_idx := 0 to High(exact_results_local) do
+                    begin
+                        if (Trim(exact_results_local[local_idx].comment) = '') and
+                            SameText(Trim(exact_results_local[local_idx].text),
+                            text_value) and
+                            (get_candidate_text_unit_count(Trim(
+                            exact_results_local[local_idx].text)) =
+                            input_syllable_count) then
+                        begin
+                            Exit(True);
+                        end;
+                    end;
+                end;
 
                 function build_segment_query_key_local(
                     const start_idx_local: Integer;
@@ -4596,22 +4621,14 @@ var
                     Exit;
                 end;
 
+                if full_query_exact_matches_text_local then
+                begin
+                    Exit(True);
+                end;
+
                 if get_segment_path_for_candidate(candidate) = '' then
                 begin
                     Result := False;
-                    if m_dictionary.lookup_exact_full_pinyin(lookup_text,
-                        exact_results_local) then
-                    begin
-                        for exact_idx_local := 0 to High(exact_results_local) do
-                        begin
-                            if (Trim(exact_results_local[exact_idx_local].comment) = '') and
-                                SameText(Trim(exact_results_local[exact_idx_local].text),
-                                text_value) then
-                            begin
-                                Exit(True);
-                            end;
-                        end;
-                    end;
                     Exit;
                 end;
 
@@ -5475,6 +5492,7 @@ var
             trim_sorted_candidates_for_strong_long_sentence(m_candidates);
         end;
         ensure_high_quality_complete_candidate_in_top2(m_candidates);
+        ensure_short_full_query_exact_cluster_visible(m_candidates);
         ensure_bounded_single_char_partial_pool(m_candidates);
         ensure_top_complete_candidate_prefix_partials_visible(m_candidates);
         ensure_learned_exact_query_choice_visible_local(m_candidates);
@@ -6200,7 +6218,32 @@ var
                 candidate_units_local: TArray<string>;
                 unit_idx_local: Integer;
                 exact_results_local: TncCandidateList;
-                exact_idx_local: Integer;
+
+                function full_query_exact_matches_text_local: Boolean;
+                var
+                    local_idx: Integer;
+                begin
+                    Result := False;
+                    if (m_dictionary = nil) or (Trim(text_value) = '') or
+                        (not m_dictionary.lookup_exact_full_pinyin(lookup_text,
+                        exact_results_local)) then
+                    begin
+                        Exit;
+                    end;
+
+                    for local_idx := 0 to High(exact_results_local) do
+                    begin
+                        if (Trim(exact_results_local[local_idx].comment) = '') and
+                            SameText(Trim(exact_results_local[local_idx].text),
+                            text_value) and
+                            (get_candidate_text_unit_count(Trim(
+                            exact_results_local[local_idx].text)) =
+                            input_syllable_count) then
+                        begin
+                            Exit(True);
+                        end;
+                    end;
+                end;
             begin
                 Result := True;
                 if (m_dictionary = nil) or (candidate.source = cs_user) or
@@ -6216,22 +6259,14 @@ var
                     Exit;
                 end;
 
+                if full_query_exact_matches_text_local then
+                begin
+                    Exit(True);
+                end;
+
                 if get_segment_path_for_candidate(candidate) = '' then
                 begin
                     Result := False;
-                    if m_dictionary.lookup_exact_full_pinyin(lookup_text,
-                        exact_results_local) then
-                    begin
-                        for exact_idx_local := 0 to High(exact_results_local) do
-                        begin
-                            if (Trim(exact_results_local[exact_idx_local].comment) = '') and
-                                SameText(Trim(exact_results_local[exact_idx_local].text),
-                                text_value) then
-                            begin
-                                Exit(True);
-                            end;
-                        end;
-                    end;
                     Exit;
                 end;
 
@@ -6414,6 +6449,7 @@ var
         note_prefix_phase_elapsed_local('pfrefresh1', phase_start_tick_local);
         phase_start_tick_local := GetTickCount64;
         ensure_high_quality_complete_candidate_in_top2(m_candidates);
+        ensure_short_full_query_exact_cluster_visible(m_candidates);
         ensure_bounded_single_char_partial_pool(m_candidates);
         ensure_top_complete_candidate_prefix_partials_visible(m_candidates);
         note_prefix_phase_elapsed_local('pfquality', phase_start_tick_local);
@@ -6831,6 +6867,7 @@ var
             preserved_phase_start_tick);
         preserved_phase_start_tick := GetTickCount64;
         ensure_high_quality_complete_candidate_in_top2(m_candidates);
+        ensure_short_full_query_exact_cluster_visible(m_candidates);
         ensure_bounded_single_char_partial_pool(m_candidates);
         ensure_top_complete_candidate_prefix_partials_visible(m_candidates);
         note_preserved_phase_elapsed_local('psquality',
@@ -20871,7 +20908,7 @@ var
         end;
     begin
         if (m_dictionary = nil) or (input_syllable_count < 2) or
-            (input_syllable_count > 3) or
+            (input_syllable_count > 4) or
             (not is_full_pinyin_key(lookup_text)) or
             (not lookup_exact_full_pinyin_cached_local(lookup_text,
             exact_results)) then
@@ -26183,6 +26220,7 @@ var
     const
         c_min_exact_weight = 700;
         c_min_three_syllable_exact_weight = 520;
+        c_min_four_syllable_exact_weight = 520;
         c_supported_split_exact_margin = 512;
     var
         exact_results: TncCandidateList;
@@ -26361,6 +26399,10 @@ var
         if input_syllable_count = 3 then
         begin
             min_exact_weight := c_min_three_syllable_exact_weight;
+        end
+        else if input_syllable_count = 4 then
+        begin
+            min_exact_weight := c_min_four_syllable_exact_weight;
         end;
 
         if not lookup_exact_full_pinyin_cached_local(lookup_text, exact_results) then
@@ -78341,6 +78383,7 @@ begin
         ensure_full_query_exact_complete_candidate_visible(m_candidates);
         promote_full_query_exact_complete_phrase_local(m_candidates);
         ensure_high_quality_complete_candidate_in_top2(m_candidates);
+        ensure_short_full_query_exact_cluster_visible(m_candidates);
         finalize_lookup_timing_info;
         if m_config.debug_mode then
         begin
@@ -92634,8 +92677,31 @@ var
                 Exit(Low(Integer) div 4);
             end;
         end;
+
+        function top_is_full_query_exact_dictionary_match: Boolean;
+        var
+            top_text: string;
+        begin
+            Result := False;
+            if (Length(m_candidates) = 0) or (expected_units < 2) or
+                (normalized_pinyin = '') or
+                (Trim(m_candidates[0].comment) <> '') or
+                (get_candidate_text_unit_count(Trim(m_candidates[0].text)) <>
+                expected_units) then
+            begin
+                Exit;
+            end;
+
+            top_text := Trim(m_candidates[0].text);
+            Result := display_exact_key_has_text(normalized_pinyin, top_text);
+        end;
     begin
         if (Length(m_candidates) < 2) or (expected_units < 4) then
+        begin
+            Exit;
+        end;
+
+        if top_is_full_query_exact_dictionary_match then
         begin
             Exit;
         end;
