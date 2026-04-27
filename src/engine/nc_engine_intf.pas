@@ -211,6 +211,7 @@ type
         function get_rank_score(const candidate: TncCandidate): Integer;
         procedure sort_candidates(var candidates: TncCandidateList);
         procedure clear_lookup_bonus_caches;
+        procedure clear_session_learning_after_user_removal;
         function build_candidate_identity_key(const candidate_text: string; const comment_text: string): string;
         procedure clear_segment_path_tracking;
         procedure remember_segment_path_for_candidate(const candidate_text: string; const comment_text: string;
@@ -849,6 +850,111 @@ begin
     begin
         m_lookup_single_char_match_cache.Clear;
     end;
+end;
+
+procedure TncEngine.clear_session_learning_after_user_removal;
+begin
+    // A user deletion is an explicit negative signal. Query/latest/path/context
+    // session caches can otherwise resurrect the removed phrase immediately.
+    if m_context_pairs <> nil then
+    begin
+        m_context_pairs.Clear;
+    end;
+    if m_context_order <> nil then
+    begin
+        m_context_order.Clear;
+    end;
+    if m_phrase_context_pairs <> nil then
+    begin
+        m_phrase_context_pairs.Clear;
+    end;
+    if m_phrase_context_order <> nil then
+    begin
+        m_phrase_context_order.Clear;
+    end;
+    if m_phrase_context_last_seen <> nil then
+    begin
+        m_phrase_context_last_seen.Clear;
+    end;
+    if m_context_db_bonus_cache <> nil then
+    begin
+        m_context_db_bonus_cache.Clear;
+        m_context_db_bonus_cache_key := '';
+    end;
+
+    if m_session_text_counts <> nil then
+    begin
+        m_session_text_counts.Clear;
+    end;
+    if m_session_text_last_seen <> nil then
+    begin
+        m_session_text_last_seen.Clear;
+    end;
+    if m_session_text_order <> nil then
+    begin
+        m_session_text_order.Clear;
+    end;
+
+    if m_session_query_choice_counts <> nil then
+    begin
+        m_session_query_choice_counts.Clear;
+    end;
+    if m_session_query_choice_last_seen <> nil then
+    begin
+        m_session_query_choice_last_seen.Clear;
+    end;
+    if m_session_query_choice_order <> nil then
+    begin
+        m_session_query_choice_order.Clear;
+    end;
+    if m_session_query_latest_text <> nil then
+    begin
+        m_session_query_latest_text.Clear;
+    end;
+
+    if m_session_query_path_choice_counts <> nil then
+    begin
+        m_session_query_path_choice_counts.Clear;
+    end;
+    if m_session_query_path_choice_last_seen <> nil then
+    begin
+        m_session_query_path_choice_last_seen.Clear;
+    end;
+    if m_session_query_path_choice_order <> nil then
+    begin
+        m_session_query_path_choice_order.Clear;
+    end;
+    if m_session_ranked_query_paths <> nil then
+    begin
+        m_session_ranked_query_paths.Clear;
+    end;
+    if m_session_ranked_query_path_scores <> nil then
+    begin
+        m_session_ranked_query_path_scores.Clear;
+    end;
+    if m_session_ranked_query_path_order <> nil then
+    begin
+        m_session_ranked_query_path_order.Clear;
+    end;
+
+    if m_session_context_query_choice_counts <> nil then
+    begin
+        m_session_context_query_choice_counts.Clear;
+    end;
+    if m_session_context_query_choice_last_seen <> nil then
+    begin
+        m_session_context_query_choice_last_seen.Clear;
+    end;
+    if m_session_context_query_choice_order <> nil then
+    begin
+        m_session_context_query_choice_order.Clear;
+    end;
+    if m_session_context_query_latest_text <> nil then
+    begin
+        m_session_context_query_latest_text.Clear;
+    end;
+
+    clear_lookup_bonus_caches;
 end;
 
 function TncEngine.build_candidate_identity_key(const candidate_text: string; const comment_text: string): string;
@@ -94715,6 +94821,7 @@ begin
     begin
         m_build_lookup_cache.Clear;
     end;
+    clear_session_learning_after_user_removal;
     clear_lookup_bonus_caches;
 
     if m_composition_text <> '' then

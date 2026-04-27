@@ -9903,9 +9903,13 @@ const
     delete_user_sql = 'DELETE FROM dict_user WHERE pinyin = ?1 AND text = ?2';
     delete_stats_sql = 'DELETE FROM dict_user_stats WHERE pinyin = ?1 AND text = ?2';
     delete_latest_sql = 'DELETE FROM dict_user_query_latest WHERE query_pinyin = ?1 AND text = ?2';
+    delete_query_path_sql =
+        'DELETE FROM dict_user_query_path WHERE query_pinyin = ?1 AND replace(path_text, ?2, '''') = ?3';
     delete_user_by_text_sql = 'DELETE FROM dict_user WHERE text = ?1';
     delete_stats_by_text_sql = 'DELETE FROM dict_user_stats WHERE text = ?1';
     delete_latest_by_text_sql = 'DELETE FROM dict_user_query_latest WHERE text = ?1';
+    delete_query_path_by_text_sql =
+        'DELETE FROM dict_user_query_path WHERE replace(path_text, ?1, '''') = ?2';
     delete_bigram_by_text_sql = 'DELETE FROM dict_user_bigram WHERE text = ?1';
     delete_bigram_by_left_sql = 'DELETE FROM dict_user_bigram WHERE left_text = ?1';
     delete_trigram_by_text_sql = 'DELETE FROM dict_user_trigram WHERE text = ?1';
@@ -9915,6 +9919,7 @@ const
         'last_used = strftime(''%s'',''now'') WHERE pinyin = ?1 AND text = ?2';
     insert_penalty_sql = 'INSERT OR IGNORE INTO dict_user_penalty(pinyin, text, penalty, last_used) ' +
         'VALUES (?1, ?2, ?3, strftime(''%s'',''now''))';
+    c_query_path_text_separator = #3;
     c_remove_penalty_step = 80;
     c_remove_penalty_max = 360;
 var
@@ -10019,6 +10024,22 @@ begin
                 m_user_connection.finalize(stmt);
             end;
         end;
+
+        stmt := nil;
+        try
+            if m_user_connection.prepare(delete_query_path_sql, stmt) and
+                m_user_connection.bind_text(stmt, 1, pinyin_key) and
+                m_user_connection.bind_text(stmt, 2, c_query_path_text_separator) and
+                m_user_connection.bind_text(stmt, 3, text_key) then
+            begin
+                m_user_connection.step(stmt);
+            end;
+        finally
+            if stmt <> nil then
+            begin
+                m_user_connection.finalize(stmt);
+            end;
+        end;
     end;
 
     if purge_all_by_text then
@@ -10055,6 +10076,21 @@ begin
         try
             if m_user_connection.prepare(delete_latest_by_text_sql, stmt) and
                 m_user_connection.bind_text(stmt, 1, text_key) then
+            begin
+                m_user_connection.step(stmt);
+            end;
+        finally
+            if stmt <> nil then
+            begin
+                m_user_connection.finalize(stmt);
+            end;
+        end;
+
+        stmt := nil;
+        try
+            if m_user_connection.prepare(delete_query_path_by_text_sql, stmt) and
+                m_user_connection.bind_text(stmt, 1, c_query_path_text_separator) and
+                m_user_connection.bind_text(stmt, 2, text_key) then
             begin
                 m_user_connection.step(stmt);
             end;
