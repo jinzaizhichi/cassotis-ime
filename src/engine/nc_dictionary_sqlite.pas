@@ -47,6 +47,7 @@ type
         m_stmt_context_trigram_bonus: Psqlite3_stmt;
         m_stmt_base_query_path_bonus: Psqlite3_stmt;
         m_stmt_compound_tail_support: Psqlite3_stmt;
+        m_stmt_compound_tail_prefix_support: Psqlite3_stmt;
         m_stmt_prefix_popularity: Psqlite3_stmt;
         m_stmt_pinyin_followup_popularity: Psqlite3_stmt;
         m_stmt_base_text_prefix_bonus: Psqlite3_stmt;
@@ -1868,6 +1869,7 @@ begin
     m_stmt_context_trigram_bonus := nil;
     m_stmt_base_query_path_bonus := nil;
     m_stmt_compound_tail_support := nil;
+    m_stmt_compound_tail_prefix_support := nil;
     m_stmt_prefix_popularity := nil;
     m_stmt_pinyin_followup_popularity := nil;
     m_stmt_base_text_prefix_bonus := nil;
@@ -5124,6 +5126,11 @@ begin
     begin
         m_base_connection.finalize(m_stmt_compound_tail_support);
         m_stmt_compound_tail_support := nil;
+    end;
+    if (m_stmt_compound_tail_prefix_support <> nil) and (m_base_connection <> nil) then
+    begin
+        m_base_connection.finalize(m_stmt_compound_tail_prefix_support);
+        m_stmt_compound_tail_prefix_support := nil;
     end;
     if (m_stmt_prefix_popularity <> nil) and (m_base_connection <> nil) then
     begin
@@ -9666,14 +9673,20 @@ const
     query_sql =
         'SELECT COUNT(1), COALESCE(SUM(weight), 0), COALESCE(MAX(weight), 0) ' +
         'FROM dict_base_query_path WHERE path_text LIKE ?1';
+    prefix_query_sql =
+        'SELECT COUNT(1), COALESCE(SUM(weight), 0), COALESCE(MAX(weight), 0) ' +
+        'FROM dict_base WHERE comment = '''' AND text LIKE ?1 AND text <> ?2';
     c_segment_path_separator = #3;
+    c_prefix_productivity_support_cap = 1500;
 var
     normalized_tail: string;
     pattern: string;
+    prefix_pattern: string;
     step_result: Integer;
     path_count: Integer;
     total_weight: Integer;
     max_weight: Integer;
+    prefix_support: Integer;
 begin
     Result := 0;
     normalized_tail := Trim(tail_text);
@@ -9720,6 +9733,52 @@ begin
         begin
             m_base_connection.reset(m_stmt_compound_tail_support);
             m_base_connection.clear_bindings(m_stmt_compound_tail_support);
+        end;
+    end;
+
+    if Result <= 0 then
+    begin
+        prefix_pattern := normalized_tail + '%';
+        try
+            if m_stmt_compound_tail_prefix_support = nil then
+            begin
+                if not m_base_connection.prepare(prefix_query_sql,
+                    m_stmt_compound_tail_prefix_support) then
+                begin
+                    m_stmt_compound_tail_prefix_support := nil;
+                    Exit;
+                end;
+            end;
+
+            if (not m_base_connection.reset(m_stmt_compound_tail_prefix_support)) or
+                (not m_base_connection.clear_bindings(m_stmt_compound_tail_prefix_support)) or
+                (not m_base_connection.bind_text(m_stmt_compound_tail_prefix_support, 1,
+                prefix_pattern)) or
+                (not m_base_connection.bind_text(m_stmt_compound_tail_prefix_support, 2,
+                normalized_tail)) then
+            begin
+                Exit;
+            end;
+
+            step_result := m_base_connection.step(m_stmt_compound_tail_prefix_support);
+            if step_result = SQLITE_ROW then
+            begin
+                path_count := m_base_connection.column_int(
+                    m_stmt_compound_tail_prefix_support, 0);
+                total_weight := m_base_connection.column_int(
+                    m_stmt_compound_tail_prefix_support, 1);
+                max_weight := m_base_connection.column_int(
+                    m_stmt_compound_tail_prefix_support, 2);
+                prefix_support := calc_compound_tail_support_value(path_count,
+                    total_weight, max_weight);
+                Result := Min(c_prefix_productivity_support_cap, prefix_support);
+            end;
+        finally
+            if m_stmt_compound_tail_prefix_support <> nil then
+            begin
+                m_base_connection.reset(m_stmt_compound_tail_prefix_support);
+                m_base_connection.clear_bindings(m_stmt_compound_tail_prefix_support);
+            end;
         end;
     end;
 
