@@ -17,7 +17,7 @@ type
     private
         m_host: TncEngineHost;
         m_server_threads: TObjectList<TncPipeServerThread>;
-        procedure add_pipe_thread(const pipe_name: string);
+        procedure add_pipe_thread(const pipe_name: string; const allow_duplicate: Boolean = False);
     protected
         procedure CreateParams(var Params: TCreateParams); override;
     public
@@ -35,6 +35,7 @@ end;
 
 constructor TncEngineHostApp.Create(AOwner: TComponent);
 var
+    idx: Integer;
     session_id: DWORD;
     session_suffix: string;
 begin
@@ -46,6 +47,10 @@ begin
 
     // Primary pipe for current clients.
     add_pipe_thread(get_nc_pipe_name);
+    for idx := 2 to 4 do
+    begin
+        add_pipe_thread(get_nc_pipe_name, True);
+    end;
     // Legacy pipe without session suffix.
     add_pipe_thread(c_nc_pipe_base);
 
@@ -95,7 +100,7 @@ begin
     inherited Destroy;
 end;
 
-procedure TncEngineHostApp.add_pipe_thread(const pipe_name: string);
+procedure TncEngineHostApp.add_pipe_thread(const pipe_name: string; const allow_duplicate: Boolean);
 var
     server_thread: TncPipeServerThread;
     existing: TncPipeServerThread;
@@ -105,11 +110,14 @@ begin
         Exit;
     end;
 
-    for existing in m_server_threads do
+    if not allow_duplicate then
     begin
-        if SameText(existing.pipe_name, pipe_name) then
+        for existing in m_server_threads do
         begin
-            Exit;
+            if SameText(existing.pipe_name, pipe_name) then
+            begin
+                Exit;
+            end;
         end;
     end;
 

@@ -65,6 +65,7 @@ type
         m_last_config_check_tick: UInt64;
         m_log_config: TncLogConfig;
         m_logger: TncLogger;
+        m_last_caret_debug_tick: UInt64;
         m_last_caret_point: TPoint;
         m_has_caret_point: Boolean;
         m_last_caret_line_height: Integer;
@@ -734,6 +735,7 @@ begin
     m_log_config.max_size_kb := 1024;
     m_log_config.log_path := '';
     m_logger := nil;
+    m_last_caret_debug_tick := 0;
     m_last_caret_point := Point(0, 0);
     m_has_caret_point := False;
     m_last_caret_line_height := 0;
@@ -3150,6 +3152,8 @@ var
     last_suspicious: Boolean;
     gui_caret_pair: Boolean;
     gui_far_from_tsf: Boolean;
+    caret_debug_logging: Boolean;
+    current_tick: UInt64;
 
     function point_in_virtual_screen(const candidate: TPoint): Boolean;
     const
@@ -3398,7 +3402,7 @@ var
             end;
         end;
         Result := point_in_virtual_screen(candidate) and point_in_foreground(candidate);
-        if (not Result) and (m_logger <> nil) and (m_logger.level <= ll_debug) then
+        if (not Result) and caret_debug_logging then
         begin
             m_logger.debug(Format('GUI caret outside foreground point=(%d,%d) rect=(%d,%d,%d,%d)',
                 [candidate.X, candidate.Y, foreground_rect.Left, foreground_rect.Top, foreground_rect.Right,
@@ -3419,6 +3423,14 @@ var
     end;
 begin
     point := System.Types.Point(0, 0);
+    current_tick := GetTickCount64;
+    caret_debug_logging := (m_logger <> nil) and (m_logger.level <= ll_debug) and
+        ((m_last_caret_debug_tick = 0) or
+        (current_tick - m_last_caret_debug_tick >= 250));
+    if caret_debug_logging then
+    begin
+        m_last_caret_debug_tick := current_tick;
+    end;
     terminal_like_target := False;
     chosen_source := casCursor;
     chosen_score := 0;
@@ -3508,7 +3520,7 @@ begin
         converted_tsf_point := tsf_point;
         if try_adjust_terminal_client_point(converted_tsf_point) then
         begin
-            if (m_logger <> nil) and (m_logger.level <= ll_debug) and
+            if caret_debug_logging and
                 ((converted_tsf_point.X <> tsf_point.X) or (converted_tsf_point.Y <> tsf_point.Y)) then
             begin
                 m_logger.debug(Format('Terminal TSF point client-adjust (%d,%d)->(%d,%d)',
@@ -3519,7 +3531,7 @@ begin
     end;
     tsf_point_valid := tsf_point_valid and point_in_virtual_screen(tsf_point);
 
-    if (m_logger <> nil) and (m_logger.level <= ll_debug) then
+    if caret_debug_logging then
     begin
         m_logger.debug(Format('Caret hwnd context=%d focus=%d foreground=%d thread=%d',
             [context_hwnd, hwnd, foreground_hwnd, gui_thread_id]));
@@ -3590,7 +3602,7 @@ begin
             try_adjust_terminal_client_point(caret_point);
         end;
         caret_point_valid := point_in_virtual_screen(caret_point) and point_in_foreground(caret_point);
-        if (not caret_point_valid) and (m_logger <> nil) and (m_logger.level <= ll_debug) then
+        if (not caret_point_valid) and caret_debug_logging then
         begin
             m_logger.debug(Format('CaretPos outside foreground point=(%d,%d) rect=(%d,%d,%d,%d)',
                 [caret_point.X, caret_point.Y, foreground_rect.Left, foreground_rect.Top, foreground_rect.Right,
@@ -3607,20 +3619,20 @@ begin
         last_sent_point_valid := False;
     end;
 
-    if tsf_point_valid and (m_logger <> nil) and (m_logger.level <= ll_debug) then
+    if tsf_point_valid and caret_debug_logging then
     begin
         m_logger.debug(Format('TSF caret point=(%d,%d) composition=%d', [tsf_point.X, tsf_point.Y,
             Ord(m_composition <> nil)]));
     end;
-    if gui_point_valid and (m_logger <> nil) and (m_logger.level <= ll_debug) then
+    if gui_point_valid and caret_debug_logging then
     begin
         m_logger.debug(Format('GUI caret thread=%d point=(%d,%d)', [gui_thread_id, gui_point.X, gui_point.Y]));
     end;
-    if caret_point_valid and (m_logger <> nil) and (m_logger.level <= ll_debug) then
+    if caret_point_valid and caret_debug_logging then
     begin
         m_logger.debug(Format('CaretPos point=(%d,%d)', [caret_point.X, caret_point.Y]));
     end;
-    if last_sent_point_valid and (m_logger <> nil) and (m_logger.level <= ll_debug) then
+    if last_sent_point_valid and caret_debug_logging then
     begin
         m_logger.debug(Format('Last sent caret point=(%d,%d)', [last_sent_point.X, last_sent_point.Y]));
     end;
@@ -3661,7 +3673,7 @@ begin
     gui_far_from_tsf := gui_caret_pair and tsf_point_valid and
         (not points_are_close(gui_point, tsf_point, 140)) and (not points_are_close(caret_point, tsf_point, 140));
 
-    if (m_logger <> nil) and (m_logger.level <= ll_debug) then
+    if caret_debug_logging then
     begin
         m_logger.debug(Format(
             'CaretObs term=%d tsf=%s gui=%s caret=%s last=%s cursor=%s line=%d',
@@ -3682,7 +3694,7 @@ begin
     if try_choose_best_anchor_scored(Slice(observations, observation_count), anchor_context, point, chosen_source,
         chosen_score) then
     begin
-        if (m_logger <> nil) and (m_logger.level <= ll_debug) then
+        if caret_debug_logging then
         begin
             m_logger.debug(Format('Caret choose=%s point=(%d,%d)', [anchor_source_name(chosen_source), point.X, point.Y]));
             if placement_line_height <> m_last_caret_line_height then
@@ -3691,7 +3703,7 @@ begin
                     [m_last_caret_line_height, placement_line_height, anchor_source_name(chosen_source)]));
             end;
         end;
-        if (m_logger <> nil) and (m_logger.level <= ll_debug) then
+        if caret_debug_logging then
         begin
             m_logger.debug(Format('CaretChoose term=%d source=%s score=%d point=(%d,%d) line=%d',
                 [Ord(terminal_like_target), anchor_source_name(chosen_source), chosen_score,

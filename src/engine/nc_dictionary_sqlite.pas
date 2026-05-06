@@ -3451,6 +3451,11 @@ begin
         if (get_valid_cjk_codepoint_count(text_units[idx]) <> 1) or
             (not text_unit_can_match_syllable(syllables[idx], text_units[idx])) then
         begin
+            // Compact pinyin can have an equally long but wrong default parse:
+            // feichange may parse as fei/chan/ge, while the committed text is
+            // fei/chang/e. Fall back to text-unit guided segmentation before
+            // rejecting the learned choice.
+            Result := can_match_with_target_unit_count(1, 0);
             Exit;
         end;
     end;
@@ -3965,17 +3970,18 @@ var
     pinyin_key: string;
 begin
     Result := False;
-    if user_weight > 0 then
-    begin
-        // dict_user rows represent explicit user-word confirmations. Keep
-        // them before generic composed-phrase suppression; otherwise explicit
-        // multi-segment selections are pruned on reopen.
-        Exit(False);
-    end;
 
     if should_suppress_exact_query_learning(pinyin, text) then
     begin
         Exit(True);
+    end;
+
+    if user_weight > 0 then
+    begin
+        // dict_user rows represent explicit user-word confirmations. Keep
+        // them before generic noisy-phrase suppression, but not when the
+        // row is only a full-query composition of existing lexicon segments.
+        Exit(False);
     end;
 
     if not is_suppressible_nonbase_exact_phrase(pinyin, text) then
@@ -6026,6 +6032,12 @@ begin
                             score_value := m_base_connection.column_int(stmt, 3);
                             if not strict_full_pinyin_text_alignment_valid(pinyin_value,
                                 text_value) then
+                            begin
+                                Continue;
+                            end;
+                            if full_pinyin_query and
+                                (not strict_full_pinyin_text_alignment_valid(
+                                exact_query_key, text_value)) then
                             begin
                                 Continue;
                             end;
@@ -8937,8 +8949,8 @@ begin
 
     base_entry_exists := normalized_base_entry_exists(pinyin_key, text);
     suppress_exact_query_user_row := invalid_full_pinyin_alignment or
-        (full_pinyin_input and (not explicit_choice) and
-        should_suppress_exact_query_learning(pinyin_key, text));
+        (full_pinyin_input and should_suppress_exact_query_learning(
+        pinyin_key, text));
 
     // A positive explicit selection for the same query/text pair should
     // cancel any earlier "remove candidate" feedback for that exact pair.
