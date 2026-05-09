@@ -1607,7 +1607,7 @@ begin
     m_chk_full_width_mode := create_check_box(Self, defaults_group, top, SCheckFullWidthMode, mark_dirty);
 
     section_top := defaults_group.Top + defaults_group.Height + scale_ui(10);
-    appearance_group := create_section_group(Self, m_tab_general, SGroupAppearance, section_top, 242);
+    appearance_group := create_section_group(Self, m_tab_general, SGroupAppearance, section_top, 252);
 
     top := scale_ui(c_section_inner_top);
     m_chk_show_status_widget := create_check_box(Self, appearance_group, top, SCheckShowStatusWidget, mark_dirty);
@@ -1693,7 +1693,7 @@ begin
     m_candidate_preview.Left := scale_ui(c_control_left);
     m_candidate_preview.Top := top;
     m_candidate_preview.Width := appearance_group.Width - scale_ui(c_control_left + c_label_left);
-    m_candidate_preview.Height := scale_ui(56);
+    m_candidate_preview.Height := scale_ui(64);
     m_candidate_preview.Anchors := [akLeft, akTop, akRight];
     m_candidate_preview.OnPaint := on_candidate_preview_paint;
 end;
@@ -1995,16 +1995,27 @@ end;
 
 procedure TncSettingsForm.on_candidate_preview_paint(Sender: TObject);
 const
+    c_preview_preedit_text = 'nihaoshijie';
     c_preview_texts: array[0..2] of string = ('1. 你好', '2. 言泉', '3. 输入法');
 var
     paint_box: TPaintBox;
     canvas: TCanvas;
     bounds: TRect;
+    preview_rect: TRect;
+    preedit_rect: TRect;
     item_rect: TRect;
     text_rect: TRect;
+    content_top: Integer;
+    content_height: Integer;
+    preview_height: Integer;
+    window_padding: Integer;
     row_top: Integer;
     line_height: Integer;
     text_height: Integer;
+    preedit_height: Integer;
+    preedit_text_height: Integer;
+    meta_vertical_padding: Integer;
+    meta_horizontal_padding: Integer;
     vertical_padding: Integer;
     horizontal_padding: Integer;
     item_gap: Integer;
@@ -2063,11 +2074,8 @@ begin
     paint_box := TPaintBox(Sender);
     canvas := paint_box.Canvas;
     bounds := paint_box.ClientRect;
-    canvas.Brush.Color := TColor(RGB(252, 253, 255));
+    canvas.Brush.Color := clWhite;
     canvas.FillRect(bounds);
-    canvas.Pen.Color := TColor(RGB(214, 223, 236));
-    canvas.Brush.Style := bsSolid;
-    canvas.Rectangle(bounds.Left, bounds.Top, bounds.Right, bounds.Bottom);
 
     SetBkMode(canvas.Handle, TRANSPARENT);
     canvas.Font.Name := get_selected_candidate_font_name;
@@ -2100,13 +2108,48 @@ begin
         line_height := text_height + vertical_padding;
     end;
 
+    preedit_text_height := text_height;
+    meta_vertical_padding := scale_ui(8);
+    if meta_vertical_padding < scale_ui(4) then
+    begin
+        meta_vertical_padding := scale_ui(4);
+    end;
+    meta_horizontal_padding := scale_ui(8);
+    if meta_horizontal_padding < scale_ui(4) then
+    begin
+        meta_horizontal_padding := scale_ui(4);
+    end;
+    preedit_height := preedit_text_height + meta_vertical_padding;
+
     horizontal_padding := scale_ui(6);
     item_gap := scale_ui(12);
-    row_top := bounds.Top + ((bounds.Bottom - bounds.Top - line_height) div 2);
-    if row_top < bounds.Top + scale_ui(2) then
+    content_height := preedit_height + line_height;
+    window_padding := scale_ui(1);
+    if window_padding < 1 then
     begin
-        row_top := bounds.Top + scale_ui(2);
+        window_padding := 1;
     end;
+    preview_height := content_height + (window_padding * 2);
+    if preview_height > (bounds.Bottom - bounds.Top) then
+    begin
+        preview_height := bounds.Bottom - bounds.Top;
+    end;
+    preview_rect := Rect(bounds.Left, bounds.Top, bounds.Right, bounds.Top + preview_height);
+    canvas.Brush.Color := TColor(RGB(252, 253, 255));
+    canvas.FillRect(preview_rect);
+    canvas.Pen.Color := TColor(RGB(214, 223, 236));
+    canvas.Brush.Style := bsClear;
+    canvas.Rectangle(preview_rect.Left, preview_rect.Top, preview_rect.Right, preview_rect.Bottom);
+    canvas.Brush.Style := bsSolid;
+
+    content_top := preview_rect.Top + window_padding;
+    preedit_rect := Rect(preview_rect.Left, content_top, preview_rect.Right, content_top + preedit_height);
+    InflateRect(preedit_rect, -meta_horizontal_padding, 0);
+    canvas.Font.Color := TColor(RGB(98, 112, 128));
+    SetTextColor(canvas.Handle, ColorToRGB(canvas.Font.Color));
+    draw_preview_text(c_preview_preedit_text, preedit_rect);
+
+    row_top := content_top + preedit_height;
     x := bounds.Left + scale_ui(6);
 
     for item_index := Low(c_preview_texts) to High(c_preview_texts) do
