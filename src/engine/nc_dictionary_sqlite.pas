@@ -5649,6 +5649,10 @@ var
             if query_syllable_count <= 2 then
             begin
                 Result := Min(Result, 180);
+                if Result < 160 then
+                begin
+                    Result := 160;
+                end;
             end;
             if Result < 1 then
             begin
