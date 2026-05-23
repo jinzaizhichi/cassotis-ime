@@ -2501,6 +2501,9 @@ var
     caret_point: TPoint;
     has_caret: Boolean;
     refresh_generation: UInt64;
+    preserved_candidate: TncCandidate;
+    preserve_candidate_after_remove: Boolean;
+    preserved_selected_index: Integer;
 
     function candidate_has_pinyin_tail(const candidate: TncCandidate): Boolean;
     var
@@ -2554,6 +2557,12 @@ begin
     caret_point := Point(0, 0);
     has_caret := False;
     refresh_generation := 0;
+    preserved_candidate.text := '';
+    preserved_candidate.comment := '';
+    preserved_candidate.score := 0;
+    preserved_candidate.source := cs_rule;
+    preserved_candidate.has_dict_weight := False;
+    preserved_candidate.dict_weight := 0;
     session := nil;
 
     m_lock.Acquire;
@@ -2577,6 +2586,20 @@ begin
         end;
 
         candidate_text := session.m_candidates[candidate_index].text;
+        preserve_candidate_after_remove := False;
+        preserved_selected_index := session.m_selected_index;
+        if (preserved_selected_index < 0) or (preserved_selected_index >= Length(session.m_candidates)) then
+        begin
+            preserved_selected_index := 0;
+        end;
+        if (preserved_selected_index >= 0) and (preserved_selected_index < Length(session.m_candidates)) and
+            (preserved_selected_index <> candidate_index) then
+        begin
+            preserved_candidate := session.m_candidates[preserved_selected_index];
+            preserve_candidate_after_remove := (Trim(preserved_candidate.text) <> '') and
+                (not SameText(Trim(preserved_candidate.text), Trim(candidate_text)));
+        end;
+
         pinyin_key := session.engine.get_last_lookup_key;
         if pinyin_key = '' then
         begin
@@ -2587,7 +2610,8 @@ begin
             pinyin_key := session.engine.get_composition_text;
         end;
 
-        if not session.engine.remove_user_candidate(pinyin_key, candidate_text) then
+        if not session.engine.remove_user_candidate(pinyin_key, candidate_text, preserved_candidate,
+            preserve_candidate_after_remove) then
         begin
             host_log('[WARN] remove user candidate failed in engine');
             Exit;

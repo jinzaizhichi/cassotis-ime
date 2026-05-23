@@ -3897,17 +3897,16 @@ var
 begin
     Result := False;
 
-    if should_suppress_exact_query_learning(pinyin, text) then
-    begin
-        Exit(True);
-    end;
-
     if user_weight > 0 then
     begin
         // dict_user rows represent explicit user-word confirmations. Keep
-        // them before generic noisy-phrase suppression, but not when the
-        // row is only a full-query composition of existing lexicon segments.
+        // them before generic noisy-phrase suppression.
         Exit(False);
+    end;
+
+    if should_suppress_exact_query_learning(pinyin, text) then
+    begin
+        Exit(True);
     end;
 
     if not is_suppressible_nonbase_exact_phrase(pinyin, text) then
@@ -8795,6 +8794,11 @@ begin
             begin
                 purge_user_entry_internal(pinyin_value, text_value, False, False);
             end
+            else if (last_used_value <= 0) and
+                should_suppress_exact_query_learning(pinyin_value, text_value) then
+            begin
+                purge_user_entry_internal(pinyin_value, text_value, False, False);
+            end
             else if should_suppress_constructed_user_phrase(pinyin_value, text_value,
                 commit_count, user_weight) then
             begin
@@ -8841,6 +8845,7 @@ var
     invalid_full_pinyin_alignment: Boolean;
     base_entry_exists: Boolean;
     suppress_exact_query_user_row: Boolean;
+    existing_user_entry: Boolean;
 begin
     pinyin_key := LowerCase(Trim(pinyin));
     if (pinyin_key = '') or (text = '') or (not is_valid_learning_text(text)) or
@@ -8874,9 +8879,12 @@ begin
     end;
 
     base_entry_exists := normalized_base_entry_exists(pinyin_key, text);
+    existing_user_entry := is_valid_user_text(text) and
+        explicit_user_entry_exists(pinyin_key, text);
     suppress_exact_query_user_row := invalid_full_pinyin_alignment or
-        (full_pinyin_input and should_suppress_exact_query_learning(
-        pinyin_key, text));
+        (full_pinyin_input and (not explicit_choice) and
+        (not existing_user_entry) and
+        should_suppress_exact_query_learning(pinyin_key, text));
 
     // A positive explicit selection for the same query/text pair should
     // cancel any earlier "remove candidate" feedback for that exact pair.
@@ -8966,7 +8974,7 @@ begin
     if (not is_valid_user_text(text)) or suppress_exact_query_user_row then
     begin
         // Keep query-level learning, but do not persist single chars or
-        // composed long-query confirmations as standalone user words.
+        // automatic composed-query confirmations as standalone user words.
         stmt := nil;
         try
             if m_user_connection.prepare(delete_user_sql, stmt) then
