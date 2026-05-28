@@ -111,7 +111,7 @@ type
             const text: string): Boolean;
         function is_nonbase_multi_segment_composed_exact_phrase(const pinyin: string;
             const text: string): Boolean;
-        function is_nonbase_wo_tail_phrase_exact_phrase(const pinyin: string;
+        function is_nonbase_pronoun_tail_phrase_exact_phrase(const pinyin: string;
             const text: string): Boolean;
         function is_suppressible_nonbase_exact_phrase(const pinyin: string; const text: string): Boolean;
         function is_likely_noisy_constructed_phrase(const pinyin: string; const text: string;
@@ -3807,7 +3807,7 @@ begin
         is_nonbase_multi_segment_composed_exact_phrase(pinyin, text);
 end;
 
-function TncSqliteDictionary.is_nonbase_wo_tail_phrase_exact_phrase(const pinyin: string;
+function TncSqliteDictionary.is_nonbase_pronoun_tail_phrase_exact_phrase(const pinyin: string;
     const text: string): Boolean;
 var
     pinyin_key: string;
@@ -3816,6 +3816,14 @@ var
     text_units: TArray<string>;
     tail_pinyin: string;
     tail_text: string;
+
+    function head_matches_local: Boolean;
+    begin
+        Result := ((SameText(syllables[0], 'wo')) and
+            (text_units[0] = string(Char($6211)))) or
+            ((SameText(syllables[0], 'ni')) and
+            (text_units[0] = string(Char($4F60))));
+    end;
 begin
     Result := False;
     pinyin_key := LowerCase(Trim(pinyin));
@@ -3835,8 +3843,7 @@ begin
     begin
         Exit;
     end;
-    if (not SameText(syllables[0], 'wo')) or
-        (text_units[0] <> string(Char($6211))) then
+    if not head_matches_local then
     begin
         Exit;
     end;
@@ -8892,7 +8899,7 @@ var
     invalid_full_pinyin_alignment: Boolean;
     base_entry_exists: Boolean;
     suppress_exact_query_user_row: Boolean;
-    suppress_wo_tail_phrase_user_row: Boolean;
+    suppress_pronoun_tail_phrase_user_row: Boolean;
     existing_user_entry: Boolean;
 begin
     pinyin_key := LowerCase(Trim(pinyin));
@@ -8929,10 +8936,10 @@ begin
     base_entry_exists := normalized_base_entry_exists(pinyin_key, text);
     existing_user_entry := is_valid_user_text(text) and
         explicit_user_entry_exists(pinyin_key, text);
-    suppress_wo_tail_phrase_user_row := full_pinyin_input and
-        is_nonbase_wo_tail_phrase_exact_phrase(pinyin_key, text);
+    suppress_pronoun_tail_phrase_user_row := full_pinyin_input and
+        is_nonbase_pronoun_tail_phrase_exact_phrase(pinyin_key, text);
     suppress_exact_query_user_row := invalid_full_pinyin_alignment or
-        suppress_wo_tail_phrase_user_row or
+        suppress_pronoun_tail_phrase_user_row or
         (full_pinyin_input and (not explicit_choice) and
         (not existing_user_entry) and
         should_suppress_exact_query_learning(pinyin_key, text));
