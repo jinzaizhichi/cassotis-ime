@@ -4242,8 +4242,7 @@ begin
         Exit;
     end;
     if (not is_full_pinyin_key(pinyin_key)) or
-        normalized_base_entry_exists(pinyin_key, text_key) or
-        (not has_any_base_phrase_for_pinyin(pinyin_key)) then
+        normalized_base_entry_exists(pinyin_key, text_key) then
     begin
         Exit;
     end;
@@ -5717,7 +5716,7 @@ var
                 ((latest_query_choice_text <> '') and SameText(latest_query_choice_text, key)) then
             begin
                 low_evidence_admin_alias :=
-                    is_low_evidence_admin_place_alias_user_entry(query_key, key, '', -1, -1);
+                    is_low_evidence_admin_place_alias_user_entry(query_key, key, '', 0, 0);
             end;
             if (not low_evidence_admin_alias) and
                 (choice_bonus >= c_recent_explicit_user_choice_bonus_min) then
@@ -6085,7 +6084,7 @@ begin
                             Continue;
                         end;
                         if is_low_evidence_admin_place_alias_user_entry(query_key,
-                            text_value, '', score_value) then
+                            text_value, '', 0, 0) then
                         begin
                             Continue;
                         end;
@@ -6903,6 +6902,8 @@ var
         c_len2_prefix_ratio_penalty_threshold = 2.4;
         c_len2_prefix_ratio_penalty_factor = 92.0;
         c_len2_prefix_ratio_penalty_cap = 180;
+        c_len2_reduplicated_exact_bonus = 160;
+        c_len2_reduplicated_weight_factor = 0.85;
     var
         candidate_item: TncCandidate;
         candidate_pinyin_key: string;
@@ -6932,6 +6933,40 @@ var
         expensive_rerank_limit: Integer;
         retroflex_pair_count: Integer;
         prefix_productivity_ratio: Double;
+
+        function get_len2_reduplicated_exact_bonus_local: Integer;
+        var
+            initial_value: string;
+        begin
+            Result := 0;
+            if (query_unit_count <> 2) or (Length(query_key) <> 2) or
+                (query_key[1] <> query_key[2]) then
+            begin
+                Exit;
+            end;
+            if (candidate_unit_count <> 2) or (Length(candidate_syllables) <> 2) or
+                (Length(candidate_text_units) <> 2) then
+            begin
+                Exit;
+            end;
+            if (candidate_text_units[0] = '') or
+                (candidate_text_units[0] <> candidate_text_units[1]) then
+            begin
+                Exit;
+            end;
+            if (candidate_syllables[0] = '') or
+                (candidate_syllables[0] <> candidate_syllables[1]) then
+            begin
+                Exit;
+            end;
+            initial_value := extract_syllable_initial(candidate_syllables[0]);
+            if (initial_value = '') or (initial_value[1] <> query_key[1]) then
+            begin
+                Exit;
+            end;
+            Result := c_len2_reduplicated_exact_bonus +
+                Round(candidate_item.dict_weight * c_len2_reduplicated_weight_factor);
+        end;
     begin
         if full_pinyin_query or mixed_mode or
             (Length(query_key) < 2) or
@@ -7055,6 +7090,7 @@ var
                                 Round((c_len2_weak_unit_penalty_floor - min_constituent_weight) *
                                     c_len2_weak_unit_penalty_factor)));
                         end;
+                        Inc(reranked_score, get_len2_reduplicated_exact_bonus_local);
                     end;
                 end;
 
@@ -8305,7 +8341,7 @@ begin
                         end;
                         score_value := m_user_connection.column_int(stmt, 1);
                         if is_low_evidence_admin_place_alias_user_entry(query_key,
-                            text_value, '', score_value) then
+                            text_value, '', 0, 0) then
                         begin
                             Inc(skipped_noisy_user_count);
                             step_result := m_user_connection.step(stmt);
@@ -8939,6 +8975,7 @@ const
         'UNION ALL ' +
         'SELECT pinyin, text, 0 AS user_weight, commit_count, last_used FROM dict_user_stats' +
         ') GROUP BY pinyin, text';
+    delete_user_sql = 'DELETE FROM dict_user WHERE pinyin = ?1 AND text = ?2';
 var
     stmt: Psqlite3_stmt;
     step_result: Integer;
@@ -8948,6 +8985,31 @@ var
     user_weight: Integer;
     commit_count: Integer;
     last_used_value: Int64;
+
+    procedure delete_explicit_user_entry_only(const local_pinyin: string; const local_text: string);
+    var
+        local_stmt: Psqlite3_stmt;
+    begin
+        if (local_pinyin = '') or (local_text = '') or (m_user_connection = nil) then
+        begin
+            Exit;
+        end;
+
+        local_stmt := nil;
+        try
+            if m_user_connection.prepare(delete_user_sql, local_stmt) and
+                m_user_connection.bind_text(local_stmt, 1, local_pinyin) and
+                m_user_connection.bind_text(local_stmt, 2, local_text) then
+            begin
+                m_user_connection.step(local_stmt);
+            end;
+        finally
+            if local_stmt <> nil then
+            begin
+                m_user_connection.finalize(local_stmt);
+            end;
+        end;
+    end;
 begin
     if not m_user_ready then
     begin
@@ -8985,6 +9047,13 @@ begin
                 should_suppress_exact_query_learning(pinyin_value, text_value) then
             begin
                 purge_user_entry_internal(pinyin_value, text_value, False, False);
+            end
+            else if is_low_evidence_admin_place_alias_user_entry(pinyin_value,
+                text_value, '', 0, 0) then
+            begin
+                // Keep stats/latest learning, but do not expose derived place
+                // aliases such as "jintian -> 金田" as removable user words.
+                delete_explicit_user_entry_only(pinyin_value, text_value);
             end
             else if should_suppress_constructed_user_phrase(pinyin_value, text_value,
                 commit_count, user_weight) then
@@ -9033,6 +9102,7 @@ var
     base_entry_exists: Boolean;
     suppress_exact_query_user_row: Boolean;
     suppress_structured_rule_phrase_user_row: Boolean;
+    suppress_admin_alias_user_row: Boolean;
     existing_user_entry: Boolean;
 begin
     pinyin_key := LowerCase(Trim(pinyin));
@@ -9071,8 +9141,11 @@ begin
         explicit_user_entry_exists(pinyin_key, text);
     suppress_structured_rule_phrase_user_row := full_pinyin_input and
         is_nonbase_structured_rule_exact_phrase(pinyin_key, text);
+    suppress_admin_alias_user_row := full_pinyin_input and
+        is_low_evidence_admin_place_alias_user_entry(pinyin_key, text, '', 0, 0);
     suppress_exact_query_user_row := invalid_full_pinyin_alignment or
         suppress_structured_rule_phrase_user_row or
+        suppress_admin_alias_user_row or
         (full_pinyin_input and (not explicit_choice) and
         (not existing_user_entry) and
         should_suppress_exact_query_learning(pinyin_key, text));
