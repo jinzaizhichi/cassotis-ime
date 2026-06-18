@@ -3840,6 +3840,8 @@ var
             (suffix_text = string(Char($7684)))) or
             ((SameText(suffix_pinyin, 'le')) and
             (suffix_text = string(Char($4E86)))) or
+            ((SameText(suffix_pinyin, 'zhe')) and
+            (suffix_text = string(Char($7740)))) or
             ((SameText(suffix_pinyin, 'ba')) and
             (suffix_text = string(Char($5427)))) or
             ((SameText(suffix_pinyin, 'ma')) and
@@ -3931,6 +3933,7 @@ var
         suffix_text := text_units[High(text_units)];
         suffix_pinyin := '';
         if not (try_suffix_local('de') or try_suffix_local('le') or
+            try_suffix_local('zhe') or
             try_suffix_local('ba') or try_suffix_local('ma') or
             try_suffix_local('la')) then
         begin
