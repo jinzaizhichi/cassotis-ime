@@ -93,6 +93,9 @@ type
         procedure populate_pinyin_followup_popularity_scores(const pinyin_keys: TArray<string>;
             const target_scores: TDictionary<string, Integer>);
         function get_single_char_exact_weight(const pinyin: string; const text_unit: string): Integer;
+        function get_top_single_char_exact_weight(const pinyin: string): Integer;
+        function should_ignore_weak_single_char_query_choice(const pinyin: string;
+            const text_unit: string; const commit_count: Integer): Boolean;
         function get_user_entry_count(const connection: TncSqliteConnection; out count: Integer): Boolean;
         procedure migrate_user_entries;
         function exact_base_entry_exists(const pinyin: string; const text: string): Boolean;
@@ -4668,6 +4671,101 @@ begin
     end;
 end;
 
+function TncSqliteDictionary.get_top_single_char_exact_weight(const pinyin: string): Integer;
+const
+    query_sql =
+        'SELECT COALESCE(MAX(weight), 0) FROM dict_base ' +
+        'WHERE pinyin = ?1 AND length(text) = 1';
+var
+    stmt: Psqlite3_stmt;
+    step_result: Integer;
+    normalized_pinyin: string;
+    cache_key: string;
+begin
+    Result := 0;
+    normalized_pinyin := normalize_compact_pinyin_key(pinyin);
+    if (normalized_pinyin = '') or (not ensure_open) or (not m_base_ready) or
+        (m_base_connection = nil) then
+    begin
+        Exit;
+    end;
+
+    cache_key := normalized_pinyin + #9 + '<top-single-char>';
+    if (m_single_char_weight_cache <> nil) and
+        m_single_char_weight_cache.TryGetValue(cache_key, Result) then
+    begin
+        Exit;
+    end;
+
+    stmt := nil;
+    try
+        if not (m_base_connection.prepare(query_sql, stmt) and
+            m_base_connection.bind_text(stmt, 1, normalized_pinyin)) then
+        begin
+            Exit;
+        end;
+
+        step_result := m_base_connection.step(stmt);
+        if step_result = SQLITE_ROW then
+        begin
+            Result := m_base_connection.column_int(stmt, 0);
+            if Result < 0 then
+            begin
+                Result := 0;
+            end;
+        end;
+    finally
+        if stmt <> nil then
+        begin
+            m_base_connection.finalize(stmt);
+        end;
+    end;
+
+    if m_single_char_weight_cache <> nil then
+    begin
+        m_single_char_weight_cache.AddOrSetValue(cache_key, Result);
+    end;
+end;
+
+function TncSqliteDictionary.should_ignore_weak_single_char_query_choice(const pinyin: string;
+    const text_unit: string; const commit_count: Integer): Boolean;
+const
+    c_reliable_commit_count = 2;
+    c_rare_single_char_weight_max = 180;
+    c_rare_single_char_gap_min = 240;
+    c_rare_single_char_ratio_min = 3;
+var
+    pinyin_key: string;
+    text_key: string;
+    candidate_weight: Integer;
+    top_weight: Integer;
+begin
+    Result := False;
+    if commit_count >= c_reliable_commit_count then
+    begin
+        Exit;
+    end;
+
+    pinyin_key := normalize_compact_pinyin_key(pinyin);
+    text_key := Trim(text_unit);
+    if (pinyin_key = '') or (text_key = '') or (not is_full_pinyin_key(pinyin_key)) or
+        (get_valid_cjk_codepoint_count(text_key) <> 1) then
+    begin
+        Exit;
+    end;
+
+    candidate_weight := get_single_char_exact_weight(pinyin_key, text_key);
+    top_weight := get_top_single_char_exact_weight(pinyin_key);
+    if (candidate_weight <= 0) or (top_weight <= 0) or (top_weight <= candidate_weight) then
+    begin
+        Exit;
+    end;
+
+    Result := (candidate_weight <= c_rare_single_char_weight_max) and
+        ((top_weight - candidate_weight) >= c_rare_single_char_gap_min) and
+        (top_weight >= candidate_weight * c_rare_single_char_ratio_min);
+end;
+
 function TncSqliteDictionary.get_user_entry_count(const connection: TncSqliteConnection; out count: Integer): Boolean;
 const
     sql_text = 'SELECT COUNT(1) FROM dict_user';
@@ -7384,6 +7482,10 @@ var
                 begin
                     Continue;
                 end;
+                if full_pinyin_query and (get_valid_cjk_codepoint_count(candidate_item.text) = 1) then
+                begin
+                    Continue;
+                end;
 
                 if not text_learning_bonus_cache.TryGetValue(candidate_item.text, bonus_value) then
                 begin
@@ -8363,6 +8465,12 @@ begin
                             Continue;
                         end;
                         if should_suppress_constructed_user_phrase(query_key, text_value, commit_count, 0) then
+                        begin
+                            Inc(skipped_noisy_user_count);
+                            step_result := m_user_connection.step(stmt);
+                            Continue;
+                        end;
+                        if should_ignore_weak_single_char_query_choice(query_key, text_value, commit_count) then
                         begin
                             Inc(skipped_noisy_user_count);
                             step_result := m_user_connection.step(stmt);
@@ -9613,7 +9721,9 @@ begin
             // row is missing, otherwise single-character learning can disappear
             // on restart. When a stats row exists, use its decayed score instead
             // so stale one-off choices do not permanently override base entries.
-            if has_latest_choice_match then
+            if has_latest_choice_match and
+                (not should_ignore_weak_single_char_query_choice(normalized_query,
+                text_key, 0)) then
             begin
                 Result := latest_bonus;
             end;
@@ -9622,6 +9732,10 @@ begin
 
         commit_count := m_user_connection.column_int(m_stmt_query_choice_bonus, 0);
         if commit_count <= 0 then
+        begin
+            Exit;
+        end;
+        if should_ignore_weak_single_char_query_choice(normalized_query, text_key, commit_count) then
         begin
             Exit;
         end;
@@ -9732,7 +9846,10 @@ end;
 function TncSqliteDictionary.get_query_latest_choice_text(const query_key: string): string;
 const
     query_sql =
-        'SELECT text, last_used FROM dict_user_query_latest WHERE query_pinyin = ?1 LIMIT 1';
+        'SELECT l.text, l.last_used, COALESCE(s.commit_count, 0) ' +
+        'FROM dict_user_query_latest l ' +
+        'LEFT JOIN dict_user_stats s ON s.pinyin = l.query_pinyin AND s.text = l.text ' +
+        'WHERE l.query_pinyin = ?1 LIMIT 1';
     fallback_query_sql =
         'SELECT text, commit_count, last_used FROM dict_user_stats ' +
         'WHERE pinyin = ?1 ORDER BY last_used DESC, commit_count DESC LIMIT 16';
@@ -9746,6 +9863,7 @@ var
     now_unix: Int64;
     age_seconds: Int64;
     use_fallback_scan: Boolean;
+    commit_count: Integer;
 begin
     Result := '';
     normalized_query := LowerCase(Trim(query_key));
@@ -9788,6 +9906,7 @@ begin
         begin
             candidate_text := Trim(m_user_connection.column_text(m_stmt_query_latest_choice_text, 0));
             last_used_unix := m_user_connection.column_int(m_stmt_query_latest_choice_text, 1);
+            commit_count := m_user_connection.column_int(m_stmt_query_latest_choice_text, 2);
             if last_used_unix > 0 then
             begin
                 now_unix := get_unix_time_now;
@@ -9811,6 +9930,13 @@ begin
                 (not full_pinyin_text_alignment_valid(normalized_query,
                 candidate_text))) or
                 (get_candidate_penalty(normalized_query, candidate_text) > 0)) then
+            begin
+                use_fallback_scan := True;
+            end;
+
+            if (not use_fallback_scan) and
+                should_ignore_weak_single_char_query_choice(normalized_query,
+                candidate_text, commit_count) then
             begin
                 use_fallback_scan := True;
             end;
@@ -9841,6 +9967,7 @@ begin
                     candidate_text := Trim(m_user_connection.column_text(stmt, 0));
                     if candidate_text <> '' then
                     begin
+                        commit_count := m_user_connection.column_int(stmt, 1);
                         last_used_unix := m_user_connection.column_int(stmt, 2);
                         if last_used_unix > 0 then
                         begin
@@ -9863,7 +9990,9 @@ begin
                             full_pinyin_text_alignment_valid(normalized_query,
                             candidate_text)) and
                             (get_candidate_penalty(normalized_query,
-                            candidate_text) <= 0) then
+                            candidate_text) <= 0) and
+                            (not should_ignore_weak_single_char_query_choice(
+                            normalized_query, candidate_text, commit_count)) then
                         begin
                             Result := candidate_text;
                             Break;
