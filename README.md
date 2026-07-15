@@ -23,7 +23,7 @@ The Chinese name **言泉** (Yanquan, "Spring of Words") matches Cassotis as a p
 The project focus is:
 - build a stable TSF-based IME foundation,
 - keep the architecture modular (TSF DLL + host process + tools),
-- and explore AI/LLM-assisted input in later stages.
+- improve corpus-trained local language models while continuing to explore optional LLM-assisted input.
 
 ## Current Status
 - TSF text service pipeline is available (registration, activation, composition lifecycle).
@@ -87,6 +87,11 @@ Main rebuild entry:
 .\rebuild_dict.ps1
 ```
 
+## Corpus-Trained AI Ranking for Long Sentences
+Cassotis v1.1.0 introduces an offline-trained local statistical language model for long-sentence path ranking. The training pipeline learns lexicon-constrained word bigram/trigram transition priors and a smoothed character trigram model from cleaned general Chinese and fiction corpora. The Benchmark-16300 corpus is kept separate and is not used for training.
+
+At runtime, the trained model is quantized into the local dictionary database. Its probability scores participate in long-sentence lattice/N-best path scoring and conservatively rerank complete candidates. Candidate generation remains dictionary-constrained, and short exact-query ranking bypasses this model. No neural-network runtime, network connection, or GPU is required.
+
 ## Long Sentence Benchmark Results
 See [BENCHMARK.md](BENCHMARK.md) for the Benchmark-16300 methodology, corpus source, and scoring rules.
 
@@ -94,6 +99,7 @@ Corpus: 16,300 eligible Chinese sentences from the developer's own novel [**Eleg
 
 | Version | Top1 | Top2 | Mean (ms) | P95 (ms) | Max (ms) |
 |---|---:|---:|---:|---:|---:|
+| `v1.1.0` | 6677/16300 (40.96%) | 7067/16300 (43.36%) | 73.18 | 234 | 2750 |
 | `v1.0.0` | 6106/16300 (37.46%) | 6857/16300 (42.07%) | 71.49 | 219 | 5344 |
 | `v0.8.5` | 6097/16300 (37.40%) | 6847/16300 (42.01%) | 520.05 | 1203 | 13297 |
 | `v0.7.0` | 5368/16300 (32.93%) | 6110/16300 (37.48%) | — | — | — |
