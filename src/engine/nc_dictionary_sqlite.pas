@@ -151,9 +151,8 @@ type
         function ensure_char_lm_available: Boolean;
         procedure cache_char_lm_entry(const ngram: string;
             const entry: TncCharLmCacheEntry);
-        function ensure_char_lm_entries_cached(const ngrams: TArray<string>): Boolean;
-        function try_get_char_lm_entry(const ngram: string;
-            out score: Integer; out backoff: Integer): Boolean;
+        function load_char_lm_entries(const ngrams: TArray<string>;
+            const entries: TDictionary<string, TncCharLmCacheEntry>): Boolean;
         procedure purge_user_entry_internal(const pinyin: string; const text: string;
             const apply_penalty: Boolean; const purge_all_by_text: Boolean);
         procedure prune_user_entries_existing_in_base;
@@ -10706,8 +10705,9 @@ begin
     m_char_lm_cache_order.Enqueue(ngram);
 end;
 
-function TncSqliteDictionary.ensure_char_lm_entries_cached(
-    const ngrams: TArray<string>): Boolean;
+function TncSqliteDictionary.load_char_lm_entries(
+    const ngrams: TArray<string>;
+    const entries: TDictionary<string, TncCharLmCacheEntry>): Boolean;
 const
     c_query_chunk_size = 400;
 var
@@ -10724,7 +10724,7 @@ var
     step_result: Integer;
 begin
     Result := False;
-    if not ensure_char_lm_available then
+    if (entries = nil) or (not ensure_char_lm_available) then
     begin
         Exit;
     end;
@@ -10739,8 +10739,12 @@ begin
                 Continue;
             end;
             seen.Add(ngram, True);
-            if (m_char_lm_entry_cache = nil) or
-                (not m_char_lm_entry_cache.ContainsKey(ngram)) then
+            if (m_char_lm_entry_cache <> nil) and
+                m_char_lm_entry_cache.TryGetValue(ngram, entry) then
+            begin
+                entries.AddOrSetValue(ngram, entry);
+            end
+            else
             begin
                 missing.Add(ngram);
             end;
@@ -10786,6 +10790,7 @@ begin
                     entry.found := True;
                     entry.score := m_base_connection.column_int(stmt, 1);
                     entry.backoff := m_base_connection.column_int(stmt, 2);
+                    entries.AddOrSetValue(row_ngram, entry);
                     cache_char_lm_entry(row_ngram, entry);
                     step_result := m_base_connection.step(stmt);
                 end;
@@ -10807,8 +10812,9 @@ begin
             for chunk_idx := 0 to chunk_count - 1 do
             begin
                 ngram := missing[chunk_start + chunk_idx];
-                if not m_char_lm_entry_cache.ContainsKey(ngram) then
+                if not entries.ContainsKey(ngram) then
                 begin
+                    entries.Add(ngram, entry);
                     cache_char_lm_entry(ngram, entry);
                 end;
             end;
@@ -10821,22 +10827,6 @@ begin
     end;
 end;
 
-function TncSqliteDictionary.try_get_char_lm_entry(const ngram: string;
-    out score: Integer; out backoff: Integer): Boolean;
-var
-    entry: TncCharLmCacheEntry;
-begin
-    score := 0;
-    backoff := 0;
-    Result := (m_char_lm_entry_cache <> nil) and
-        m_char_lm_entry_cache.TryGetValue(ngram, entry) and entry.found;
-    if Result then
-    begin
-        score := entry.score;
-        backoff := entry.backoff;
-    end;
-end;
-
 function TncSqliteDictionary.get_char_lm_text_scores(const texts: TArray<string>;
     out scores: TArray<Integer>): Boolean;
 const
@@ -10845,6 +10835,7 @@ const
     c_unknown_score = -30000;
 var
     wanted: TDictionary<string, Boolean>;
+    loaded_entries: TDictionary<string, TncCharLmCacheEntry>;
     wanted_keys: TArray<string>;
     padded_units: TArray<string>;
     text_units: TArray<string>;
@@ -10860,6 +10851,24 @@ var
     bigram: string;
     trigram: string;
     trigram_context: string;
+    fourgram: string;
+    fourgram_context: string;
+
+    function try_get_loaded_entry(const ngram: string;
+        out score: Integer; out backoff: Integer): Boolean;
+    var
+        entry: TncCharLmCacheEntry;
+    begin
+        score := 0;
+        backoff := 0;
+        Result := (loaded_entries <> nil) and
+            loaded_entries.TryGetValue(ngram, entry) and entry.found;
+        if Result then
+        begin
+            score := entry.score;
+            backoff := entry.backoff;
+        end;
+    end;
 begin
     SetLength(scores, 0);
     Result := False;
@@ -10868,121 +10877,151 @@ begin
         Exit;
     end;
 
-    wanted := TDictionary<string, Boolean>.Create;
+    loaded_entries := TDictionary<string, TncCharLmCacheEntry>.Create;
     try
+        wanted := TDictionary<string, Boolean>.Create;
+        try
+            for text_idx := 0 to High(texts) do
+            begin
+                text_units := split_text_units_local(Trim(texts[text_idx]));
+                if Length(text_units) <= 0 then
+                begin
+                    Continue;
+                end;
+                SetLength(padded_units, Length(text_units) + 4);
+                padded_units[0] := c_begin_marker;
+                padded_units[1] := c_begin_marker;
+                padded_units[2] := c_begin_marker;
+                for unit_idx := 0 to High(text_units) do
+                begin
+                    padded_units[unit_idx + 3] := text_units[unit_idx];
+                end;
+                padded_units[High(padded_units)] := c_end_marker;
+                for padded_idx := 3 to High(padded_units) do
+                begin
+                    unigram := padded_units[padded_idx];
+                    bigram := padded_units[padded_idx - 1] + unigram;
+                    trigram_context := padded_units[padded_idx - 2] +
+                        padded_units[padded_idx - 1];
+                    trigram := trigram_context + unigram;
+                    fourgram_context := padded_units[padded_idx - 3] +
+                        trigram_context;
+                    fourgram := fourgram_context + unigram;
+                    wanted.AddOrSetValue(unigram, True);
+                    wanted.AddOrSetValue(padded_units[padded_idx - 1], True);
+                    wanted.AddOrSetValue(bigram, True);
+                    wanted.AddOrSetValue(trigram_context, True);
+                    wanted.AddOrSetValue(trigram, True);
+                    wanted.AddOrSetValue(fourgram_context, True);
+                    wanted.AddOrSetValue(fourgram, True);
+                end;
+            end;
+
+            wanted_keys := wanted.Keys.ToArray;
+            if (Length(wanted_keys) <= 0) or
+                (not load_char_lm_entries(wanted_keys, loaded_entries)) then
+            begin
+                Exit;
+            end;
+        finally
+            wanted.Free;
+        end;
+
+        SetLength(scores, Length(texts));
         for text_idx := 0 to High(texts) do
         begin
             text_units := split_text_units_local(Trim(texts[text_idx]));
-            if Length(text_units) <= 0 then
-            begin
-                Continue;
-            end;
-            SetLength(padded_units, Length(text_units) + 3);
+            SetLength(padded_units, Length(text_units) + 4);
             padded_units[0] := c_begin_marker;
             padded_units[1] := c_begin_marker;
+            padded_units[2] := c_begin_marker;
             for unit_idx := 0 to High(text_units) do
             begin
-                padded_units[unit_idx + 2] := text_units[unit_idx];
+                padded_units[unit_idx + 3] := text_units[unit_idx];
             end;
             padded_units[High(padded_units)] := c_end_marker;
-            for padded_idx := 2 to High(padded_units) do
+            total_score := 0;
+            predicted := 0;
+            for padded_idx := 3 to High(padded_units) do
             begin
                 unigram := padded_units[padded_idx];
                 bigram := padded_units[padded_idx - 1] + unigram;
                 trigram_context := padded_units[padded_idx - 2] +
                     padded_units[padded_idx - 1];
                 trigram := trigram_context + unigram;
-                wanted.AddOrSetValue(unigram, True);
-                wanted.AddOrSetValue(padded_units[padded_idx - 1], True);
-                wanted.AddOrSetValue(bigram, True);
-                wanted.AddOrSetValue(trigram_context, True);
-                wanted.AddOrSetValue(trigram, True);
-            end;
-        end;
-
-        wanted_keys := wanted.Keys.ToArray;
-        if (Length(wanted_keys) <= 0) or
-            (not ensure_char_lm_entries_cached(wanted_keys)) then
-        begin
-            Exit;
-        end;
-    finally
-        wanted.Free;
-    end;
-
-    SetLength(scores, Length(texts));
-    for text_idx := 0 to High(texts) do
-    begin
-        text_units := split_text_units_local(Trim(texts[text_idx]));
-        SetLength(padded_units, Length(text_units) + 3);
-        padded_units[0] := c_begin_marker;
-        padded_units[1] := c_begin_marker;
-        for unit_idx := 0 to High(text_units) do
-        begin
-            padded_units[unit_idx + 2] := text_units[unit_idx];
-        end;
-        padded_units[High(padded_units)] := c_end_marker;
-        total_score := 0;
-        predicted := 0;
-        for padded_idx := 2 to High(padded_units) do
-        begin
-            unigram := padded_units[padded_idx];
-            bigram := padded_units[padded_idx - 1] + unigram;
-            trigram_context := padded_units[padded_idx - 2] +
-                padded_units[padded_idx - 1];
-            trigram := trigram_context + unigram;
-            if try_get_char_lm_entry(trigram, entry_score,
-                entry_backoff) then
-            begin
-                current_score := entry_score;
-            end
-            else
-            begin
-                if try_get_char_lm_entry(bigram, entry_score,
+                fourgram_context := padded_units[padded_idx - 3] +
+                    trigram_context;
+                fourgram := fourgram_context + unigram;
+                if try_get_loaded_entry(fourgram, entry_score,
                     entry_backoff) then
                 begin
                     current_score := entry_score;
                 end
                 else
                 begin
-                    if try_get_char_lm_entry(unigram, entry_score,
+                    if try_get_loaded_entry(trigram, entry_score,
                         entry_backoff) then
                     begin
                         current_score := entry_score;
                     end
                     else
                     begin
-                        current_score := c_unknown_score;
+                        if try_get_loaded_entry(bigram, entry_score,
+                            entry_backoff) then
+                        begin
+                            current_score := entry_score;
+                        end
+                        else
+                        begin
+                            if try_get_loaded_entry(unigram, entry_score,
+                                entry_backoff) then
+                            begin
+                                current_score := entry_score;
+                            end
+                            else
+                            begin
+                                current_score := c_unknown_score;
+                            end;
+                            if try_get_loaded_entry(
+                                padded_units[padded_idx - 1], entry_score,
+                                entry_backoff) then
+                            begin
+                                Inc(current_score, entry_backoff);
+                            end;
+                        end;
+                        if try_get_loaded_entry(trigram_context, entry_score,
+                            entry_backoff) then
+                        begin
+                            Inc(current_score, entry_backoff);
+                        end;
                     end;
-                    if try_get_char_lm_entry(padded_units[padded_idx - 1],
-                        entry_score, entry_backoff) then
+                    if try_get_loaded_entry(fourgram_context, entry_score,
+                        entry_backoff) then
                     begin
                         Inc(current_score, entry_backoff);
                     end;
                 end;
-                if try_get_char_lm_entry(trigram_context, entry_score,
-                    entry_backoff) then
-                begin
-                    Inc(current_score, entry_backoff);
-                end;
+                Inc(total_score, current_score);
+                Inc(predicted);
             end;
-            Inc(total_score, current_score);
-            Inc(predicted);
+            if predicted <= 0 then
+            begin
+                scores[text_idx] := c_unknown_score;
+            end
+            else if total_score >= 0 then
+            begin
+                scores[text_idx] := total_score div predicted;
+            end
+            else
+            begin
+                scores[text_idx] :=
+                    -((-total_score + predicted - 1) div predicted);
+            end;
         end;
-        if predicted <= 0 then
-        begin
-            scores[text_idx] := c_unknown_score;
-        end
-        else if total_score >= 0 then
-        begin
-            scores[text_idx] := total_score div predicted;
-        end
-        else
-        begin
-            scores[text_idx] := -((-total_score + predicted - 1) div predicted);
-        end;
+        Result := True;
+    finally
+        loaded_entries.Free;
     end;
-    Result := True;
 end;
 
 function TncSqliteDictionary.get_compound_tail_support(const tail_text: string): Integer;
