@@ -166,7 +166,8 @@ type
         function load_char_lm_entries(const ngrams: TArray<string>;
             const entries: TDictionary<string, TncCharLmCacheEntry>): Boolean;
         function get_char_lm_text_scores_internal(const texts: TArray<string>;
-            out scores: TArray<Integer>; const include_begin_marker: Boolean): Boolean;
+            out scores: TArray<Integer>; const include_begin_marker: Boolean;
+            const left_context: string; const include_end_marker: Boolean): Boolean;
         procedure purge_user_entry_internal(const pinyin: string; const text: string;
             const apply_penalty: Boolean; const purge_all_by_text: Boolean);
         procedure prune_user_entries_existing_in_base;
@@ -224,6 +225,8 @@ type
             out scores: TArray<Integer>): Boolean; override;
         function get_char_lm_suffix_scores(const texts: TArray<string>;
             out scores: TArray<Integer>): Boolean; override;
+        function get_char_lm_continuation_scores(const left_context: string;
+            const texts: TArray<string>; out scores: TArray<Integer>): Boolean; override;
         function get_query_segment_path_penalty(const query_key: string; const encoded_path: string): Integer; override;
         function get_compound_tail_support(const tail_text: string): Integer; override;
         function is_base_entry(const pinyin: string; const text: string): Boolean; override;
@@ -11042,7 +11045,8 @@ end;
 
 function TncSqliteDictionary.get_char_lm_text_scores_internal(
     const texts: TArray<string>; out scores: TArray<Integer>;
-    const include_begin_marker: Boolean): Boolean;
+    const include_begin_marker: Boolean; const left_context: string;
+    const include_end_marker: Boolean): Boolean;
 const
     c_begin_marker = #2;
     c_end_marker = #3;
@@ -11055,11 +11059,16 @@ var
     prepared_units: TArray<TArray<string>>;
     normalized_texts: TArray<string>;
     text_units: TArray<string>;
+    context_units: TArray<string>;
+    context_prefix_units: TArray<string>;
     text_idx: Integer;
     unit_idx: Integer;
+    context_idx: Integer;
+    context_start_idx: Integer;
     padded_idx: Integer;
     first_predicted_idx: Integer;
     prefix_count: Integer;
+    end_marker_count: Integer;
     predicted: Integer;
     current_score: Integer;
     entry_score: Integer;
@@ -11075,6 +11084,7 @@ var
     cache_key: string;
     cache_prefix: string;
     normalized_text: string;
+    normalized_context: string;
     all_scores_cached: Boolean;
 
     function try_get_loaded_entry(const ngram: string;
@@ -11100,9 +11110,25 @@ begin
     begin
         Exit;
     end;
+    SetLength(context_prefix_units, 0);
+    normalized_context := '';
     if include_begin_marker then
     begin
         cache_prefix := 'B' + #1;
+    end
+    else if Trim(left_context) <> '' then
+    begin
+        context_units := split_text_units_local(Trim(left_context));
+        context_start_idx := Max(0, Length(context_units) - 3);
+        SetLength(context_prefix_units,
+            Length(context_units) - context_start_idx);
+        for context_idx := context_start_idx to High(context_units) do
+        begin
+            context_prefix_units[context_idx - context_start_idx] :=
+                context_units[context_idx];
+            normalized_context := normalized_context + context_units[context_idx];
+        end;
+        cache_prefix := 'C' + #1 + normalized_context + #1;
     end
     else
     begin
@@ -11154,20 +11180,39 @@ begin
             end
             else
             begin
-                prefix_count := 0;
+                prefix_count := Length(context_prefix_units);
             end;
-            SetLength(padded_units, Length(text_units) + prefix_count + 1);
+            if include_end_marker then
+            begin
+                end_marker_count := 1;
+            end
+            else
+            begin
+                end_marker_count := 0;
+            end;
+            SetLength(padded_units, Length(text_units) + prefix_count +
+                end_marker_count);
             if include_begin_marker then
             begin
                 padded_units[0] := c_begin_marker;
                 padded_units[1] := c_begin_marker;
                 padded_units[2] := c_begin_marker;
             end;
+            if (not include_begin_marker) and (prefix_count > 0) then
+            begin
+                for context_idx := 0 to prefix_count - 1 do
+                begin
+                    padded_units[context_idx] := context_prefix_units[context_idx];
+                end;
+            end;
             for unit_idx := 0 to High(text_units) do
             begin
                 padded_units[unit_idx + prefix_count] := text_units[unit_idx];
             end;
-            padded_units[High(padded_units)] := c_end_marker;
+            if include_end_marker then
+            begin
+                padded_units[High(padded_units)] := c_end_marker;
+            end;
             prepared_units[text_idx] := padded_units;
             if include_begin_marker then
             begin
@@ -11185,6 +11230,10 @@ begin
                 begin
                     bigram := padded_units[padded_idx - 1] + unigram;
                     wanted.AddOrSetValue(bigram, True);
+                    if prefix_count > 0 then
+                    begin
+                        wanted.AddOrSetValue(padded_units[padded_idx - 1], True);
+                    end;
                 end;
                 if padded_idx >= 2 then
                 begin
@@ -11192,6 +11241,10 @@ begin
                         padded_units[padded_idx - 1];
                     trigram := trigram_context + unigram;
                     wanted.AddOrSetValue(trigram, True);
+                    if prefix_count > 0 then
+                    begin
+                        wanted.AddOrSetValue(trigram_context, True);
+                    end;
                 end;
                 if padded_idx >= 3 then
                 begin
@@ -11200,6 +11253,10 @@ begin
                         padded_units[padded_idx - 1];
                     fourgram := fourgram_context + unigram;
                     wanted.AddOrSetValue(fourgram, True);
+                    if prefix_count > 0 then
+                    begin
+                        wanted.AddOrSetValue(fourgram_context, True);
+                    end;
                 end;
             end;
             end;
@@ -11228,7 +11285,7 @@ begin
         end
         else
         begin
-            prefix_count := 0;
+            prefix_count := Length(context_prefix_units);
         end;
         total_score := 0;
         predicted := 0;
@@ -11346,13 +11403,21 @@ end;
 function TncSqliteDictionary.get_char_lm_text_scores(const texts: TArray<string>;
     out scores: TArray<Integer>): Boolean;
 begin
-    Result := get_char_lm_text_scores_internal(texts, scores, True);
+    Result := get_char_lm_text_scores_internal(texts, scores, True, '', True);
 end;
 
 function TncSqliteDictionary.get_char_lm_suffix_scores(const texts: TArray<string>;
     out scores: TArray<Integer>): Boolean;
 begin
-    Result := get_char_lm_text_scores_internal(texts, scores, False);
+    Result := get_char_lm_text_scores_internal(texts, scores, False, '', True);
+end;
+
+function TncSqliteDictionary.get_char_lm_continuation_scores(
+    const left_context: string; const texts: TArray<string>;
+    out scores: TArray<Integer>): Boolean;
+begin
+    Result := get_char_lm_text_scores_internal(texts, scores, False,
+        left_context, False);
 end;
 
 function TncSqliteDictionary.get_compound_tail_support(const tail_text: string): Integer;
