@@ -80,6 +80,7 @@ type
         m_status_logo_bitmap: TGPBitmap;
         m_status_label_mode: TLabel;
         m_status_label_variant: TLabel;
+        m_status_label_scheme: TLabel;
         m_status_label_full_width: TLabel;
         m_status_label_punct: TPaintBox;
         m_status_btn_settings: TncModernButton;
@@ -193,7 +194,7 @@ const
     c_status_widget_visible_key = 'status_widget_visible';
     c_status_widget_x_key = 'status_widget_x';
     c_status_widget_y_key = 'status_widget_y';
-    c_status_widget_default_width = 248;
+    c_status_widget_default_width = 286;
     c_status_widget_default_height = 40;
     c_active_sync_fail_hide_threshold = 8;
     c_tray_timer_interval_ms = 120;
@@ -502,6 +503,7 @@ begin
     m_status_logo_bitmap := nil;
     m_status_label_mode := nil;
     m_status_label_variant := nil;
+    m_status_label_scheme := nil;
     m_status_label_full_width := nil;
     m_status_label_punct := nil;
     m_status_btn_settings := nil;
@@ -1301,9 +1303,32 @@ begin
     divider.Height := 18;
     divider.Shape := bsLeftLine;
 
+    m_status_label_scheme := TLabel.Create(m_status_panel);
+    m_status_label_scheme.Parent := m_status_panel;
+    m_status_label_scheme.Left := 122;
+    m_status_label_scheme.Top := 11;
+    m_status_label_scheme.Width := 24;
+    m_status_label_scheme.Height := 18;
+    m_status_label_scheme.AutoSize := False;
+    m_status_label_scheme.Alignment := taCenter;
+    m_status_label_scheme.Layout := tlCenter;
+    m_status_label_scheme.Font.Color := RGB(48, 89, 94);
+    m_status_label_scheme.Transparent := True;
+    m_status_label_scheme.ParentShowHint := False;
+    m_status_label_scheme.ShowHint := False;
+    m_status_label_scheme.Hint := '拼音方案：全拼';
+
+    divider := TBevel.Create(m_status_panel);
+    divider.Parent := m_status_panel;
+    divider.Left := 152;
+    divider.Top := 11;
+    divider.Width := 2;
+    divider.Height := 18;
+    divider.Shape := bsLeftLine;
+
     m_status_label_full_width := TLabel.Create(m_status_panel);
     m_status_label_full_width.Parent := m_status_panel;
-    m_status_label_full_width.Left := 122;
+    m_status_label_full_width.Left := 160;
     m_status_label_full_width.Top := 11;
     m_status_label_full_width.Width := 24;
     m_status_label_full_width.Height := 18;
@@ -1319,7 +1344,7 @@ begin
 
     divider := TBevel.Create(m_status_panel);
     divider.Parent := m_status_panel;
-    divider.Left := 152;
+    divider.Left := 190;
     divider.Top := 11;
     divider.Width := 2;
     divider.Height := 18;
@@ -1327,7 +1352,7 @@ begin
 
     m_status_label_punct := TPaintBox.Create(m_status_panel);
     m_status_label_punct.Parent := m_status_panel;
-    m_status_label_punct.Left := 160;
+    m_status_label_punct.Left := 198;
     m_status_label_punct.Top := 9;
     m_status_label_punct.Width := 40;
     m_status_label_punct.Height := 20;
@@ -1339,7 +1364,7 @@ begin
 
     m_status_btn_settings := TncModernButton.Create(m_status_panel);
     m_status_btn_settings.Parent := m_status_panel;
-    m_status_btn_settings.Left := 208;
+    m_status_btn_settings.Left := 246;
     m_status_btn_settings.Top := 8;
     m_status_btn_settings.Width := 30;
     m_status_btn_settings.Height := 24;
@@ -1384,6 +1409,12 @@ begin
     m_status_label_variant.OnMouseUp := status_mouse_up;
     m_status_label_variant.OnMouseEnter := status_label_mouse_enter;
     m_status_label_variant.OnMouseLeave := status_label_mouse_leave;
+
+    m_status_label_scheme.OnMouseDown := status_mouse_down;
+    m_status_label_scheme.OnMouseMove := status_mouse_move;
+    m_status_label_scheme.OnMouseUp := status_mouse_up;
+    m_status_label_scheme.OnMouseEnter := status_label_mouse_enter;
+    m_status_label_scheme.OnMouseLeave := status_label_mouse_leave;
 
     m_status_label_full_width.OnMouseDown := status_mouse_down;
     m_status_label_full_width.OnMouseMove := status_mouse_move;
@@ -1605,6 +1636,8 @@ procedure TncTrayHost.update_status_widget;
 var
     mode_text: string;
     variant_text: string;
+    scheme_text: string;
+    scheme_hint: string;
     full_width_text: string;
 begin
     if m_status_form = nil then
@@ -1631,6 +1664,34 @@ begin
         variant_text := '-';
     end;
 
+    case m_engine_config.pinyin_input_scheme of
+        pis_microsoft_shuangpin:
+            begin
+                scheme_text := '微';
+                scheme_hint := '拼音方案：微软双拼';
+            end;
+        pis_xiaohe_shuangpin:
+            begin
+                scheme_text := '鹤';
+                scheme_hint := '拼音方案：小鹤双拼';
+            end;
+        pis_ziranma_shuangpin:
+            begin
+                scheme_text := '自';
+                scheme_hint := '拼音方案：自然码双拼';
+            end;
+        pis_sogou_shuangpin:
+            begin
+                scheme_text := '搜';
+                scheme_hint := '拼音方案：搜狗双拼';
+            end;
+    else
+        begin
+            scheme_text := '拼';
+            scheme_hint := '拼音方案：全拼';
+        end;
+    end;
+
     if m_engine_config.full_width_mode then
     begin
         full_width_text := '全';
@@ -1642,6 +1703,16 @@ begin
 
     m_status_label_mode.Caption := mode_text;
     m_status_label_variant.Caption := variant_text;
+    m_status_label_scheme.Caption := scheme_text;
+    m_status_label_scheme.Hint := scheme_hint;
+    if m_engine_config.input_mode = im_chinese then
+    begin
+        m_status_label_scheme.Font.Color := RGB(48, 89, 94);
+    end
+    else
+    begin
+        m_status_label_scheme.Font.Color := RGB(132, 139, 148);
+    end;
     m_status_label_full_width.Caption := full_width_text;
     m_status_label_punct.Invalidate;
 end;

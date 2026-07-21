@@ -49,7 +49,7 @@ function nc_create_utf8_ini_file(const config_path: string): TMemIniFile;
 implementation
 
 const
-    c_config_version = 13;
+    c_config_version = 14;
     c_font_name_utf8_migration_version = 11;
     c_candidate_font_size_config_version = 2;
     c_config_mutex_name = 'Local\CassotisIme_Config_v1';
@@ -66,6 +66,47 @@ begin
     end;
 
     Result := dv_simplified;
+end;
+
+function pinyin_input_scheme_to_text(const value: TncPinyinInputScheme): string;
+begin
+    case value of
+        pis_microsoft_shuangpin:
+            Result := 'microsoft-shuangpin';
+        pis_xiaohe_shuangpin:
+            Result := 'xiaohe-shuangpin';
+        pis_ziranma_shuangpin:
+            Result := 'ziranma-shuangpin';
+        pis_sogou_shuangpin:
+            Result := 'sogou-shuangpin';
+    else
+        Result := 'full-pinyin';
+    end;
+end;
+
+function parse_pinyin_input_scheme_text(const value: string): TncPinyinInputScheme;
+begin
+    if SameText(Trim(value), 'microsoft-shuangpin') or
+        SameText(Trim(value), 'microsoft') or SameText(Trim(value), 'mspy') then
+    begin
+        Exit(pis_microsoft_shuangpin);
+    end;
+    if SameText(Trim(value), 'xiaohe-shuangpin') or
+        SameText(Trim(value), 'xiaohe') or SameText(Trim(value), 'flypy') then
+    begin
+        Exit(pis_xiaohe_shuangpin);
+    end;
+    if SameText(Trim(value), 'ziranma-shuangpin') or
+        SameText(Trim(value), 'ziranma') or SameText(Trim(value), 'zrm') then
+    begin
+        Exit(pis_ziranma_shuangpin);
+    end;
+    if SameText(Trim(value), 'sogou-shuangpin') or
+        SameText(Trim(value), 'sogou') or SameText(Trim(value), 'sgpy') then
+    begin
+        Exit(pis_sogou_shuangpin);
+    end;
+    Result := pis_full_pinyin;
 end;
 
 function try_extract_ini_section_name(const line_text: string; out section_name: string): Boolean;
@@ -806,6 +847,7 @@ var
     legacy_tc_path: string;
     legacy_user_path: string;
     legacy_font_name: string;
+    stored_pinyin_scheme_text: string;
     stored_candidate_font_size: Integer;
     shortcut_values_valid: Boolean;
 
@@ -825,6 +867,7 @@ var
     end;
 begin
     Result.input_mode := im_chinese;
+    Result.pinyin_input_scheme := pis_full_pinyin;
     Result.max_candidates := 9;
     Result.enable_ctrl_space_toggle := False;
     Result.enable_shift_space_full_width_toggle := True;
@@ -872,6 +915,10 @@ begin
         begin
             Result.input_mode := im_chinese;
         end;
+        stored_pinyin_scheme_text := safe_ini_read_string(ini, 'engine',
+            'pinyin_scheme', 'full-pinyin');
+        Result.pinyin_input_scheme := parse_pinyin_input_scheme_text(
+            stored_pinyin_scheme_text);
 
         Result.max_candidates := 9;
         Result.enable_ctrl_space_toggle := False;
@@ -952,6 +999,9 @@ begin
 
         needs_full_write := needs_full_write or
             not safe_ini_value_exists(ini, 'engine', 'input_mode') or
+            not safe_ini_value_exists(ini, 'engine', 'pinyin_scheme') or
+            not SameText(Trim(stored_pinyin_scheme_text),
+                pinyin_input_scheme_to_text(Result.pinyin_input_scheme)) or
             safe_ini_value_exists(ini, 'engine', 'max_candidates') or
             safe_ini_value_exists(ini, 'engine', 'enable_ctrl_space_toggle') or
             safe_ini_value_exists(ini, 'engine', 'enable_shift_space_full_width_toggle') or
@@ -1037,6 +1087,8 @@ begin
         ini.EraseSection('dictionary');
         ini.EraseSection('shortcuts');
         ini.WriteInteger('engine', 'input_mode', Ord(config.input_mode));
+        ini.WriteString('engine', 'pinyin_scheme',
+            pinyin_input_scheme_to_text(config.pinyin_input_scheme));
         ini.WriteBool('engine', 'full_width_mode', config.full_width_mode);
         ini.WriteBool('engine', 'punctuation_full_width', config.punctuation_full_width);
         ini.WriteInteger('engine', 'debug', Ord(config.debug_mode));
@@ -1075,6 +1127,7 @@ procedure TncConfigManager.save_engine_state_config(const input_mode: TncInputMo
 var
     ini: TMemIniFile;
     debug_mode: Boolean;
+    pinyin_input_scheme: TncPinyinInputScheme;
 begin
     if m_config_path = '' then
     begin
@@ -1090,8 +1143,12 @@ begin
     end;
     try
         debug_mode := safe_ini_read_bool(ini, 'engine', 'debug', False);
+        pinyin_input_scheme := parse_pinyin_input_scheme_text(
+            safe_ini_read_string(ini, 'engine', 'pinyin_scheme', 'full-pinyin'));
         ini.EraseSection('engine');
         ini.WriteInteger('engine', 'input_mode', Ord(input_mode));
+        ini.WriteString('engine', 'pinyin_scheme',
+            pinyin_input_scheme_to_text(pinyin_input_scheme));
         ini.WriteBool('engine', 'full_width_mode', full_width_mode);
         ini.WriteBool('engine', 'punctuation_full_width', punctuation_full_width);
         ini.WriteInteger('engine', 'debug', Ord(debug_mode));

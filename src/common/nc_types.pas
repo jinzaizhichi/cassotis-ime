@@ -44,6 +44,13 @@ type
     end;
 
     TncInputMode = (im_chinese, im_english);
+    TncPinyinInputScheme = (
+        pis_full_pinyin,
+        pis_microsoft_shuangpin,
+        pis_xiaohe_shuangpin,
+        pis_ziranma_shuangpin,
+        pis_sogou_shuangpin
+    );
     TncDictionaryVariant = (dv_simplified, dv_traditional);
 
     TncShortcutAction = (
@@ -72,6 +79,7 @@ type
 
     TncEngineConfig = record
         input_mode: TncInputMode;
+        pinyin_input_scheme: TncPinyinInputScheme;
         max_candidates: Integer;
         enable_ctrl_space_toggle: Boolean;
         enable_shift_space_full_width_toggle: Boolean;

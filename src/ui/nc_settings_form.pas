@@ -154,6 +154,7 @@ type
         m_btn_ok: TncModernButton;
         m_btn_cancel: TncModernButton;
         m_combo_input_mode: TComboBox;
+        m_combo_pinyin_input_scheme: TComboBox;
         m_combo_punctuation_mode: TComboBox;
         m_chk_full_width_mode: TncModernCheckBox;
         m_chk_show_status_widget: TncModernCheckBox;
@@ -302,6 +303,12 @@ resourcestring
     SOptionSimplifiedChineseInput = '简体中文输入';
     SOptionTraditionalChineseInput = '繁体中文输入';
     SOptionEnglishInput = '英文输入';
+    SLabelPinyinInputScheme = '拼音方案';
+    SOptionFullPinyin = '全拼';
+    SOptionMicrosoftShuangpin = '微软双拼';
+    SOptionXiaoheShuangpin = '小鹤双拼';
+    SOptionZiranmaShuangpin = '自然码双拼';
+    SOptionSogouShuangpin = '搜狗双拼';
     SLabelPunctuationMode = '标点';
     SCheckFullWidthMode = '使用全角输入';
     SCheckShowStatusWidget = '显示状态浮窗';
@@ -1254,6 +1261,7 @@ end;
 function build_default_engine_config_value: TncEngineConfig;
 begin
     Result.input_mode := im_chinese;
+    Result.pinyin_input_scheme := pis_full_pinyin;
     Result.max_candidates := 9;
     Result.enable_ctrl_space_toggle := False;
     Result.enable_shift_space_full_width_toggle := True;
@@ -1675,7 +1683,7 @@ var
     defaults_group: TPanel;
 begin
     section_top := scale_ui(18);
-    defaults_group := create_section_group(Self, m_tab_general, SGroupDefaultBehavior, section_top, 158);
+    defaults_group := create_section_group(Self, m_tab_general, SGroupDefaultBehavior, section_top, 194);
 
     top := scale_ui(c_section_inner_top);
     create_label(Self, defaults_group, SLabelInputMode, top);
@@ -1689,6 +1697,21 @@ begin
     m_combo_input_mode.Items.Add(SOptionTraditionalChineseInput);
     m_combo_input_mode.Items.Add(SOptionEnglishInput);
     m_combo_input_mode.OnChange := mark_dirty;
+
+    Inc(top, scale_ui(c_row_height + c_general_row_gap));
+    create_label(Self, defaults_group, SLabelPinyinInputScheme, top);
+    m_combo_pinyin_input_scheme := TComboBox.Create(Self);
+    m_combo_pinyin_input_scheme.Parent := defaults_group;
+    m_combo_pinyin_input_scheme.Left := scale_ui(c_control_left);
+    m_combo_pinyin_input_scheme.Top := top;
+    m_combo_pinyin_input_scheme.Width := scale_ui(c_combo_width);
+    m_combo_pinyin_input_scheme.Style := csDropDownList;
+    m_combo_pinyin_input_scheme.Items.Add(SOptionFullPinyin);
+    m_combo_pinyin_input_scheme.Items.Add(SOptionMicrosoftShuangpin);
+    m_combo_pinyin_input_scheme.Items.Add(SOptionXiaoheShuangpin);
+    m_combo_pinyin_input_scheme.Items.Add(SOptionZiranmaShuangpin);
+    m_combo_pinyin_input_scheme.Items.Add(SOptionSogouShuangpin);
+    m_combo_pinyin_input_scheme.OnChange := mark_dirty;
 
     Inc(top, scale_ui(c_row_height + c_general_row_gap));
     create_label(Self, defaults_group, SLabelPunctuationMode, top);
@@ -2249,6 +2272,7 @@ begin
         begin
             m_combo_input_mode.ItemIndex := 0;
         end;
+        m_combo_pinyin_input_scheme.ItemIndex := Ord(default_engine_config.pinyin_input_scheme);
         m_combo_punctuation_mode.ItemIndex := Ord(not default_engine_config.punctuation_full_width);
         m_chk_full_width_mode.Checked := default_engine_config.full_width_mode;
     end
@@ -2877,6 +2901,15 @@ begin
     begin
         m_chk_full_width_mode.Checked := m_engine_config.full_width_mode;
     end;
+    if m_combo_pinyin_input_scheme <> nil then
+    begin
+        m_combo_pinyin_input_scheme.ItemIndex := Ord(m_engine_config.pinyin_input_scheme);
+        if (m_combo_pinyin_input_scheme.ItemIndex < 0) or
+            (m_combo_pinyin_input_scheme.ItemIndex >= m_combo_pinyin_input_scheme.Items.Count) then
+        begin
+            m_combo_pinyin_input_scheme.ItemIndex := Ord(pis_full_pinyin);
+        end;
+    end;
     if m_combo_punctuation_mode <> nil then
     begin
         if m_engine_config.punctuation_full_width then
@@ -2902,12 +2935,11 @@ begin
         m_combo_candidate_font.ItemIndex := m_combo_candidate_font.Items.IndexOf(candidate_font_name);
         if m_combo_candidate_font.ItemIndex < 0 then
         begin
-            candidate_font_name := c_default_candidate_font_name;
-            m_combo_candidate_font.ItemIndex := m_combo_candidate_font.Items.IndexOf(candidate_font_name);
-            if (m_combo_candidate_font.ItemIndex < 0) and (m_combo_candidate_font.Items.Count > 0) then
-            begin
-                m_combo_candidate_font.ItemIndex := 0;
-            end;
+            // Font capability probing is conservative and can reject valid
+            // third-party CJK faces. Preserve the configured font so applying
+            // an unrelated setting never silently replaces it.
+            m_combo_candidate_font.ItemIndex :=
+                m_combo_candidate_font.Items.Add(candidate_font_name);
         end;
     end;
     set_candidate_font_size_slider(m_engine_config.candidate_font_size);
@@ -3012,6 +3044,19 @@ begin
             next_config.input_mode := im_chinese;
             next_config.dictionary_variant := dv_simplified;
         end;
+    end;
+
+    case m_combo_pinyin_input_scheme.ItemIndex of
+        Ord(pis_microsoft_shuangpin):
+            next_config.pinyin_input_scheme := pis_microsoft_shuangpin;
+        Ord(pis_xiaohe_shuangpin):
+            next_config.pinyin_input_scheme := pis_xiaohe_shuangpin;
+        Ord(pis_ziranma_shuangpin):
+            next_config.pinyin_input_scheme := pis_ziranma_shuangpin;
+        Ord(pis_sogou_shuangpin):
+            next_config.pinyin_input_scheme := pis_sogou_shuangpin;
+    else
+        next_config.pinyin_input_scheme := pis_full_pinyin;
     end;
 
     next_config.full_width_mode := m_chk_full_width_mode.Checked;
