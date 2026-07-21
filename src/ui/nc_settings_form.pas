@@ -149,6 +149,7 @@ type
         m_tab_shortcuts: TTabSheet;
         m_tab_logging: TTabSheet;
         m_tab_advanced: TTabSheet;
+        m_label_website: TLabel;
         m_btn_reset: TncModernButton;
         m_btn_apply: TncModernButton;
         m_btn_ok: TncModernButton;
@@ -186,6 +187,7 @@ type
         procedure configure_form;
         procedure configure_tabs;
         procedure configure_buttons;
+        procedure update_website_link_layout;
         procedure normalize_dialog_client_width_for_dpi(const dpi: Integer);
         procedure update_dialog_height_for_content;
         procedure add_general_controls;
@@ -234,6 +236,7 @@ type
         procedure on_log_defaults_click(Sender: TObject);
         procedure on_open_config_folder(Sender: TObject);
         procedure on_open_config_file(Sender: TObject);
+        procedure on_website_link_click(Sender: TObject);
         procedure on_reset_click(Sender: TObject);
         procedure apply_changes;
         procedure on_apply_click(Sender: TObject);
@@ -278,6 +281,7 @@ const
     c_hint_width = c_section_width - (c_label_left * 2);
     c_general_row_gap = 8;
     c_tbm_get_channel_rect = WM_USER + 26;
+    c_official_website_url = 'https://www.yanquan.org';
 
 resourcestring
     SSettingsTitle = 'Cassotis 设置';
@@ -1434,6 +1438,7 @@ begin
     begin
         ClientHeight := desired_client_height;
     end;
+    update_website_link_layout;
 end;
 
 procedure TncSettingsForm.normalize_dialog_client_width_for_dpi(const dpi: Integer);
@@ -1549,6 +1554,7 @@ begin
         end;
         m_candidate_preview.Invalidate;
     end;
+    update_website_link_layout;
 end;
 
 procedure TncSettingsForm.CMDialogKey(var Message: TCMDialogKey);
@@ -1608,6 +1614,41 @@ begin
     m_tab_advanced := TTabSheet.Create(m_page_control);
     m_tab_advanced.PageControl := m_page_control;
     m_tab_advanced.Caption := STabAdvanced;
+
+    m_label_website := TLabel.Create(Self);
+    m_label_website.Parent := m_page_control;
+    m_label_website.Caption := c_official_website_url;
+    m_label_website.Font.Color := RGB(50, 118, 255);
+    m_label_website.Font.Style := [fsUnderline];
+    m_label_website.Cursor := crHandPoint;
+    m_label_website.Hint := c_official_website_url;
+    m_label_website.ShowHint := True;
+    m_label_website.OnClick := on_website_link_click;
+    m_label_website.Anchors := [akTop, akRight];
+    update_website_link_layout;
+end;
+
+procedure TncSettingsForm.update_website_link_layout;
+var
+    dpi: Integer;
+    tab_strip_height: Integer;
+begin
+    if (m_page_control = nil) or (m_label_website = nil) then
+    begin
+        Exit;
+    end;
+
+    m_page_control.HandleNeeded;
+    dpi := get_window_dpi(Handle);
+    if dpi <= 0 then
+    begin
+        dpi := c_nc_base_dpi;
+    end;
+
+    tab_strip_height := m_page_control.DisplayRect.Top;
+    m_label_website.Left := m_page_control.ClientWidth - m_label_website.Width - scale_ui_for_dpi(12, dpi);
+    m_label_website.Top := Max(0, (tab_strip_height - m_label_website.Height) div 2);
+    m_label_website.BringToFront;
 end;
 
 procedure TncSettingsForm.configure_buttons;
@@ -3213,6 +3254,11 @@ begin
         Exit;
     end;
     ShellExecute(Handle, 'open', PChar(config_path), nil, nil, SW_SHOWNORMAL);
+end;
+
+procedure TncSettingsForm.on_website_link_click(Sender: TObject);
+begin
+    ShellExecute(Handle, 'open', PChar(c_official_website_url), nil, nil, SW_SHOWNORMAL);
 end;
 
 procedure TncSettingsForm.on_reset_click(Sender: TObject);

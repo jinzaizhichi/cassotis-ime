@@ -14,6 +14,7 @@ uses
     Winapi.Messages,
     Winapi.MultiMon,
     Winapi.ActiveX,
+    Winapi.ShellAPI,
     Winapi.GDIPAPI,
     Winapi.GDIPOBJ,
     Vcl.Forms,
@@ -58,6 +59,7 @@ type
         m_item_status_widget: TMenuItem;
         m_item_open_config: TMenuItem;
         m_item_reload: TMenuItem;
+        m_item_website: TMenuItem;
         m_item_version: TMenuItem;
         m_item_exit: TMenuItem;
         m_timer: TTimer;
@@ -169,6 +171,7 @@ type
         procedure on_punct_click(Sender: TObject);
         procedure on_open_config_click(Sender: TObject);
         procedure on_reload_click(Sender: TObject);
+        procedure on_website_click(Sender: TObject);
         procedure on_exit_click(Sender: TObject);
         procedure on_menu_popup(Sender: TObject);
         procedure on_timer(Sender: TObject);
@@ -207,6 +210,7 @@ const
     c_style_refresh_interval_idle_ms = 3000;
     c_profile_activate_debounce_ms = 180;
     c_profile_inactive_debounce_ms = 360;
+    c_official_website_url = 'https://www.yanquan.org';
 
 type
     TGetDpiForWindow = function(hwnd: HWND): UINT; stdcall;
@@ -509,6 +513,7 @@ begin
     m_status_label_punct := nil;
     m_status_btn_settings := nil;
     m_status_hint_window := nil;
+    m_item_website := nil;
     m_item_version := nil;
     m_status_dragging := False;
     m_status_drag_moved := False;
@@ -1171,6 +1176,17 @@ begin
     m_item_reload.Caption := '重新加载配置';
     m_item_reload.OnClick := on_reload_click;
     m_menu.Items.Add(m_item_reload);
+
+    separator := TMenuItem.Create(m_menu);
+    separator.Caption := '-';
+    separator.Enabled := False;
+    m_menu.Items.Add(separator);
+
+    m_item_website := TMenuItem.Create(m_menu);
+    m_item_website.AutoHotkeys := maManual;
+    m_item_website.Caption := 'www.yanquan.org';
+    m_item_website.OnClick := on_website_click;
+    m_menu.Items.Add(m_item_website);
 
     separator := TMenuItem.Create(m_menu);
     separator.Caption := '-';
@@ -2574,6 +2590,11 @@ begin
     reload_host_config;
     apply_runtime_state_to_host;
     refresh_state_from_host;
+end;
+
+procedure TncTrayHost.on_website_click(Sender: TObject);
+begin
+    ShellExecute(Handle, 'open', PChar(c_official_website_url), nil, nil, SW_SHOWNORMAL);
 end;
 
 procedure TncTrayHost.on_exit_click(Sender: TObject);
