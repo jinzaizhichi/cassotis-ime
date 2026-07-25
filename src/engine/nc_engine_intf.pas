@@ -27491,8 +27491,11 @@ var
 
             best_two_syllable_exact_known[start_idx] := True;
             query_key := build_lightweight_query_key(start_idx, 2);
+            // The sentence DP already probes these exact spans. Reuse that
+            // cache instead of issuing another general lookup per boundary.
             if (query_key = '') or (m_dictionary = nil) or
-                (not m_dictionary.lookup(query_key, exact_results)) then
+                (not lookup_exact_full_pinyin_cached_local(query_key,
+                exact_results)) then
             begin
                 Exit;
             end;
@@ -27570,7 +27573,8 @@ var
             best_three_syllable_exact_known[start_idx] := True;
             query_key := build_lightweight_query_key(start_idx, 3);
             if (query_key = '') or (m_dictionary = nil) or
-                (not m_dictionary.lookup(query_key, exact_results)) then
+                (not lookup_exact_full_pinyin_cached_local(query_key,
+                exact_results)) then
             begin
                 Exit;
             end;
@@ -41543,6 +41547,8 @@ var
         c_support_bonus_divisor = 4;
         c_problematic_penalty = 24000;
         c_consensus_budget_ms = 24;
+        // Direct/offline decoding gets more room, but must remain bounded.
+        c_consensus_direct_budget_ms = 96;
     type
         TConsensusWindowCacheEntry = record
             text: string;
@@ -41586,13 +41592,19 @@ var
         consensus_window_cache: TDictionary<string, TConsensusWindowCacheEntry>;
 
         function consensus_budget_exceeded_local: Boolean;
+        var
+            budget_ms_local: UInt64;
         begin
-            if not m_composition_built_incrementally then
+            if m_composition_built_incrementally then
             begin
-                Exit(False);
+                budget_ms_local := c_consensus_budget_ms;
+            end
+            else
+            begin
+                budget_ms_local := c_consensus_direct_budget_ms;
             end;
             Result := (consensus_start_tick > 0) and
-                ((GetTickCount64 - consensus_start_tick) >= c_consensus_budget_ms);
+                ((GetTickCount64 - consensus_start_tick) >= budget_ms_local);
             if Result and m_config.debug_mode and
                 (not consensus_budget_logged) then
             begin
@@ -42292,6 +42304,8 @@ var
         c_score_support_weight = 16;
         c_problematic_penalty = 24000;
         c_repair_budget_ms = 24;
+        // Direct/offline decoding gets more room, but must remain bounded.
+        c_repair_direct_budget_ms = 96;
     type
         TWindowVariantCacheEntry = record
             texts: TArray<string>;
@@ -42314,13 +42328,19 @@ var
         variant_cache: TDictionary<string, TWindowVariantCacheEntry>;
 
         function repair_budget_exceeded_local: Boolean;
+        var
+            budget_ms_local: UInt64;
         begin
-            if not m_composition_built_incrementally then
+            if m_composition_built_incrementally then
             begin
-                Exit(False);
+                budget_ms_local := c_repair_budget_ms;
+            end
+            else
+            begin
+                budget_ms_local := c_repair_direct_budget_ms;
             end;
             Result := (repair_start_tick > 0) and
-                ((GetTickCount64 - repair_start_tick) >= c_repair_budget_ms);
+                ((GetTickCount64 - repair_start_tick) >= budget_ms_local);
             if Result and m_config.debug_mode and (not repair_budget_logged) then
             begin
                 repair_budget_logged := True;
@@ -74483,6 +74503,8 @@ var
         c_oracle_standalone_match_bonus = 3200;
         c_oracle_standalone_mismatch_penalty = 2400;
         c_oracle_budget_ms = 180;
+        // Bound direct/offline work while allowing a wider search than input.
+        c_oracle_direct_budget_ms = 720;
     type
         TOracleState = record
             score: Integer;
@@ -74513,12 +74535,18 @@ var
         oracle_timed_out: Boolean;
 
         function oracle_budget_exhausted_local: Boolean;
+        var
+            budget_ms_local: UInt64;
         begin
-            if not m_composition_built_incrementally then
+            if m_composition_built_incrementally then
             begin
-                Exit(False);
+                budget_ms_local := c_oracle_budget_ms;
+            end
+            else
+            begin
+                budget_ms_local := c_oracle_direct_budget_ms;
             end;
-            Result := (GetTickCount64 - oracle_start_tick) > c_oracle_budget_ms;
+            Result := (GetTickCount64 - oracle_start_tick) > budget_ms_local;
             if Result and (not oracle_timed_out) then
             begin
                 oracle_timed_out := True;
@@ -80910,11 +80938,7 @@ var
         total_elapsed_ms_local: UInt64;
     begin
         Result := False;
-        // Direct-composition benchmarks and offline attribution must be
-        // deterministic regardless of machine load. The wall-clock guard is
-        // only an interactive incremental-input safeguard.
-        if (not m_composition_built_incrementally) or
-            (Length(m_candidates) = 0) or
+        if (Length(m_candidates) = 0) or
             (not delayed_long_decode_mode) or
             (not is_full_pinyin_key(lookup_text)) or
             (input_syllable_count < 12) then
@@ -112427,6 +112451,8 @@ begin
                 end;
             end;
         end;
+        // Exact-chunk and lightweight DPs supersede this older chain on
+        // very long input; running all three only repeats the same search.
         if (m_dictionary <> nil) and has_multi_syllable_input and
             (not all_initial_compact_query) and
             (not has_internal_dangling_initial) and
@@ -112528,6 +112554,7 @@ begin
         if (m_dictionary <> nil) and has_multi_syllable_input and
             (not all_initial_compact_query) and
             (not has_internal_dangling_initial) and
+            (input_syllable_count < 20) and
             (not should_defer_exact_chain_for_extendable_tail_local) then
         begin
             phase_start_tick := GetTickCount64;
