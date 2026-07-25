@@ -118902,6 +118902,7 @@ function TncEngine.try_get_fixed_pronoun_tail_query_parts(
 var
     normalized_query: string;
     head_query_length: Integer;
+    query_syllables: TncPinyinParseResult;
     tail_syllables: TncPinyinParseResult;
 begin
     Result := False;
@@ -118959,6 +118960,15 @@ begin
         head_query_length := 4;
     end
     else
+    begin
+        Exit;
+    end;
+
+    query_syllables := get_effective_compact_pinyin_syllables(
+        normalized_query);
+    if (Length(query_syllables) = 0) or
+        (not SameText(normalize_pinyin_text(query_syllables[0].text),
+        head_pinyin)) then
     begin
         Exit;
     end;
@@ -135362,6 +135372,7 @@ var
         has_exact_lookup: Boolean;
         has_predictive_prefix_lookup: Boolean;
         has_particle_tail_lookup: Boolean;
+        has_query_prefix_lookup: Boolean;
         predictive_prefix_results_loaded: Boolean;
         short_exact_phase_start: UInt64;
 
@@ -136539,6 +136550,63 @@ var
             end;
         end;
 
+        function has_query_prefix_exact_candidate_local: Boolean;
+        var
+            prefix_units_local: Integer;
+            prefix_key_local: string;
+            prefix_idx_local: Integer;
+            prefix_text_local: string;
+            prefix_results_local: TncCandidateList;
+            fixed_head_pinyin_local: string;
+            fixed_head_text_local: string;
+            fixed_tail_key_local: string;
+            fixed_tail_units_local: Integer;
+        begin
+            Result := False;
+            // This is only a visibility fallback for a complete three-syllable
+            // query such as nianqing/shi. Existing fixed-head and particle-tail
+            // routes already provide stronger, purpose-built completions.
+            if (expected_units <> 3) or
+                (not is_full_pinyin_key(normalized_pinyin)) or
+                has_particle_tail_lookup or
+                ((Length(normalized_pinyin) > Length('dehao')) and
+                SameText(Copy(normalized_pinyin,
+                Length(normalized_pinyin) - Length('dehao') + 1,
+                Length('dehao')), 'dehao')) or
+                try_get_fixed_pronoun_tail_query_parts(normalized_pinyin,
+                expected_units, fixed_head_pinyin_local,
+                fixed_head_text_local, fixed_tail_key_local,
+                fixed_tail_units_local) then
+            begin
+                Exit;
+            end;
+
+            for prefix_units_local := expected_units - 1 downto 2 do
+            begin
+                prefix_key_local := build_display_query_key(0,
+                    prefix_units_local);
+                if (prefix_key_local = '') or
+                    (not lookup_display_complete_cached(prefix_key_local,
+                    prefix_results_local)) then
+                begin
+                    Continue;
+                end;
+
+                for prefix_idx_local := 0 to High(prefix_results_local) do
+                begin
+                    prefix_text_local := Trim(
+                        prefix_results_local[prefix_idx_local].text);
+                    if (prefix_text_local <> '') and
+                        (Trim(prefix_results_local[prefix_idx_local].comment) = '') and
+                        (get_candidate_text_unit_count(prefix_text_local) =
+                        prefix_units_local) then
+                    begin
+                        Exit(True);
+                    end;
+                end;
+            end;
+        end;
+
         function has_particle_tail_completion_candidate_local: Boolean;
         const
             c_head_probe_limit = 8;
@@ -137067,10 +137135,12 @@ var
         has_particle_tail_lookup :=
             has_particle_tail_completion_candidate_local;
         note_short_exact_phase_local('tail');
+        has_query_prefix_lookup := has_query_prefix_exact_candidate_local;
         short_exact_predictive_prefix_only_mode := False;
         if (not has_exact_lookup) and (not has_closed_particle_candidate) and
             (not has_predictive_prefix_lookup) and
-            (not has_particle_tail_lookup) then
+            (not has_particle_tail_lookup) and
+            (not has_query_prefix_lookup) then
         begin
             Exit;
         end;
@@ -137149,7 +137219,8 @@ var
 
             if ((exact_weights.Count = 0) and
                 (not has_predictive_prefix_lookup) and
-                (not has_particle_tail_lookup)) or
+                (not has_particle_tail_lookup) and
+                (not has_query_prefix_lookup)) or
                 ((expected_units > c_max_base_exact_units) and
                 (not has_user_exact)) then
             begin
@@ -156487,6 +156558,166 @@ var
         keep_explicit_prefix_partial: Boolean;
         keep_protected_full_exact: Boolean;
         protected_full_query_exacts: TncCandidateList;
+        short_exact_ranked_texts: TArray<string>;
+
+        procedure capture_short_exact_ranked_order_local;
+        var
+            candidate_idx_local: Integer;
+            exact_idx_local: Integer;
+            seen_idx_local: Integer;
+            candidate_text_local: string;
+            already_seen_local: Boolean;
+            is_exact_local: Boolean;
+            exact_results_local: TncCandidateList;
+        begin
+            SetLength(short_exact_ranked_texts, 0);
+            if (not short_exact_query_mode) or (m_dictionary = nil) or
+                (normalized_pinyin = '') or
+                (not lookup_display_exact_cached(normalized_pinyin,
+                exact_results_local)) then
+            begin
+                Exit;
+            end;
+
+            for candidate_idx_local := 0 to High(m_candidates) do
+            begin
+                candidate_text_local := Trim(
+                    m_candidates[candidate_idx_local].text);
+                if (candidate_text_local = '') or
+                    (Trim(m_candidates[candidate_idx_local].comment) <> '') or
+                    (get_candidate_text_unit_count(candidate_text_local) <>
+                    expected_units) then
+                begin
+                    Continue;
+                end;
+
+                is_exact_local := False;
+                for exact_idx_local := 0 to High(exact_results_local) do
+                begin
+                    if (Trim(exact_results_local[exact_idx_local].comment) = '') and
+                        SameText(Trim(exact_results_local[exact_idx_local].text),
+                        candidate_text_local) then
+                    begin
+                        is_exact_local := True;
+                        Break;
+                    end;
+                end;
+                if not is_exact_local then
+                begin
+                    Continue;
+                end;
+
+                already_seen_local := False;
+                for seen_idx_local := 0 to High(short_exact_ranked_texts) do
+                begin
+                    if SameText(short_exact_ranked_texts[seen_idx_local],
+                        candidate_text_local) then
+                    begin
+                        already_seen_local := True;
+                        Break;
+                    end;
+                end;
+                if already_seen_local then
+                begin
+                    Continue;
+                end;
+
+                SetLength(short_exact_ranked_texts,
+                    Length(short_exact_ranked_texts) + 1);
+                short_exact_ranked_texts[High(short_exact_ranked_texts)] :=
+                    candidate_text_local;
+            end;
+        end;
+
+        procedure restore_short_exact_ranked_order_local;
+        var
+            ranked_candidates_local: TncCandidateList;
+            ranked_paths_local: TArray<string>;
+            slot_indices_local: TArray<Integer>;
+            ranked_idx_local: Integer;
+            candidate_idx_local: Integer;
+            found_idx_local: Integer;
+            slot_idx_local: Integer;
+            insert_idx_local: Integer;
+            temp_slot_local: Integer;
+        begin
+            if Length(short_exact_ranked_texts) < 2 then
+            begin
+                Exit;
+            end;
+
+            SetLength(ranked_candidates_local,
+                Length(short_exact_ranked_texts));
+            SetLength(ranked_paths_local, Length(short_exact_ranked_texts));
+            SetLength(slot_indices_local, Length(short_exact_ranked_texts));
+            ranked_idx_local := 0;
+            for slot_idx_local := 0 to High(short_exact_ranked_texts) do
+            begin
+                found_idx_local := -1;
+                for candidate_idx_local := 0 to High(m_candidates) do
+                begin
+                    if (Trim(m_candidates[candidate_idx_local].comment) = '') and
+                        SameText(Trim(m_candidates[candidate_idx_local].text),
+                        short_exact_ranked_texts[slot_idx_local]) then
+                    begin
+                        found_idx_local := candidate_idx_local;
+                        Break;
+                    end;
+                end;
+                if found_idx_local < 0 then
+                begin
+                    Continue;
+                end;
+
+                ranked_candidates_local[ranked_idx_local] :=
+                    m_candidates[found_idx_local];
+                if found_idx_local < Length(m_candidate_segment_paths) then
+                begin
+                    ranked_paths_local[ranked_idx_local] :=
+                        m_candidate_segment_paths[found_idx_local];
+                end
+                else
+                begin
+                    ranked_paths_local[ranked_idx_local] := '';
+                end;
+                slot_indices_local[ranked_idx_local] := found_idx_local;
+                Inc(ranked_idx_local);
+            end;
+
+            if ranked_idx_local < 2 then
+            begin
+                Exit;
+            end;
+            SetLength(ranked_candidates_local, ranked_idx_local);
+            SetLength(ranked_paths_local, ranked_idx_local);
+            SetLength(slot_indices_local, ranked_idx_local);
+
+            for slot_idx_local := 1 to High(slot_indices_local) do
+            begin
+                temp_slot_local := slot_indices_local[slot_idx_local];
+                insert_idx_local := slot_idx_local - 1;
+                while (insert_idx_local >= 0) and
+                    (slot_indices_local[insert_idx_local] > temp_slot_local) do
+                begin
+                    slot_indices_local[insert_idx_local + 1] :=
+                        slot_indices_local[insert_idx_local];
+                    Dec(insert_idx_local);
+                end;
+                slot_indices_local[insert_idx_local + 1] := temp_slot_local;
+            end;
+
+            for ranked_idx_local := 0 to High(ranked_candidates_local) do
+            begin
+                candidate_idx_local := slot_indices_local[ranked_idx_local];
+                m_candidates[candidate_idx_local] :=
+                    ranked_candidates_local[ranked_idx_local];
+                if candidate_idx_local < Length(m_candidate_segment_paths) then
+                begin
+                    m_candidate_segment_paths[candidate_idx_local] :=
+                        ranked_paths_local[ranked_idx_local];
+                end;
+            end;
+        end;
 
         function is_protected_full_query_exact_local(
             const candidate_value: TncCandidate): Boolean;
@@ -160819,6 +161050,7 @@ var
             end;
         end;
     begin
+        capture_short_exact_ranked_order_local;
         retain_all_full_query_exact_candidates_local;
         normalize_first_syllable_single_partial_order_local;
         sanitize_short_partial_segment_paths;
@@ -160832,11 +161064,9 @@ var
         begin
             ensure_display_short_particle_tail_candidate_visible;
         end;
-        if short_exact_query_mode and
-            (short_context_promoted_exact_text = '') then
-        begin
-            promote_display_full_query_exact_candidate;
-        end;
+        // Short exact candidates already have their final category and
+        // dictionary-weight order. The generic promoter uses path/display
+        // scores and must not run while assembling this page.
         if (not short_exact_predictive_prefix_only_mode) and
             (not m_last_lookup_prefix_partial_fast) then
         begin
@@ -160847,6 +161077,7 @@ var
             insert_fixed_quantity_tail_candidate_from_partial;
             remove_bad_fixed_tail_candidates;
         end;
+        restore_short_exact_ranked_order_local;
         normalize_page_and_selection;
         start_index := m_page_index * visible_page_size;
         promoted_repeated_initial_count := 0;
@@ -161425,10 +161656,6 @@ begin
         demote_weak_user_single_chain_below_strong_partial;
         ensure_display_short_exact_head_single_partials_complete;
         ensure_short_exact_two_syllable_relaxed_head_partials_local;
-        if short_context_promoted_exact_text = '' then
-        begin
-            promote_display_full_query_exact_candidate;
-        end;
         note_display_phase('repair');
         build_current_page_result;
         Exit;
