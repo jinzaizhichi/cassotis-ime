@@ -11,7 +11,11 @@
 #ifndef RuntimeDataSourceDir
   #define RuntimeDataSourceDir GetEnv("LOCALAPPDATA") + "\CassotisIme\data"
 #endif
+#ifndef RuntimeBuildId
+  #define RuntimeBuildId "manual"
+#endif
 #define RuntimeRoot "{localappdata}\CassotisIme"
+#define InstallRuntimeDir "{app}\runtime\" + AppVersion + "_" + RuntimeBuildId
 
 [Setup]
 AppId={#MyAppId}
@@ -31,9 +35,10 @@ SolidCompression=no
 OutputDir={#SourceRoot}\out
 OutputBaseFilename=cassotis_ime_setup_{#AppVersion}
 SetupIconFile={#SourceRoot}\cassotis_ime_yanquan.ico
-UninstallDisplayIcon={app}\cassotis_ime_tray_host.exe
+UninstallDisplayIcon={#InstallRuntimeDir}\cassotis_ime_tray_host.exe
 CloseApplications=no
 RestartApplications=no
+SetupLogging=yes
 
 [Languages]
 Name: "chs"; MessagesFile: "compiler:ChineseSimplified.isl"
@@ -44,42 +49,35 @@ Name: "{localappdata}\CassotisIme"
 Name: "{localappdata}\CassotisIme\data"
 Name: "{localappdata}\CassotisIme\logs"
 
-[InstallDelete]
-Type: filesandordirs; Name: "{app}\out"
-
 [Files]
-Source: "{#RuntimeDir}\cassotis_ime_host.exe"; DestDir: "{app}"; Flags: ignoreversion
-Source: "{#RuntimeDir}\cassotis_ime_tray_host.exe"; DestDir: "{app}"; Flags: ignoreversion
-Source: "{#RuntimeDir}\cassotis_ime_svr.dll"; DestDir: "{app}"; Flags: ignoreversion
-Source: "{#RuntimeDir}\cassotis_ime_svr32.dll"; DestDir: "{app}"; Flags: ignoreversion
-Source: "{#RuntimeDir}\cassotis_ime_profile_reg.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#RuntimeDir}\cassotis_ime_host.exe"; DestDir: "{#InstallRuntimeDir}"; Flags: ignoreversion onlyifdoesntexist
+Source: "{#RuntimeDir}\cassotis_ime_tray_host.exe"; DestDir: "{#InstallRuntimeDir}"; Flags: ignoreversion onlyifdoesntexist
+Source: "{#RuntimeDir}\cassotis_ime_svr.dll"; DestDir: "{#InstallRuntimeDir}"; Flags: ignoreversion onlyifdoesntexist
+Source: "{#RuntimeDir}\cassotis_ime_svr32.dll"; DestDir: "{#InstallRuntimeDir}"; Flags: ignoreversion onlyifdoesntexist
+Source: "{#RuntimeDir}\cassotis_ime_profile_reg.exe"; DestDir: "{#InstallRuntimeDir}"; Flags: ignoreversion onlyifdoesntexist
 Source: "{#RuntimeDir}\cassotis_ime_profile_reg.exe"; Flags: dontcopy
-Source: "{#RuntimeDir}\sqlite3_64.dll"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#RuntimeDir}\sqlite3_64.dll"; DestDir: "{#InstallRuntimeDir}"; Flags: ignoreversion onlyifdoesntexist
 
 Source: "{#RuntimeDataSourceDir}\dict_sc.db"; DestDir: "{localappdata}\CassotisIme\data"; DestName: "dict_sc.db"; Flags: ignoreversion
 Source: "{#RuntimeDataSourceDir}\dict_tc.db"; DestDir: "{localappdata}\CassotisIme\data"; DestName: "dict_tc.db"; Flags: ignoreversion
 [Run]
-Filename: "{app}\cassotis_ime_profile_reg.exe"; \
-    Parameters: "stop -force_kill -dll_path ""{app}\cassotis_ime_svr.dll"""; \
-    Flags: runhidden waituntilterminated; \
-    StatusMsg: "Stopping Text Services..."
-Filename: "{app}\cassotis_ime_profile_reg.exe"; \
-    Parameters: "register_tsf -dll_path ""{app}\cassotis_ime_svr.dll"" -skip_profile"; \
+Filename: "{#InstallRuntimeDir}\cassotis_ime_profile_reg.exe"; \
+    Parameters: "register_tsf -dll_path ""{#InstallRuntimeDir}\cassotis_ime_svr.dll"" -skip_profile"; \
     Flags: runhidden waituntilterminated; \
     StatusMsg: "Registering Cassotis IME components..."
-Filename: "{app}\cassotis_ime_profile_reg.exe"; \
+Filename: "{#InstallRuntimeDir}\cassotis_ime_profile_reg.exe"; \
     Parameters: "register"; \
     Flags: runhidden waituntilterminated; \
     StatusMsg: "Registering Cassotis IME profile..."
-Filename: "{app}\cassotis_ime_profile_reg.exe"; \
+Filename: "{#InstallRuntimeDir}\cassotis_ime_profile_reg.exe"; \
     Parameters: "start -restart -ctfmon_only"; \
     Flags: runhidden waituntilterminated runasoriginaluser; \
     StatusMsg: "Preparing text service session..."
-Filename: "{app}\cassotis_ime_profile_reg.exe"; \
+Filename: "{#InstallRuntimeDir}\cassotis_ime_profile_reg.exe"; \
     Parameters: "register"; \
     Flags: runhidden waituntilterminated runasoriginaluser; \
     StatusMsg: "Registering Cassotis IME profile for current user..."
-Filename: "{app}\cassotis_ime_profile_reg.exe"; \
+Filename: "{#InstallRuntimeDir}\cassotis_ime_profile_reg.exe"; \
     Parameters: "start -restart"; \
     Flags: runhidden waituntilterminated runasoriginaluser; \
     StatusMsg: "Starting Cassotis IME..."
@@ -90,12 +88,12 @@ Filename: "{sys}\cmd.exe"; \
     StatusMsg: "Restarting Windows shell..."
 
 [UninstallRun]
-Filename: "{app}\cassotis_ime_profile_reg.exe"; \
-    Parameters: "stop -force_kill -dll_path ""{app}\cassotis_ime_svr.dll"""; \
+Filename: "{#InstallRuntimeDir}\cassotis_ime_profile_reg.exe"; \
+    Parameters: "force_stop_runtime -runtime_dir ""{#InstallRuntimeDir}"" -data_dir ""{localappdata}\CassotisIme\data"" -exclude_pid ""{code:GetCurrentProcessIdText}"""; \
     Flags: runhidden waituntilterminated skipifdoesntexist; \
     RunOnceId: "StopTSF"
-Filename: "{app}\cassotis_ime_profile_reg.exe"; \
-    Parameters: "unregister_tsf -dll_path ""{app}\cassotis_ime_svr.dll"""; \
+Filename: "{#InstallRuntimeDir}\cassotis_ime_profile_reg.exe"; \
+    Parameters: "unregister_tsf -dll_path ""{#InstallRuntimeDir}\cassotis_ime_svr.dll"""; \
     Flags: runhidden waituntilterminated skipifdoesntexist; \
     RunOnceId: "UnregisterTSF"
 
@@ -105,6 +103,8 @@ chs.PreparingUnregisterRuntime=正在停用旧版本输入法组件...
 chs.PreparingForceCloseRuntime=正在关闭占用旧版本文件的程序...
 chs.PreparingWaitRuntime=正在等待旧版本文件释放...
 chs.RuntimeReleaseFailed=旧版本文件仍被占用，安装程序已停止。请关闭仍在使用 Cassotis IME 的应用后重新运行安装包。
+chs.RuntimeReleaseLockedFile=仍被占用的文件：
+chs.RuntimeReleaseProcesses=检测到的相关进程：
 chs.ForceCloseRuntimePrompt=为完成升级安装，安装程序将自动关闭以下正在占用旧版本文件的进程：
 chs.ForceCloseRuntimeContinue=点击“确定”继续，点击“取消”中止安装。
 chs.ForceCloseRuntimeCanceled=用户取消了升级安装。
@@ -113,6 +113,8 @@ english.PreparingUnregisterRuntime=Disabling existing Cassotis IME components...
 english.PreparingForceCloseRuntime=Closing applications still using existing runtime files...
 english.PreparingWaitRuntime=Waiting for existing runtime files to be released...
 english.RuntimeReleaseFailed=Setup could not release the files used by the existing Cassotis IME runtime. Please close applications still using Cassotis IME and run Setup again.
+english.RuntimeReleaseLockedFile=File still in use:
+english.RuntimeReleaseProcesses=Related processes detected:
 english.ForceCloseRuntimePrompt=To continue the upgrade, Setup will automatically close the following processes that are still using existing runtime files:
 english.ForceCloseRuntimeContinue=Click OK to continue, or Cancel to abort Setup.
 english.ForceCloseRuntimeCanceled=Upgrade canceled by user.
@@ -126,7 +128,8 @@ const
     c_invalid_handle_value = -1;
     c_runtime_unlock_wait_attempts = 40;
     c_runtime_unlock_wait_ms = 250;
-    c_runtime_retry_force_stop_attempt = 20;
+    c_disable_ime_for_all_process_threads = $FFFFFFFF;
+    c_tsf_inproc_registry_path = 'Software\Classes\CLSID\{38D40A05-DCDB-49FB-81A4-C8745882DC21}\InprocServer32';
 
 var
     RuntimePrepPage: TOutputProgressWizardPage;
@@ -143,6 +146,29 @@ function CloseHandle(hObject: Integer): Boolean;
 external 'CloseHandle@kernel32.dll stdcall';
 function GetCurrentProcessId: DWORD;
 external 'GetCurrentProcessId@kernel32.dll stdcall';
+function ImmDisableIME(ThreadId: DWORD): Boolean;
+external 'ImmDisableIME@imm32.dll stdcall';
+
+function GetCurrentProcessIdText(const Param: string): string;
+begin
+    Result := IntToStr(Integer(GetCurrentProcessId));
+end;
+
+function InitializeSetup: Boolean;
+begin
+    { Inno Setup is a 32-bit process. Disable text services before the wizard
+      creates edit controls, otherwise the installed 32-bit TSF DLL can be
+      loaded into Setup itself and can never be replaced by that process. }
+    if ImmDisableIME(c_disable_ime_for_all_process_threads) then
+    begin
+        Log('Disabled IME loading in the Setup process before creating the wizard.');
+    end
+    else
+    begin
+        Log('ImmDisableIME did not disable IME loading in the Setup process.');
+    end;
+    Result := True;
+end;
 
 function GetRuntimeRoot: string;
 begin
@@ -189,13 +215,14 @@ begin
     Result := InstallerProfileRegPath;
 end;
 
-function GetForceStopTargetsText(const RuntimeDir: string): string;
+function GetForceStopTargetsText(const RuntimeDir: string; const ExcludeInstaller: Boolean): string;
 var
     ProfileRegPath: string;
     ResultCode: Integer;
     LoadedLines: TArrayOfString;
     Index: Integer;
     InstallerPid: DWORD;
+    Arguments: string;
 begin
     Result := '';
     if RuntimeDir = '' then
@@ -205,11 +232,17 @@ begin
 
     ProfileRegPath := GetInstallerProfileRegPath;
     InstallerPid := GetCurrentProcessId;
+    Arguments :=
+        'list_force_stop_targets -runtime_dir "' + RuntimeDir + '" -data_dir "' + GetRuntimeDataDir +
+        '" -output_path "' + ForceStopTargetsPath + '" -skip_dll_holders';
+    if ExcludeInstaller then
+    begin
+        Arguments := Arguments + ' -exclude_pid "' + IntToStr(Integer(InstallerPid)) + '"';
+    end;
     DeleteFile(ForceStopTargetsPath);
     if not Exec(
         ProfileRegPath,
-        'list_force_stop_targets -runtime_dir "' + RuntimeDir + '" -data_dir "' + GetRuntimeDataDir +
-            '" -output_path "' + ForceStopTargetsPath + '" -exclude_pid "' + IntToStr(Integer(InstallerPid)) + '"',
+        Arguments,
         '',
         SW_HIDE,
         ewWaitUntilTerminated,
@@ -267,7 +300,7 @@ begin
         Exit;
     end;
 
-    TargetsText := GetForceStopTargetsText(RuntimeDir);
+    TargetsText := GetForceStopTargetsText(RuntimeDir, True);
     if TargetsText = '' then
     begin
         Result := True;
@@ -341,7 +374,7 @@ end;
 
 function RuntimeFilesReleased(const RuntimeDir: string; out LockedFile: string): Boolean;
 var
-    Files: array[0..7] of string;
+    Files: array[0..1] of string;
     Index: Integer;
 begin
     LockedFile := '';
@@ -351,14 +384,10 @@ begin
         Exit;
     end;
 
-    Files[0] := AddBackslash(RuntimeDir) + 'cassotis_ime_host.exe';
-    Files[1] := AddBackslash(RuntimeDir) + 'cassotis_ime_tray_host.exe';
-    Files[2] := AddBackslash(RuntimeDir) + 'cassotis_ime_svr.dll';
-    Files[3] := AddBackslash(RuntimeDir) + 'cassotis_ime_svr32.dll';
-    Files[4] := AddBackslash(RuntimeDir) + 'cassotis_ime_profile_reg.exe';
-    Files[5] := AddBackslash(RuntimeDir) + 'sqlite3_64.dll';
-    Files[6] := AddBackslash(GetRuntimeDataDir) + 'dict_sc.db';
-    Files[7] := AddBackslash(GetRuntimeDataDir) + 'dict_tc.db';
+    { Runtime binaries are installed side by side and are never overwritten.
+      Only the shared dictionary snapshots still require exclusive replacement. }
+    Files[0] := AddBackslash(GetRuntimeDataDir) + 'dict_sc.db';
+    Files[1] := AddBackslash(GetRuntimeDataDir) + 'dict_tc.db';
 
     for Index := 0 to GetArrayLength(Files) - 1 do
     begin
@@ -371,6 +400,43 @@ begin
     end;
 
     Result := True;
+end;
+
+function NormalizeRegisteredDllPath(const Value: string): string;
+begin
+    Result := Trim(Value);
+    if (Length(Result) >= 2) and (Result[1] = '"') and (Result[Length(Result)] = '"') then
+    begin
+        Result := Copy(Result, 2, Length(Result) - 2);
+    end;
+end;
+
+function GetRegisteredRuntimeDir: string;
+var
+    RegisteredDllPath: string;
+begin
+    Result := '';
+    RegisteredDllPath := '';
+    if not RegQueryStringValue(HKLM64, c_tsf_inproc_registry_path, '', RegisteredDllPath) then
+    begin
+        if not RegQueryStringValue(HKCU64, c_tsf_inproc_registry_path, '', RegisteredDllPath) then
+        begin
+            if not RegQueryStringValue(HKLM32, c_tsf_inproc_registry_path, '', RegisteredDllPath) then
+            begin
+                RegQueryStringValue(HKCU32, c_tsf_inproc_registry_path, '', RegisteredDllPath);
+            end;
+        end;
+    end;
+
+    RegisteredDllPath := NormalizeRegisteredDllPath(RegisteredDllPath);
+    if RegisteredDllPath = '' then
+    begin
+        Log('No existing Cassotis IME COM server path was found in the registry.');
+        Exit;
+    end;
+
+    Result := ExtractFileDir(RegisteredDllPath);
+    Log(Format('Registered Cassotis IME runtime detected: %s', [Result]));
 end;
 
 function RuntimeDirHasManagedFiles(const RuntimeDir: string): Boolean;
@@ -515,7 +581,7 @@ begin
     if Exec(
         ProfileRegPath,
         'force_stop_runtime -runtime_dir "' + RuntimeDir + '" -data_dir "' + GetRuntimeDataDir +
-            '" -exclude_pid "' + IntToStr(Integer(InstallerPid)) + '"',
+            '" -exclude_pid "' + IntToStr(Integer(InstallerPid)) + '" -skip_dll_holders',
         '',
         SW_HIDE,
         ewWaitUntilTerminated,
@@ -530,12 +596,13 @@ begin
     end;
 end;
 
-function WaitForRuntimeRelease(const RuntimeDir: string): Boolean;
+function WaitForRuntimeRelease(const RuntimeDir: string; out LastLockedFile: string): Boolean;
 var
     Attempt: Integer;
     LockedFile: string;
 begin
     Result := True;
+    LastLockedFile := '';
     if RuntimeDir = '' then
     begin
         Exit;
@@ -566,19 +633,10 @@ begin
             Result := True;
             Exit;
         end;
+        LastLockedFile := LockedFile;
         if (Attempt = 1) or ((Attempt mod 4) = 0) then
         begin
             Log(Format('Waiting for locked file to be released: %s', [LockedFile]));
-        end;
-        if Attempt = c_runtime_retry_force_stop_attempt then
-        begin
-            Log(Format('Retrying cleanup while waiting for runtime release: %s', [RuntimeDir]));
-            TryForceStopProcessesUsingImeModules(RuntimeDir);
-            if not TryUnregisterExistingRuntime(RuntimeDir) then
-            begin
-                Log(Format('Retry unregister_tsf did not fully succeed while waiting: %s', [RuntimeDir]));
-            end;
-            TryStopExistingRuntime(RuntimeDir);
         end;
         Sleep(c_runtime_unlock_wait_ms);
     end;
@@ -592,12 +650,23 @@ var
     RootRuntimeDir: string;
     LegacyRuntimeDir: string;
     ActiveRuntimeDir: string;
+    RegisteredRuntimeDir: string;
+    RuntimeUnregistered: Boolean;
+    LockedFile: string;
+    TargetsText: string;
+    FailureText: string;
 begin
     NeedsRestart := False;
+    Log('Versioned runtime destination: ' + ExpandConstant('{#InstallRuntimeDir}'));
     RootRuntimeDir := ExpandConstant('{app}');
     LegacyRuntimeDir := ExpandConstant('{app}\out');
     ActiveRuntimeDir := '';
-    if RuntimeDirHasManagedFiles(RootRuntimeDir) then
+    RegisteredRuntimeDir := GetRegisteredRuntimeDir;
+    if RuntimeDirHasManagedFiles(RegisteredRuntimeDir) then
+    begin
+        ActiveRuntimeDir := RegisteredRuntimeDir;
+    end
+    else if RuntimeDirHasManagedFiles(RootRuntimeDir) then
     begin
         ActiveRuntimeDir := RootRuntimeDir;
     end
@@ -624,17 +693,31 @@ begin
         Result := ExpandConstant('{cm:ForceCloseRuntimeCanceled}');
         Exit;
     end;
-    TryForceStopProcessesUsingImeModules(ActiveRuntimeDir);
-    TryStopExistingRuntime(ActiveRuntimeDir);
-    if not TryUnregisterExistingRuntime(ActiveRuntimeDir) then
+    { Disable the profile before terminating holders. Otherwise Win10 can restart
+      ctfmon or shell processes and load the old DLL again during this window. }
+    RuntimeUnregistered := TryUnregisterExistingRuntime(ActiveRuntimeDir);
+    if not RuntimeUnregistered then
     begin
         Log(Format('Initial unregister_tsf did not fully succeed: %s', [ActiveRuntimeDir]));
     end;
-    TryStopExistingRuntime(ActiveRuntimeDir);
-    if not WaitForRuntimeRelease(ActiveRuntimeDir) then
+    TryForceStopProcessesUsingImeModules(ActiveRuntimeDir);
+    if not WaitForRuntimeRelease(ActiveRuntimeDir, LockedFile) then
     begin
         HidePreparingStatus;
-        Result := ExpandConstant('{cm:RuntimeReleaseFailed}');
+        TargetsText := GetForceStopTargetsText(ActiveRuntimeDir, False);
+        FailureText := ExpandConstant('{cm:RuntimeReleaseFailed}');
+        if LockedFile <> '' then
+        begin
+            FailureText := FailureText + #13#10#13#10 +
+                ExpandConstant('{cm:RuntimeReleaseLockedFile}') + #13#10 + LockedFile;
+        end;
+        if TargetsText <> '' then
+        begin
+            FailureText := FailureText + #13#10#13#10 +
+                ExpandConstant('{cm:RuntimeReleaseProcesses}') + #13#10 + TargetsText;
+        end;
+        Log('Runtime release failure details:' + #13#10 + FailureText);
+        Result := FailureText;
         Exit;
     end;
 

@@ -957,13 +957,14 @@ begin
     end;
 end;
 
-function get_force_stop_target_files(const runtime_dir: string; const data_dir: string): TArray<string>;
+function get_force_stop_target_files(const runtime_dir: string; const data_dir: string;
+    const include_dll_files: Boolean): TArray<string>;
 var
     files: TList<string>;
 begin
     files := TList<string>.Create;
     try
-        if runtime_dir <> '' then
+        if include_dll_files and (runtime_dir <> '') then
         begin
             files.Add(TPath.Combine(runtime_dir, 'cassotis_ime_svr.dll'));
             files.Add(TPath.Combine(runtime_dir, 'cassotis_ime_svr32.dll'));
@@ -979,7 +980,8 @@ begin
     end;
 end;
 
-function collect_force_stop_targets(const runtime_dir: string; const data_dir: string): TArray<TncProcessInfo>;
+function collect_force_stop_targets(const runtime_dir: string; const data_dir: string;
+    const include_dll_holders: Boolean): TArray<TncProcessInfo>;
 var
     list: TList<TncProcessInfo>;
     seen: TDictionary<Cardinal, Boolean>;
@@ -1019,7 +1021,7 @@ begin
             end;
         end;
 
-        files := get_force_stop_target_files(runtime_dir, data_dir);
+        files := get_force_stop_target_files(runtime_dir, data_dir, include_dll_holders);
         for idx := 0 to High(files) do
         begin
             file_name := ExtractFileName(files[idx]);
@@ -1124,6 +1126,7 @@ var
     processes: TArray<TncProcessInfo>;
     lines: TArray<string>;
     idx: Integer;
+    include_dll_holders: Boolean;
 begin
     runtime_dir := '';
     data_dir := '';
@@ -1131,8 +1134,9 @@ begin
     get_param_value('runtime_dir', runtime_dir);
     get_param_value('data_dir', data_dir);
     get_param_value('output_path', output_path);
+    include_dll_holders := not has_switch('skip_dll_holders');
 
-    processes := collect_force_stop_targets(runtime_dir, data_dir);
+    processes := collect_force_stop_targets(runtime_dir, data_dir, include_dll_holders);
     sort_process_infos_by_pid(processes);
     lines := format_force_stop_target_lines(processes);
     Result := write_force_stop_target_lines(output_path, lines);
@@ -1151,6 +1155,7 @@ var
     remaining: TArray<TncProcessInfo>;
     lines: TArray<string>;
     idx: Integer;
+    include_dll_holders: Boolean;
 begin
     runtime_dir := '';
     data_dir := '';
@@ -1158,8 +1163,9 @@ begin
     get_param_value('runtime_dir', runtime_dir);
     get_param_value('data_dir', data_dir);
     get_param_value('output_path', output_path);
+    include_dll_holders := not has_switch('skip_dll_holders');
 
-    processes := collect_force_stop_targets(runtime_dir, data_dir);
+    processes := collect_force_stop_targets(runtime_dir, data_dir, include_dll_holders);
     sort_process_infos_by_pid(processes);
     lines := format_force_stop_target_lines(processes);
     Result := True;
@@ -1174,7 +1180,7 @@ begin
 
     Sleep(500);
 
-    remaining := collect_force_stop_targets(runtime_dir, data_dir);
+    remaining := collect_force_stop_targets(runtime_dir, data_dir, include_dll_holders);
     sort_process_infos_by_pid(remaining);
     if Length(remaining) > 0 then
     begin

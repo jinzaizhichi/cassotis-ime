@@ -84,10 +84,33 @@ foreach ($relativePath in $requiredFiles) {
     require-path (Join-Path $resolvedSourceRoot $relativePath)
 }
 
+$runtimeFingerprintFiles = @(
+    'out\cassotis_ime_host.exe',
+    'out\cassotis_ime_tray_host.exe',
+    'out\cassotis_ime_svr.dll',
+    'out\cassotis_ime_svr32.dll',
+    'out\cassotis_ime_profile_reg.exe',
+    'out\sqlite3_64.dll'
+)
+$fingerprintSource = ($runtimeFingerprintFiles | ForEach-Object {
+    (Get-FileHash -LiteralPath (Join-Path $resolvedSourceRoot $_) -Algorithm SHA256).Hash
+}) -join "`n"
+$fingerprintHasher = [Security.Cryptography.SHA256]::Create()
+try {
+    $fingerprintBytes = [Text.Encoding]::UTF8.GetBytes($fingerprintSource)
+    $runtimeBuildId = ([BitConverter]::ToString(
+        $fingerprintHasher.ComputeHash($fingerprintBytes)
+    )).Replace('-', '').Substring(0, 12).ToLowerInvariant()
+}
+finally {
+    $fingerprintHasher.Dispose()
+}
+
 require-path (Join-Path $runtimeDataSourceDir 'dict_sc.db')
 require-path (Join-Path $runtimeDataSourceDir 'dict_tc.db')
 
-& $iscc ("/DAppVersion=$Version") ("/DSourceRoot=$resolvedSourceRoot") ("/DRuntimeDataSourceDir=$runtimeDataSourceDir") $resolvedScriptPath
+Write-Host "[installer] runtime_build_id=$runtimeBuildId"
+& $iscc ("/DAppVersion=$Version") ("/DRuntimeBuildId=$runtimeBuildId") ("/DSourceRoot=$resolvedSourceRoot") ("/DRuntimeDataSourceDir=$runtimeDataSourceDir") $resolvedScriptPath
 if ($LASTEXITCODE -ne 0) {
     throw "ISCC failed with exit code $LASTEXITCODE"
 }
