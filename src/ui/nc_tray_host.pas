@@ -27,6 +27,7 @@ uses
     nc_ipc_common,
     nc_ipc_client,
     nc_log,
+    nc_dpi_scale,
     nc_shortcut,
     nc_settings_form,
     nc_types;
@@ -133,6 +134,7 @@ type
         procedure configure_tray;
         procedure configure_menu;
         procedure configure_status_widget;
+        procedure apply_status_widget_font_metrics(const dpi: Integer);
         function get_config_write_time: TDateTime;
         procedure load_status_widget_state;
         procedure save_status_widget_state;
@@ -434,7 +436,7 @@ begin
     begin
         Exit;
     end;
-    canvas.Font.Height := -MulDiv(point_size, dpi, 72);
+    canvas.Font.Height := nc_font_height_for_dpi(point_size, dpi);
 end;
 
 procedure TncStatusForm.CreateParams(var Params: TCreateParams);
@@ -1450,6 +1452,44 @@ begin
     refresh_status_widget_frame;
 end;
 
+procedure TncTrayHost.apply_status_widget_font_metrics(const dpi: Integer);
+var
+    label_height: Integer;
+begin
+    label_height := nc_font_height_for_dpi(9, dpi);
+
+    if m_status_panel <> nil then
+    begin
+        m_status_panel.Font.Name := 'Microsoft YaHei UI';
+        m_status_panel.Font.Height := label_height;
+    end;
+    if m_status_label_mode <> nil then
+    begin
+        m_status_label_mode.Font.Name := 'Microsoft YaHei UI';
+        m_status_label_mode.Font.Height := label_height;
+    end;
+    if m_status_label_variant <> nil then
+    begin
+        m_status_label_variant.Font.Name := 'Microsoft YaHei UI';
+        m_status_label_variant.Font.Height := label_height;
+    end;
+    if m_status_label_scheme <> nil then
+    begin
+        m_status_label_scheme.Font.Name := 'Microsoft YaHei UI';
+        m_status_label_scheme.Font.Height := label_height;
+    end;
+    if m_status_label_full_width <> nil then
+    begin
+        m_status_label_full_width.Font.Name := 'Microsoft YaHei UI';
+        m_status_label_full_width.Font.Height := label_height;
+    end;
+    if m_status_btn_settings <> nil then
+    begin
+        m_status_btn_settings.Font.Name := 'Segoe MDL2 Assets';
+        m_status_btn_settings.Font.Height := nc_font_height_for_dpi(10, dpi);
+    end;
+end;
+
 procedure TncTrayHost.enforce_application_toolwindow_style;
 var
     ex_style: NativeInt;
@@ -1765,6 +1805,10 @@ begin
         m_status_form.ScaleForPPI(dpi);
         m_status_scaled_dpi := dpi;
     end;
+
+    // Win10 can initialize VCL fonts at the monitor DPI before ScaleForPPI.
+    // Reapply point sizes from the current DPI so they are never scaled twice.
+    apply_status_widget_font_metrics(dpi);
 
     desired_width := scale_int_for_dpi(c_status_widget_default_width, dpi);
     desired_height := scale_int_for_dpi(c_status_widget_default_height, dpi);

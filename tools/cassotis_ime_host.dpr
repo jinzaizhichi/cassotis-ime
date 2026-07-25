@@ -12,6 +12,7 @@ uses
     nc_dictionary_intf in '..\src\engine\nc_dictionary_intf.pas',
     nc_dictionary_sqlite in '..\src\engine\nc_dictionary_sqlite.pas',
     nc_pinyin_parser in '..\src\engine\nc_pinyin_parser.pas',
+    nc_dpi_awareness in '..\src\common\nc_dpi_awareness.pas',
     nc_config in '..\src\common\nc_config.pas',
     nc_types in '..\src\common\nc_types.pas',
     nc_log in '..\src\common\nc_log.pas',
@@ -255,47 +256,6 @@ begin
     append_log_line_shared(log_path, line);
 end;
 
-procedure try_enable_per_monitor_dpi;
-type
-    Tset_process_dpi_awareness_context = function(const value: THandle): BOOL; stdcall;
-    Tset_process_dpi_awareness = function(const value: Integer): HRESULT; stdcall;
-const
-    c_dpi_awareness_per_monitor = 2;
-    c_dpi_awareness_context_per_monitor_v2 = THandle(-4);
-var
-    user32: HMODULE;
-    shcore: HMODULE;
-    set_context: Tset_process_dpi_awareness_context;
-    set_awareness: Tset_process_dpi_awareness;
-begin
-    user32 := GetModuleHandle('user32.dll');
-    if user32 <> 0 then
-    begin
-        set_context := Tset_process_dpi_awareness_context(GetProcAddress(user32, 'SetProcessDpiAwarenessContext'));
-        if Assigned(set_context) then
-        begin
-            set_context(c_dpi_awareness_context_per_monitor_v2);
-            Exit;
-        end;
-    end;
-
-    shcore := LoadLibrary('shcore.dll');
-    if shcore = 0 then
-    begin
-        Exit;
-    end;
-
-    try
-        set_awareness := Tset_process_dpi_awareness(GetProcAddress(shcore, 'SetProcessDpiAwareness'));
-        if Assigned(set_awareness) then
-        begin
-            set_awareness(c_dpi_awareness_per_monitor);
-        end;
-    finally
-        FreeLibrary(shcore);
-    end;
-end;
-
 begin
     host_mutex := 0;
     log_enabled := False;
@@ -311,7 +271,7 @@ begin
             append_log(Format('runtime data dir=%s user dict=%s',
                 [get_runtime_data_directory, get_default_user_dictionary_path]));
             ensure_tray_host_running;
-            try_enable_per_monitor_dpi;
+            nc_enable_per_monitor_dpi;
             Application.Initialize;
             Application.MainFormOnTaskbar := False;
             Application.ShowMainForm := False;
