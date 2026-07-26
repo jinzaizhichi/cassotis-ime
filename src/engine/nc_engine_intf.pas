@@ -102191,6 +102191,12 @@ var
             function is_initial_final_compatible_local(
                 const initial_value: string; const final_value: string): Boolean;
             begin
+                if not nc_is_pinyin_spelling_helper_compatible(initial_value,
+                    final_value) then
+                begin
+                    Exit(False);
+                end;
+
                 if (initial_value = 'zh') or (initial_value = 'ch') or
                     (initial_value = 'sh') or (initial_value = 'r') or
                     (initial_value = 'z') or (initial_value = 'c') or
@@ -126313,6 +126319,12 @@ var
     function is_initial_final_compatible_local(const initial_value: string;
         const final_value: string): Boolean;
     begin
+        if not nc_is_pinyin_spelling_helper_compatible(initial_value,
+            final_value) then
+        begin
+            Exit(False);
+        end;
+
         if (initial_value = 'zh') or (initial_value = 'ch') or (initial_value = 'sh') or
             (initial_value = 'r') or (initial_value = 'z') or (initial_value = 'c') or
             (initial_value = 's') then

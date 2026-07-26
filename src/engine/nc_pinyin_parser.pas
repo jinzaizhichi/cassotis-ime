@@ -20,6 +20,9 @@ type
         function parse(const input_text: string): TncPinyinParseResult;
     end;
 
+function nc_is_pinyin_spelling_helper_compatible(const initial_value: string;
+    const final_value: string): Boolean;
+
 implementation
 
 const
@@ -44,6 +47,33 @@ const
         'ai', 'an', 'ao', 'ei', 'en', 'er', 'ou',
         'a', 'e', 'o', 'r'
     );
+
+function nc_is_pinyin_spelling_helper_compatible(const initial_value: string;
+    const final_value: string): Boolean;
+begin
+    if initial_value = 'y' then
+    begin
+        Exit((final_value = 'a') or (final_value = 'an') or
+            (final_value = 'ang') or (final_value = 'ao') or
+            (final_value = 'e') or (final_value = 'i') or
+            (final_value = 'in') or (final_value = 'ing') or
+            (final_value = 'o') or (final_value = 'ong') or
+            (final_value = 'ou') or (final_value = 'u') or
+            (final_value = 'ue') or (final_value = 'uan') or
+            (final_value = 'un'));
+    end;
+
+    if initial_value = 'w' then
+    begin
+        Exit((final_value = 'a') or (final_value = 'ai') or
+            (final_value = 'an') or (final_value = 'ang') or
+            (final_value = 'ei') or (final_value = 'en') or
+            (final_value = 'eng') or (final_value = 'o') or
+            (final_value = 'u'));
+    end;
+
+    Result := True;
+end;
 
 function TncPinyinParser.parse(const input_text: string): TncPinyinParseResult; 
 var
@@ -93,29 +123,14 @@ var
             Exit(False);
         end;
 
-        // y/w are spelling helpers in pinyin. Do not accept non-standard
-        // expanded spellings such as yian/wuan; otherwise compact input with a
-        // missing apostrophe is greedily merged and the intended syllables never
-        // reach the engine lattice.
-        if initial_value = 'y' then
+        // y/w are spelling helpers in pinyin, so their legal combinations are
+        // much narrower than ordinary initials. Use allowlists here: accepting
+        // synthetic spellings such as yian, yuai, or wuan steals compact-input
+        // boundaries (for example, yu+ai becomes the invalid single unit yuai).
+        if not nc_is_pinyin_spelling_helper_compatible(initial_value,
+            final_value) then
         begin
-            if (final_value = 'ia') or (final_value = 'ian') or
-                (final_value = 'iang') or (final_value = 'iao') or
-                (final_value = 'ie') or (final_value = 'iong') or
-                (final_value = 'iu') then
-            begin
-                Exit(False);
-            end;
-        end
-        else if initial_value = 'w' then
-        begin
-            if (final_value = 'ua') or (final_value = 'uai') or
-                (final_value = 'uan') or (final_value = 'uang') or
-                (final_value = 'ui') or (final_value = 'un') or
-                (final_value = 'uo') then
-            begin
-                Exit(False);
-            end;
+            Exit(False);
         end;
 
         // j/q/x use u as the written form of ü only for u/ue/uan/un.
