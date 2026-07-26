@@ -91,6 +91,8 @@ type
         first_chunk_units: Integer;
         anchor_units: Integer;
         has_anchor: Boolean;
+        baseline_lineage: Boolean;
+        baseline_selected: Boolean;
         selected: Boolean;
         target: Boolean;
         text: string;
@@ -100,6 +102,9 @@ type
     TncLongChainCandidateDebug = record
         original_rank: Integer;
         order_score: Integer;
+        first_stage_score: Integer;
+        second_stage_score: Int64;
+        promotion_rank: Integer;
         base_score: Integer;
         char_lm_score: Integer;
         word_lm_bonus: Integer;
@@ -108,6 +113,7 @@ type
         max_segment_units: Integer;
         anchor_units: Integer;
         has_anchor: Boolean;
+        baseline_lineage: Boolean;
         target: Boolean;
         text: string;
         segment_path: string;
@@ -494,6 +500,8 @@ type
 implementation
 
 uses
+    nc_long_search_ranker_model,
+    nc_long_second_stage_ranker_model,
     nc_long_local_reranker_model,
     nc_long_local_residual_model,
     nc_short_context_reranker_model,
@@ -43866,9 +43874,12 @@ var
         c_chain_length_bonus = 2000;
         c_chain_anchor_bonus = 3200;
         c_chain_lattice_max_chunk_syllables = 8;
-        c_chain_lattice_beam_width = 6;
-        c_chain_lattice_prebeam_width = 12;
-        c_chain_lattice_long_prebeam_width = 20;
+        c_chain_lattice_baseline_beam_width = 6;
+        c_chain_lattice_beam_width = 8;
+        c_chain_lattice_baseline_prebeam_width = 12;
+        c_chain_lattice_baseline_long_prebeam_width = 20;
+        c_chain_lattice_prebeam_width = 16;
+        c_chain_lattice_long_prebeam_width = 28;
         c_chain_lattice_long_prebeam_min_syllables = 13;
         c_chain_lattice_lm_reserved_slots = 1;
         c_chain_lattice_lm_min_bonus = 360;
@@ -43900,6 +43911,7 @@ var
             segments: Integer;
             has_anchor: Boolean;
             anchor_units: Integer;
+            baseline_lineage: Boolean;
         end;
         TExactChunkChainStateArray = TArray<TExactChunkChainState>;
         TExactChunkChainOption = record
@@ -44000,6 +44012,22 @@ var
                 end;
             end;
             Result := Max(Result, get_chain_beam_width_local);
+        end;
+
+        function get_chain_baseline_prebeam_width_local: Integer;
+        begin
+            if syllable_count_local >=
+                c_chain_lattice_long_prebeam_min_syllables then
+            begin
+                Result := c_chain_lattice_baseline_long_prebeam_width;
+            end
+            else
+            begin
+                Result := c_chain_lattice_baseline_prebeam_width;
+            end;
+            Result := Min(Result, get_chain_prebeam_width_local);
+            Result := Max(Result, Min(c_chain_lattice_baseline_beam_width,
+                get_chain_beam_width_local));
         end;
 
         function get_chain_char_base_slots_local: Integer;
@@ -48026,6 +48054,11 @@ var
             effective_state_limit: Integer;
             beam_width_local: Integer;
             prebeam_width_local: Integer;
+            baseline_prebeam_width_local: Integer;
+            baseline_count_local: Integer;
+            removal_idx_local: Integer;
+            shift_idx_local: Integer;
+            reposition_replaced_state_local: Boolean;
         begin
             if candidate_state.text = '' then
             begin
@@ -48065,10 +48098,44 @@ var
             begin
                 if SameText(states[state_idx].text, candidate_state.text) then
                 begin
-                    if is_exact_chunk_chain_state_better_local(candidate_state,
-                        states[state_idx]) then
+                    reposition_replaced_state_local := False;
+                    if candidate_state.baseline_lineage and
+                        (not states[state_idx].baseline_lineage) then
                     begin
                         states[state_idx] := candidate_state;
+                        reposition_replaced_state_local := True;
+                    end
+                    else if states[state_idx].baseline_lineage and
+                        (not candidate_state.baseline_lineage) then
+                    begin
+                        { Preserve the exact baseline continuation. }
+                    end
+                    else if is_exact_chunk_chain_state_better_local(
+                        candidate_state, states[state_idx]) then
+                    begin
+                        states[state_idx] := candidate_state;
+                    end;
+                    if reposition_replaced_state_local then
+                    begin
+                        insert_idx := state_idx;
+                        while (insert_idx > 0) and
+                            is_exact_chunk_chain_state_better_local(
+                            states[insert_idx], states[insert_idx - 1]) do
+                        begin
+                            existing_state := states[insert_idx - 1];
+                            states[insert_idx - 1] := states[insert_idx];
+                            states[insert_idx] := existing_state;
+                            Dec(insert_idx);
+                        end;
+                        while (insert_idx < High(states)) and
+                            is_exact_chunk_chain_state_better_local(
+                            states[insert_idx + 1], states[insert_idx]) do
+                        begin
+                            existing_state := states[insert_idx + 1];
+                            states[insert_idx + 1] := states[insert_idx];
+                            states[insert_idx] := existing_state;
+                            Inc(insert_idx);
+                        end;
                     end;
                     if candidate_is_target_suffix then
                     begin
@@ -48143,7 +48210,44 @@ var
                         end;
                     end;
                 end;
-                SetLength(states, effective_state_limit);
+                removal_idx_local := High(states);
+                if (effective_state_limit = prebeam_width_local) and
+                    (prebeam_width_local >
+                    get_chain_baseline_prebeam_width_local) then
+                begin
+                    baseline_prebeam_width_local :=
+                        get_chain_baseline_prebeam_width_local;
+                    baseline_count_local := 0;
+                    for state_idx := 0 to High(states) do
+                    begin
+                        if states[state_idx].baseline_lineage then
+                        begin
+                            Inc(baseline_count_local);
+                        end;
+                    end;
+                    if baseline_count_local <= baseline_prebeam_width_local then
+                    begin
+                        removal_idx_local := -1;
+                        for state_idx := High(states) downto 0 do
+                        begin
+                            if not states[state_idx].baseline_lineage then
+                            begin
+                                removal_idx_local := state_idx;
+                                Break;
+                            end;
+                        end;
+                        if removal_idx_local < 0 then
+                        begin
+                            removal_idx_local := High(states);
+                        end;
+                    end;
+                end;
+                for shift_idx_local := removal_idx_local to
+                    High(states) - 1 do
+                begin
+                    states[shift_idx_local] := states[shift_idx_local + 1];
+                end;
+                SetLength(states, Length(states) - 1);
             end;
 
             if candidate_is_target_suffix then
@@ -49106,6 +49210,7 @@ var
             c_fast_completion_bonus = 2200;
         var
             state_map_local: array of TExactChunkChainStateArray;
+            baseline_candidates_local: TExactChunkChainStateArray;
             pos_local: Integer;
             chunk_len_local: Integer;
             next_pos_local: Integer;
@@ -49132,6 +49237,8 @@ var
             alternative_score_local: Integer;
             alternative_state_local: TExactChunkChainState;
             minimum_score_local: Integer;
+            baseline_acceptance_score_local: Integer;
+            baseline_acceptance_found_local: Boolean;
 
             function try_get_sentence_final_modal_particle_text_fast_local(
                 const syllable_key_local: string; out out_text_local: string): Boolean;
@@ -51249,30 +51356,15 @@ var
                 Result := c_default_long_chain_ranker_profile;
             end;
 
-            function get_long_chain_ranker_correction_local(
+            procedure get_long_chain_structure_stats_local(
                 const state_inner: TExactChunkChainState;
-                const char_lm_score_inner: Integer;
-                const word_lm_bonus_inner: Integer;
-                const profile_inner: Integer): Integer;
+                out single_segments_inner: Integer;
+                out max_segment_units_inner: Integer);
             var
-                correction_inner: Int64;
-                correction_cap_inner: Integer;
-                single_segments_inner: Integer;
-                max_segment_units_inner: Integer;
                 part_units_inner: Integer;
                 parts_inner: TArray<string>;
                 part_inner: string;
             begin
-                Result := 0;
-                if (profile_inner <= 0) or (syllable_count_local <= 5) then
-                begin
-                    Exit;
-                end;
-
-                { These bounded residual coefficients are learned from an
-                  independent novel/chat/formal corpus. They only reorder
-                  complete long-chain states; short exact candidates bypass
-                  this path. }
                 single_segments_inner := 0;
                 max_segment_units_inner := 0;
                 parts_inner := state_inner.path.Split(
@@ -51288,6 +51380,29 @@ var
                     max_segment_units_inner := Max(max_segment_units_inner,
                         part_units_inner);
                 end;
+            end;
+
+            function get_long_chain_ranker_correction_local(
+                const state_inner: TExactChunkChainState;
+                const char_lm_score_inner: Integer;
+                const word_lm_bonus_inner: Integer;
+                const profile_inner: Integer;
+                const single_segments_inner: Integer;
+                const max_segment_units_inner: Integer): Integer;
+            var
+                correction_inner: Int64;
+                correction_cap_inner: Integer;
+            begin
+                Result := 0;
+                if (profile_inner <= 0) or (syllable_count_local <= 5) then
+                begin
+                    Exit;
+                end;
+
+                { These bounded residual coefficients are learned from an
+                  independent novel/chat/formal corpus. They only reorder
+                  complete long-chain states; short exact candidates bypass
+                  this path. }
                 if profile_inner = 1 then
                 begin
                     correction_inner := Int64(char_lm_score_inner) * 15 +
@@ -51322,21 +51437,74 @@ var
                 Result := Integer(correction_inner);
             end;
 
+            function get_long_second_stage_score_local(
+                const state_inner: TExactChunkChainState;
+                const first_stage_score_inner: Integer;
+                const char_lm_score_inner: Integer;
+                const word_lm_bonus_inner: Integer;
+                const profile_inner: Integer;
+                const single_segments_inner: Integer;
+                const max_segment_units_inner: Integer): Int64;
+            begin
+                Result := first_stage_score_inner;
+                if (profile_inner < 2) or (syllable_count_local <= 5) then
+                begin
+                    Exit;
+                end;
+                Result := long_second_stage_ranker_score(
+                    first_stage_score_inner, char_lm_score_inner,
+                    word_lm_bonus_inner, state_inner.score, state_inner.segments,
+                    single_segments_inner, max_segment_units_inner,
+                    state_inner.anchor_units, state_inner.has_anchor);
+            end;
+
             procedure sort_fast_states_by_order_score_local(
                 var states_inner: TExactChunkChainStateArray);
             var
                 idx_inner: Integer;
                 insert_idx_inner: Integer;
-                current_state_inner: TExactChunkChainState;
-                current_score_inner: Integer;
-                score_values_inner: TArray<Integer>;
+                baseline_count_inner: Integer;
+                extra_count_inner: Integer;
+                ordered_count_inner: Integer;
+                promotion_index_inner: Integer;
+                best_extra_index_inner: Integer;
+                baseline_indices_inner: TArray<Integer>;
+                extra_indices_inner: TArray<Integer>;
+                ordered_states_inner: TExactChunkChainStateArray;
+                promoted_state_inner: TExactChunkChainState;
+                current_index_inner: Integer;
+                first_stage_score_inner: Integer;
+                single_segments_inner: Integer;
+                max_segment_units_inner: Integer;
+                first_stage_scores_inner: TArray<Integer>;
+                second_stage_scores_inner: TArray<Int64>;
                 state_texts_inner: TArray<string>;
                 char_scores_inner: TArray<Integer>;
                 ranker_profile_inner: Integer;
                 char_scores_ok_inner: Boolean;
                 word_lm_bonus_inner: Integer;
+                promotion_delta_inner: Int64;
+
+                function is_extra_index_better_inner(
+                    const left_inner: Integer;
+                    const right_inner: Integer): Boolean;
+                begin
+                    Result := second_stage_scores_inner[left_inner] >
+                        second_stage_scores_inner[right_inner];
+                    if second_stage_scores_inner[left_inner] =
+                        second_stage_scores_inner[right_inner] then
+                    begin
+                        Result := first_stage_scores_inner[left_inner] >
+                            first_stage_scores_inner[right_inner];
+                    end;
+                end;
             begin
-                SetLength(score_values_inner, Length(states_inner));
+                if Length(states_inner) = 0 then
+                begin
+                    Exit;
+                end;
+                SetLength(first_stage_scores_inner, Length(states_inner));
+                SetLength(second_stage_scores_inner, Length(states_inner));
                 ranker_profile_inner := get_long_chain_ranker_profile_local;
                 char_scores_ok_inner := False;
                 if (ranker_profile_inner > 0) and
@@ -51355,39 +51523,191 @@ var
                 end;
                 for idx_inner := 0 to High(states_inner) do
                 begin
-                    score_values_inner[idx_inner] :=
+                    get_long_chain_structure_stats_local(
+                        states_inner[idx_inner], single_segments_inner,
+                        max_segment_units_inner);
+                    first_stage_score_inner :=
                         get_fast_state_order_score_local(states_inner[idx_inner],
                         word_lm_bonus_inner);
                     if char_scores_ok_inner then
                     begin
-                        Inc(score_values_inner[idx_inner],
+                        Inc(first_stage_score_inner,
                             get_long_chain_ranker_correction_local(
                             states_inner[idx_inner],
                             char_scores_inner[idx_inner],
                             word_lm_bonus_inner,
-                            ranker_profile_inner));
+                            ranker_profile_inner,
+                            single_segments_inner,
+                            max_segment_units_inner));
+                    end;
+
+                    first_stage_scores_inner[idx_inner] :=
+                        first_stage_score_inner;
+                    if char_scores_ok_inner then
+                    begin
+                        second_stage_scores_inner[idx_inner] :=
+                            get_long_second_stage_score_local(
+                            states_inner[idx_inner],
+                            first_stage_score_inner,
+                            char_scores_inner[idx_inner],
+                            word_lm_bonus_inner,
+                            ranker_profile_inner,
+                            single_segments_inner,
+                            max_segment_units_inner);
+                    end;
+                    if not char_scores_ok_inner then
+                    begin
+                        second_stage_scores_inner[idx_inner] :=
+                            first_stage_score_inner;
                     end;
                 end;
 
-                for idx_inner := 1 to High(states_inner) do
+                baseline_count_inner := 0;
+                extra_count_inner := 0;
+                for idx_inner := 0 to High(states_inner) do
                 begin
-                    current_state_inner := states_inner[idx_inner];
-                    current_score_inner := score_values_inner[idx_inner];
+                    if states_inner[idx_inner].baseline_lineage then
+                    begin
+                        Inc(baseline_count_inner);
+                    end;
+                    if not states_inner[idx_inner].baseline_lineage then
+                    begin
+                        Inc(extra_count_inner);
+                    end;
+                end;
+                SetLength(baseline_indices_inner, baseline_count_inner);
+                SetLength(extra_indices_inner, extra_count_inner);
+                baseline_count_inner := 0;
+                extra_count_inner := 0;
+                for idx_inner := 0 to High(states_inner) do
+                begin
+                    if states_inner[idx_inner].baseline_lineage then
+                    begin
+                        baseline_indices_inner[baseline_count_inner] := idx_inner;
+                        Inc(baseline_count_inner);
+                    end;
+                    if not states_inner[idx_inner].baseline_lineage then
+                    begin
+                        extra_indices_inner[extra_count_inner] := idx_inner;
+                        Inc(extra_count_inner);
+                    end;
+                end;
+
+                { The baseline pool is the exact legacy six-state beam. Keep
+                  its first-stage order byte-for-byte unless a separately
+                  calibrated promotion gate accepts one expanded state. }
+                for idx_inner := 1 to High(baseline_indices_inner) do
+                begin
+                    current_index_inner := baseline_indices_inner[idx_inner];
                     insert_idx_inner := idx_inner - 1;
                     while (insert_idx_inner >= 0) and
-                        (score_values_inner[insert_idx_inner] <
-                        current_score_inner) do
+                        (first_stage_scores_inner[
+                        baseline_indices_inner[insert_idx_inner]] <
+                        first_stage_scores_inner[current_index_inner]) do
                     begin
-                        states_inner[insert_idx_inner + 1] :=
-                            states_inner[insert_idx_inner];
-                        score_values_inner[insert_idx_inner + 1] :=
-                            score_values_inner[insert_idx_inner];
+                        baseline_indices_inner[insert_idx_inner + 1] :=
+                            baseline_indices_inner[insert_idx_inner];
                         Dec(insert_idx_inner);
                     end;
-                    states_inner[insert_idx_inner + 1] := current_state_inner;
-                    score_values_inner[insert_idx_inner + 1] :=
-                        current_score_inner;
+                    baseline_indices_inner[insert_idx_inner + 1] :=
+                        current_index_inner;
                 end;
+                for idx_inner := 1 to High(extra_indices_inner) do
+                begin
+                    current_index_inner := extra_indices_inner[idx_inner];
+                    insert_idx_inner := idx_inner - 1;
+                    while (insert_idx_inner >= 0) and
+                        is_extra_index_better_inner(current_index_inner,
+                        extra_indices_inner[insert_idx_inner]) do
+                    begin
+                        extra_indices_inner[insert_idx_inner + 1] :=
+                            extra_indices_inner[insert_idx_inner];
+                        Dec(insert_idx_inner);
+                    end;
+                    extra_indices_inner[insert_idx_inner + 1] :=
+                        current_index_inner;
+                end;
+
+                SetLength(ordered_states_inner, Length(states_inner));
+                ordered_count_inner := 0;
+                for idx_inner := 0 to High(baseline_indices_inner) do
+                begin
+                    ordered_states_inner[ordered_count_inner] :=
+                        states_inner[baseline_indices_inner[idx_inner]];
+                    Inc(ordered_count_inner);
+                end;
+                for idx_inner := 0 to High(extra_indices_inner) do
+                begin
+                    ordered_states_inner[ordered_count_inner] :=
+                        states_inner[extra_indices_inner[idx_inner]];
+                    Inc(ordered_count_inner);
+                end;
+                SetLength(ordered_states_inner, ordered_count_inner);
+
+                promotion_index_inner := -1;
+                if char_scores_ok_inner and (ranker_profile_inner >= 2) and
+                    (baseline_count_inner > 0) and (extra_count_inner > 0) then
+                begin
+                    best_extra_index_inner := extra_indices_inner[0];
+                    if (c_long_second_stage_ranker_rank1_threshold <>
+                        High(Int64)) and (baseline_count_inner >= 1) then
+                    begin
+                        if char_scores_inner[best_extra_index_inner] -
+                            char_scores_inner[baseline_indices_inner[0]] >=
+                            c_long_second_stage_ranker_rank1_min_char_lm_gain then
+                        begin
+                            promotion_delta_inner := second_stage_scores_inner[
+                                best_extra_index_inner] -
+                                second_stage_scores_inner[
+                                baseline_indices_inner[0]];
+                            if promotion_delta_inner >=
+                                c_long_second_stage_ranker_rank1_threshold then
+                            begin
+                                promotion_index_inner := 0;
+                            end;
+                        end;
+                    end;
+                    if (promotion_index_inner < 0) and
+                        (c_long_second_stage_ranker_rank3_threshold <>
+                        High(Int64)) and (baseline_count_inner >= 3) then
+                    begin
+                        promotion_delta_inner := second_stage_scores_inner[
+                            best_extra_index_inner] - second_stage_scores_inner[
+                            baseline_indices_inner[2]];
+                        if promotion_delta_inner >=
+                            c_long_second_stage_ranker_rank3_threshold then
+                        begin
+                            promotion_index_inner := 2;
+                        end;
+                    end;
+                    if (promotion_index_inner < 0) and
+                        (c_long_second_stage_ranker_rank5_threshold <>
+                        High(Int64)) and (baseline_count_inner >= 5) then
+                    begin
+                        promotion_delta_inner := second_stage_scores_inner[
+                            best_extra_index_inner] - second_stage_scores_inner[
+                            baseline_indices_inner[4]];
+                        if promotion_delta_inner >=
+                            c_long_second_stage_ranker_rank5_threshold then
+                        begin
+                            promotion_index_inner := 4;
+                        end;
+                    end;
+                end;
+                if promotion_index_inner >= 0 then
+                begin
+                    promoted_state_inner :=
+                        ordered_states_inner[baseline_count_inner];
+                    for idx_inner := baseline_count_inner downto
+                        promotion_index_inner + 1 do
+                    begin
+                        ordered_states_inner[idx_inner] :=
+                            ordered_states_inner[idx_inner - 1];
+                    end;
+                    ordered_states_inner[promotion_index_inner] :=
+                        promoted_state_inner;
+                end;
+                states_inner := ordered_states_inner;
             end;
 
             procedure capture_final_chain_candidates_local(
@@ -51396,14 +51716,13 @@ var
                 state_texts_inner: TArray<string>;
                 char_scores_inner: TArray<Integer>;
                 captured_inner: TncLongChainCandidateDebugArray;
-                parts_inner: TArray<string>;
-                part_inner: string;
                 state_idx_inner: Integer;
-                part_units_inner: Integer;
                 existing_has_target_inner: Boolean;
                 captured_has_target_inner: Boolean;
                 char_scores_ok_inner: Boolean;
                 word_lm_bonus_inner: Integer;
+                ranker_profile_inner: Integer;
+                baseline_count_inner: Integer;
             begin
                 if (m_debug_target_recall_text = '') or
                     (Length(states_inner) = 0) then
@@ -51427,23 +51746,54 @@ var
                 end;
 
                 captured_has_target_inner := False;
+                ranker_profile_inner := get_long_chain_ranker_profile_local;
+                baseline_count_inner := 0;
+                for state_idx_inner := 0 to High(states_inner) do
+                begin
+                    if states_inner[state_idx_inner].baseline_lineage then
+                    begin
+                        Inc(baseline_count_inner);
+                    end;
+                end;
                 SetLength(captured_inner, Length(states_inner));
                 for state_idx_inner := 0 to High(states_inner) do
                 begin
                     captured_inner[state_idx_inner].original_rank :=
                         state_idx_inner + 1;
-                    captured_inner[state_idx_inner].order_score :=
+                    get_long_chain_structure_stats_local(
+                        states_inner[state_idx_inner],
+                        captured_inner[state_idx_inner].single_segments,
+                        captured_inner[state_idx_inner].max_segment_units);
+                    captured_inner[state_idx_inner].first_stage_score :=
                         get_fast_state_order_score_local(
                         states_inner[state_idx_inner], word_lm_bonus_inner);
                     if char_scores_ok_inner then
                     begin
-                        Inc(captured_inner[state_idx_inner].order_score,
+                        Inc(captured_inner[state_idx_inner].first_stage_score,
                             get_long_chain_ranker_correction_local(
                             states_inner[state_idx_inner],
                             char_scores_inner[state_idx_inner],
                             word_lm_bonus_inner,
-                            get_long_chain_ranker_profile_local));
+                            ranker_profile_inner,
+                            captured_inner[state_idx_inner].single_segments,
+                            captured_inner[state_idx_inner].max_segment_units));
+                        captured_inner[state_idx_inner].second_stage_score :=
+                            get_long_second_stage_score_local(
+                            states_inner[state_idx_inner],
+                            captured_inner[state_idx_inner].first_stage_score,
+                            char_scores_inner[state_idx_inner],
+                            word_lm_bonus_inner,
+                            ranker_profile_inner,
+                            captured_inner[state_idx_inner].single_segments,
+                            captured_inner[state_idx_inner].max_segment_units);
                     end;
+                    if not char_scores_ok_inner then
+                    begin
+                        captured_inner[state_idx_inner].second_stage_score :=
+                            captured_inner[state_idx_inner].first_stage_score;
+                    end;
+                    captured_inner[state_idx_inner].order_score :=
+                        captured_inner[state_idx_inner].first_stage_score;
                     captured_inner[state_idx_inner].base_score :=
                         states_inner[state_idx_inner].score;
                     captured_inner[state_idx_inner].char_lm_score :=
@@ -51452,26 +51802,19 @@ var
                         word_lm_bonus_inner;
                     captured_inner[state_idx_inner].segments :=
                         states_inner[state_idx_inner].segments;
-                    captured_inner[state_idx_inner].single_segments := 0;
-                    captured_inner[state_idx_inner].max_segment_units := 0;
-                    parts_inner := states_inner[state_idx_inner].path.Split(
-                        [c_segment_path_separator]);
-                    for part_inner in parts_inner do
-                    begin
-                        part_units_inner := get_candidate_text_unit_count(
-                            Trim(part_inner));
-                        if part_units_inner = 1 then
-                        begin
-                            Inc(captured_inner[state_idx_inner].single_segments);
-                        end;
-                        captured_inner[state_idx_inner].max_segment_units := Max(
-                            captured_inner[state_idx_inner].max_segment_units,
-                            part_units_inner);
-                    end;
                     captured_inner[state_idx_inner].anchor_units :=
                         states_inner[state_idx_inner].anchor_units;
                     captured_inner[state_idx_inner].has_anchor :=
                         states_inner[state_idx_inner].has_anchor;
+                    captured_inner[state_idx_inner].baseline_lineage :=
+                        states_inner[state_idx_inner].baseline_lineage;
+                    captured_inner[state_idx_inner].promotion_rank := 0;
+                    if (not states_inner[state_idx_inner].baseline_lineage) and
+                        (state_idx_inner < baseline_count_inner) then
+                    begin
+                        captured_inner[state_idx_inner].promotion_rank :=
+                            state_idx_inner + 1;
+                    end;
                     captured_inner[state_idx_inner].target := SameText(
                         state_texts_inner[state_idx_inner],
                         m_debug_target_recall_text);
@@ -51503,9 +51846,212 @@ var
                 m_debug_long_chain_candidates := captured_inner;
             end;
 
-            procedure prune_fast_states_by_char_lm_local(
+            procedure prune_baseline_fast_states_by_char_lm_local(
                 var states_inner: TExactChunkChainStateArray;
                 const state_start_pos_inner: Integer);
+            const
+                c_char_lm_original_rank_penalty = 20;
+            var
+                state_texts_inner: TArray<string>;
+                char_scores_inner: TArray<Integer>;
+                selected_inner: TArray<Boolean>;
+                kept_states_inner: TExactChunkChainStateArray;
+                state_idx_inner: Integer;
+                keep_idx_inner: Integer;
+                base_keep_inner: Integer;
+                best_idx_inner: Integer;
+                best_score_inner: Integer;
+                current_score_inner: Integer;
+                insert_idx_inner: Integer;
+                swap_state_inner: TExactChunkChainState;
+                char_scores_ok_inner: Boolean;
+                beam_width_inner: Integer;
+            begin
+                beam_width_inner := Min(c_chain_lattice_baseline_beam_width,
+                    Length(states_inner));
+                if beam_width_inner <= 0 then
+                begin
+                    Exit;
+                end;
+                if Length(states_inner) <= beam_width_inner then
+                begin
+                    for state_idx_inner := 0 to High(states_inner) do
+                    begin
+                        states_inner[state_idx_inner].baseline_lineage := True;
+                    end;
+                    Exit;
+                end;
+
+                SetLength(state_texts_inner, Length(states_inner));
+                for state_idx_inner := 0 to High(states_inner) do
+                begin
+                    state_texts_inner[state_idx_inner] :=
+                        Trim(states_inner[state_idx_inner].text);
+                end;
+                char_scores_ok_inner := False;
+                if m_dictionary <> nil then
+                begin
+                    if state_start_pos_inner > 0 then
+                    begin
+                        char_scores_ok_inner :=
+                            m_dictionary.get_char_lm_suffix_scores(
+                            state_texts_inner, char_scores_inner);
+                    end
+                    else
+                    begin
+                        char_scores_ok_inner :=
+                            m_dictionary.get_char_lm_text_scores(
+                            state_texts_inner, char_scores_inner);
+                    end;
+                end;
+                if (not char_scores_ok_inner) or
+                    (Length(char_scores_inner) <> Length(states_inner)) then
+                begin
+                    SetLength(states_inner, beam_width_inner);
+                    for state_idx_inner := 0 to High(states_inner) do
+                    begin
+                        states_inner[state_idx_inner].baseline_lineage := True;
+                    end;
+                    Exit;
+                end;
+
+                SetLength(selected_inner, Length(states_inner));
+                SetLength(kept_states_inner, beam_width_inner);
+                keep_idx_inner := 0;
+                base_keep_inner := Min(get_chain_char_base_slots_local,
+                    beam_width_inner);
+                for state_idx_inner := 0 to base_keep_inner - 1 do
+                begin
+                    kept_states_inner[keep_idx_inner] :=
+                        states_inner[state_idx_inner];
+                    kept_states_inner[keep_idx_inner].baseline_lineage := True;
+                    selected_inner[state_idx_inner] := True;
+                    Inc(keep_idx_inner);
+                end;
+                while keep_idx_inner < beam_width_inner do
+                begin
+                    best_idx_inner := -1;
+                    best_score_inner := Low(Integer);
+                    for state_idx_inner := 0 to High(states_inner) do
+                    begin
+                        if selected_inner[state_idx_inner] then
+                        begin
+                            Continue;
+                        end;
+                        current_score_inner := char_scores_inner[state_idx_inner] -
+                            state_idx_inner * c_char_lm_original_rank_penalty;
+                        if (best_idx_inner < 0) or
+                            (current_score_inner > best_score_inner) then
+                        begin
+                            best_idx_inner := state_idx_inner;
+                            best_score_inner := current_score_inner;
+                        end;
+                    end;
+                    if best_idx_inner < 0 then
+                    begin
+                        Break;
+                    end;
+                    kept_states_inner[keep_idx_inner] := states_inner[best_idx_inner];
+                    kept_states_inner[keep_idx_inner].baseline_lineage := True;
+                    selected_inner[best_idx_inner] := True;
+                    Inc(keep_idx_inner);
+                end;
+                SetLength(kept_states_inner, keep_idx_inner);
+
+                for state_idx_inner := 1 to High(kept_states_inner) do
+                begin
+                    insert_idx_inner := state_idx_inner;
+                    while (insert_idx_inner > 0) and
+                        is_exact_chunk_chain_state_better_local(
+                        kept_states_inner[insert_idx_inner],
+                        kept_states_inner[insert_idx_inner - 1]) do
+                    begin
+                        swap_state_inner := kept_states_inner[insert_idx_inner - 1];
+                        kept_states_inner[insert_idx_inner - 1] :=
+                            kept_states_inner[insert_idx_inner];
+                        kept_states_inner[insert_idx_inner] := swap_state_inner;
+                        Dec(insert_idx_inner);
+                    end;
+                end;
+                states_inner := kept_states_inner;
+            end;
+
+            procedure merge_baseline_and_expanded_fast_states_local(
+                var expanded_states_inner: TExactChunkChainStateArray;
+                const baseline_states_inner: TExactChunkChainStateArray);
+            var
+                merged_states_inner: TExactChunkChainStateArray;
+                state_idx_inner: Integer;
+                merged_idx_inner: Integer;
+                insert_idx_inner: Integer;
+                swap_state_inner: TExactChunkChainState;
+                duplicate_inner: Boolean;
+                beam_width_inner: Integer;
+            begin
+                beam_width_inner := get_chain_beam_width_local;
+                SetLength(merged_states_inner, beam_width_inner);
+                merged_idx_inner := 0;
+                for state_idx_inner := 0 to High(baseline_states_inner) do
+                begin
+                    if merged_idx_inner >= beam_width_inner then
+                    begin
+                        Break;
+                    end;
+                    merged_states_inner[merged_idx_inner] :=
+                        baseline_states_inner[state_idx_inner];
+                    merged_states_inner[merged_idx_inner].baseline_lineage := True;
+                    Inc(merged_idx_inner);
+                end;
+
+                for state_idx_inner := 0 to High(expanded_states_inner) do
+                begin
+                    if merged_idx_inner >= beam_width_inner then
+                    begin
+                        Break;
+                    end;
+                    duplicate_inner := False;
+                    for insert_idx_inner := 0 to merged_idx_inner - 1 do
+                    begin
+                        if SameText(merged_states_inner[insert_idx_inner].text,
+                            expanded_states_inner[state_idx_inner].text) then
+                        begin
+                            duplicate_inner := True;
+                            Break;
+                        end;
+                    end;
+                    if duplicate_inner then
+                    begin
+                        Continue;
+                    end;
+                    merged_states_inner[merged_idx_inner] :=
+                        expanded_states_inner[state_idx_inner];
+                    merged_states_inner[merged_idx_inner].baseline_lineage := False;
+                    Inc(merged_idx_inner);
+                end;
+                SetLength(merged_states_inner, merged_idx_inner);
+
+                for state_idx_inner := 1 to High(merged_states_inner) do
+                begin
+                    insert_idx_inner := state_idx_inner;
+                    while (insert_idx_inner > 0) and
+                        is_exact_chunk_chain_state_better_local(
+                        merged_states_inner[insert_idx_inner],
+                        merged_states_inner[insert_idx_inner - 1]) do
+                    begin
+                        swap_state_inner := merged_states_inner[insert_idx_inner - 1];
+                        merged_states_inner[insert_idx_inner - 1] :=
+                            merged_states_inner[insert_idx_inner];
+                        merged_states_inner[insert_idx_inner] := swap_state_inner;
+                        Dec(insert_idx_inner);
+                    end;
+                end;
+                expanded_states_inner := merged_states_inner;
+            end;
+
+            procedure prune_fast_states_by_char_lm_local(
+                var states_inner: TExactChunkChainStateArray;
+                const state_start_pos_inner: Integer;
+                const baseline_states_inner: TExactChunkChainStateArray);
             const
                 c_char_lm_original_rank_penalty = 20;
             var
@@ -51520,11 +52066,154 @@ var
                 best_idx_inner: Integer;
                 best_score_inner: Integer;
                 current_score_inner: Integer;
+                baseline_keep_inner: Integer;
+                best_model_score_inner: Int64;
+                current_model_score_inner: Int64;
                 insert_idx_inner: Integer;
                 swap_state_inner: TExactChunkChainState;
                 char_scores_ok_inner: Boolean;
                 score_start_idx_inner: Integer;
                 beam_width_inner: Integer;
+                effective_keep_width_inner: Integer;
+                baseline_prebeam_width_inner: Integer;
+                baseline_candidate_count_inner: Integer;
+                baseline_ranks_inner: TArray<Integer>;
+
+                function get_structure_signature_inner(
+                    const state_inner: TExactChunkChainState): string;
+                var
+                    signature_parts_inner: TArray<string>;
+                    signature_part_inner: string;
+                begin
+                    Result := '';
+                    signature_parts_inner := state_inner.path.Split(
+                        [c_segment_path_separator]);
+                    for signature_part_inner in signature_parts_inner do
+                    begin
+                        if Trim(signature_part_inner) = '' then
+                        begin
+                            Continue;
+                        end;
+                        if Result <> '' then
+                        begin
+                            Result := Result + '-';
+                        end;
+                        Result := Result + IntToStr(
+                            get_candidate_text_unit_count(
+                            Trim(signature_part_inner)));
+                    end;
+                    if Result = '' then
+                    begin
+                        Result := IntToStr(get_candidate_text_unit_count(
+                            Trim(state_inner.text)));
+                    end;
+                end;
+
+                function has_selected_structure_inner(
+                    const signature_inner: string): Boolean;
+                var
+                    selected_idx_inner: Integer;
+                begin
+                    Result := False;
+                    for selected_idx_inner := 0 to High(states_inner) do
+                    begin
+                        if selected_inner[selected_idx_inner] and
+                            SameText(get_structure_signature_inner(
+                            states_inner[selected_idx_inner]),
+                            signature_inner) then
+                        begin
+                            Exit(True);
+                        end;
+                    end;
+                end;
+
+                function get_search_model_score_inner(
+                    const state_idx_score_inner: Integer): Int64;
+                var
+                    score_parts_inner: TArray<string>;
+                    score_part_inner: string;
+                    single_segments_score_inner: Integer;
+                begin
+                    single_segments_score_inner := 0;
+                    score_parts_inner := states_inner[
+                        state_idx_score_inner].path.Split(
+                        [c_segment_path_separator]);
+                    for score_part_inner in score_parts_inner do
+                    begin
+                        if get_candidate_text_unit_count(
+                            Trim(score_part_inner)) = 1 then
+                        begin
+                            Inc(single_segments_score_inner);
+                        end;
+                    end;
+                    Result := long_search_ranker_score(
+                        char_scores_inner[state_idx_score_inner],
+                        state_idx_score_inner + 1,
+                        states_inner[state_idx_score_inner].score,
+                        get_exact_chunk_chain_state_head_lm_bonus_local(
+                        states_inner[state_idx_score_inner],
+                        state_start_pos_inner),
+                        get_exact_chunk_chain_state_lm_bonus_local(
+                        states_inner[state_idx_score_inner],
+                        state_start_pos_inner),
+                        states_inner[state_idx_score_inner].segments,
+                        single_segments_score_inner,
+                        get_candidate_text_unit_count(states_inner[
+                        state_idx_score_inner].first_chunk_text),
+                        states_inner[state_idx_score_inner].anchor_units,
+                        states_inner[state_idx_score_inner].has_anchor);
+                end;
+
+                function select_best_char_lm_state_inner(
+                    const baseline_only_inner: Boolean): Boolean;
+                var
+                    candidate_idx_inner: Integer;
+                begin
+                    Result := False;
+                    best_idx_inner := -1;
+                    best_score_inner := Low(Integer);
+                    for candidate_idx_inner := 0 to High(states_inner) do
+                    begin
+                        if selected_inner[candidate_idx_inner] or
+                            (baseline_only_inner and
+                            (not states_inner[
+                            candidate_idx_inner].baseline_lineage)) then
+                        begin
+                            Continue;
+                        end;
+                        current_score_inner := char_scores_inner[
+                            candidate_idx_inner];
+                        if baseline_only_inner then
+                        begin
+                            current_score_inner := current_score_inner -
+                                (baseline_ranks_inner[candidate_idx_inner] - 1) *
+                                c_char_lm_original_rank_penalty;
+                        end
+                        else
+                        begin
+                            current_score_inner := current_score_inner -
+                                candidate_idx_inner *
+                                c_char_lm_original_rank_penalty;
+                        end;
+                        if (best_idx_inner < 0) or
+                            (current_score_inner > best_score_inner) then
+                        begin
+                            best_idx_inner := candidate_idx_inner;
+                            best_score_inner := current_score_inner;
+                        end;
+                    end;
+                    if best_idx_inner < 0 then
+                    begin
+                        Exit;
+                    end;
+                    kept_states_inner[keep_idx_inner] :=
+                        states_inner[best_idx_inner];
+                    kept_states_inner[keep_idx_inner].baseline_lineage :=
+                        baseline_only_inner;
+                    selected_inner[best_idx_inner] := True;
+                    Inc(keep_idx_inner);
+                    Result := True;
+                end;
 
                 procedure note_target_stage_inner(const after_beam: Boolean);
                 var
@@ -51566,6 +52255,7 @@ var
                 var
                     capture_base_inner: Integer;
                     capture_idx_inner: Integer;
+                    capture_baseline_idx_inner: Integer;
                     capture_item_inner: TncLongBeamStateDebug;
                     capture_target_suffix_inner: string;
                     capture_parts_inner: TArray<string>;
@@ -51622,6 +52312,23 @@ var
                             states_inner[capture_idx_inner].anchor_units;
                         capture_item_inner.has_anchor :=
                             states_inner[capture_idx_inner].has_anchor;
+                        capture_item_inner.baseline_lineage :=
+                            states_inner[capture_idx_inner].baseline_lineage;
+                        capture_item_inner.baseline_selected := False;
+                        for capture_baseline_idx_inner := 0 to
+                            High(baseline_states_inner) do
+                        begin
+                            if SameText(baseline_states_inner[
+                                capture_baseline_idx_inner].text,
+                                states_inner[capture_idx_inner].text) and
+                                SameText(baseline_states_inner[
+                                capture_baseline_idx_inner].path,
+                                states_inner[capture_idx_inner].path) then
+                            begin
+                                capture_item_inner.baseline_selected := True;
+                                Break;
+                            end;
+                        end;
                         capture_item_inner.selected :=
                             selected_inner[capture_idx_inner];
                         capture_item_inner.target := SameText(
@@ -51638,7 +52345,42 @@ var
             begin
                 beam_width_inner := get_chain_beam_width_local;
                 note_target_stage_inner(False);
-                if Length(states_inner) <= beam_width_inner then
+
+                { A state can descend from an old-beam suffix without having
+                  survived the old prebeam at this position. Restrict lineage
+                  to the exact old prebeam prefix before reproducing its
+                  six-state character-LM selection. }
+                baseline_prebeam_width_inner :=
+                    get_chain_baseline_prebeam_width_local;
+                baseline_candidate_count_inner := 0;
+                SetLength(baseline_ranks_inner, Length(states_inner));
+                for state_idx_inner := 0 to High(states_inner) do
+                begin
+                    if not states_inner[state_idx_inner].baseline_lineage then
+                    begin
+                        Continue;
+                    end;
+                    Inc(baseline_candidate_count_inner);
+                    if baseline_candidate_count_inner >
+                        baseline_prebeam_width_inner then
+                    begin
+                        states_inner[state_idx_inner].baseline_lineage := False;
+                    end
+                    else
+                    begin
+                        baseline_ranks_inner[state_idx_inner] :=
+                            baseline_candidate_count_inner;
+                    end;
+                end;
+                baseline_candidate_count_inner := Min(
+                    baseline_candidate_count_inner,
+                    baseline_prebeam_width_inner);
+                effective_keep_width_inner := Min(beam_width_inner,
+                    Length(states_inner));
+                if (Length(states_inner) <= beam_width_inner) and
+                    (baseline_candidate_count_inner <= Min(
+                    c_chain_lattice_baseline_beam_width,
+                    effective_keep_width_inner)) then
                 begin
                     note_target_stage_inner(True);
                     Exit;
@@ -51678,7 +52420,39 @@ var
                     (Length(scored_char_scores_inner) <>
                     Length(state_texts_inner)) then
                 begin
-                    SetLength(states_inner, beam_width_inner);
+                    SetLength(selected_inner, Length(states_inner));
+                    SetLength(kept_states_inner, effective_keep_width_inner);
+                    keep_idx_inner := 0;
+                    for state_idx_inner := 0 to High(states_inner) do
+                    begin
+                        if states_inner[state_idx_inner].baseline_lineage and
+                            (keep_idx_inner < Min(
+                            c_chain_lattice_baseline_beam_width,
+                            effective_keep_width_inner)) then
+                        begin
+                            kept_states_inner[keep_idx_inner] :=
+                                states_inner[state_idx_inner];
+                            selected_inner[state_idx_inner] := True;
+                            Inc(keep_idx_inner);
+                        end;
+                    end;
+                    for state_idx_inner := 0 to High(states_inner) do
+                    begin
+                        if keep_idx_inner >= effective_keep_width_inner then
+                        begin
+                            Break;
+                        end;
+                        if not selected_inner[state_idx_inner] then
+                        begin
+                            kept_states_inner[keep_idx_inner] :=
+                                states_inner[state_idx_inner];
+                            kept_states_inner[keep_idx_inner].baseline_lineage :=
+                                False;
+                            Inc(keep_idx_inner);
+                        end;
+                    end;
+                    SetLength(kept_states_inner, keep_idx_inner);
+                    states_inner := kept_states_inner;
                     note_target_stage_inner(True);
                     Exit;
                 end;
@@ -51692,7 +52466,7 @@ var
                 end;
 
                 SetLength(selected_inner, Length(states_inner));
-                SetLength(kept_states_inner, beam_width_inner);
+                SetLength(kept_states_inner, effective_keep_width_inner);
                 keep_idx_inner := 0;
                 for state_idx_inner := 0 to base_keep_inner - 1 do
                 begin
@@ -51701,13 +52475,62 @@ var
                     Inc(keep_idx_inner);
                 end;
 
-                while keep_idx_inner < beam_width_inner do
+                // Keep the old six-slot character-LM beam intact. The two
+                // wider slots are a strict recall expansion rather than a
+                // replacement for previously retained states.
+                baseline_keep_inner := Min(
+                    c_chain_lattice_baseline_beam_width,
+                    effective_keep_width_inner);
+                while keep_idx_inner < baseline_keep_inner do
+                begin
+                    if not select_best_char_lm_state_inner(True) then
+                    begin
+                        Break;
+                    end;
+                end;
+
+                if keep_idx_inner < effective_keep_width_inner then
+                begin
+                    best_idx_inner := -1;
+                    best_model_score_inner := Low(Int64);
+                    for state_idx_inner := 0 to High(states_inner) do
+                    begin
+                        if selected_inner[state_idx_inner] then
+                        begin
+                            Continue;
+                        end;
+                        current_model_score_inner :=
+                            get_search_model_score_inner(state_idx_inner);
+                        if (best_idx_inner < 0) or
+                            (current_model_score_inner >
+                            best_model_score_inner) then
+                        begin
+                            best_idx_inner := state_idx_inner;
+                            best_model_score_inner :=
+                                current_model_score_inner;
+                        end;
+                    end;
+                    if best_idx_inner >= 0 then
+                    begin
+                        kept_states_inner[keep_idx_inner] :=
+                            states_inner[best_idx_inner];
+                        kept_states_inner[keep_idx_inner].baseline_lineage :=
+                            False;
+                        selected_inner[best_idx_inner] := True;
+                        Inc(keep_idx_inner);
+                    end;
+                end;
+
+                if keep_idx_inner < effective_keep_width_inner then
                 begin
                     best_idx_inner := -1;
                     best_score_inner := Low(Integer);
                     for state_idx_inner := 0 to High(states_inner) do
                     begin
-                        if selected_inner[state_idx_inner] then
+                        if selected_inner[state_idx_inner] or
+                            has_selected_structure_inner(
+                            get_structure_signature_inner(
+                            states_inner[state_idx_inner])) then
                         begin
                             Continue;
                         end;
@@ -51720,13 +52543,23 @@ var
                             best_score_inner := current_score_inner;
                         end;
                     end;
-                    if best_idx_inner < 0 then
+                    if best_idx_inner >= 0 then
+                    begin
+                        kept_states_inner[keep_idx_inner] :=
+                            states_inner[best_idx_inner];
+                        kept_states_inner[keep_idx_inner].baseline_lineage :=
+                            False;
+                        selected_inner[best_idx_inner] := True;
+                        Inc(keep_idx_inner);
+                    end;
+                end;
+
+                while keep_idx_inner < effective_keep_width_inner do
+                begin
+                    if not select_best_char_lm_state_inner(False) then
                     begin
                         Break;
                     end;
-                    kept_states_inner[keep_idx_inner] := states_inner[best_idx_inner];
-                    selected_inner[best_idx_inner] := True;
-                    Inc(keep_idx_inner);
                 end;
                 capture_beam_states_inner;
                 SetLength(kept_states_inner, keep_idx_inner);
@@ -52886,6 +53719,20 @@ var
                 Result := Length(out_options_local) > 0;
             end;
 
+            procedure consider_generated_fast_state_local(
+                const generated_state_inner: TExactChunkChainState);
+            begin
+                consider_exact_chunk_chain_state_local(
+                    state_map_local[pos_local], generated_state_inner,
+                    pos_local, get_chain_prebeam_width_local);
+                if generated_state_inner.baseline_lineage then
+                begin
+                    consider_exact_chunk_chain_state_local(
+                        baseline_candidates_local, generated_state_inner,
+                        pos_local, get_chain_baseline_prebeam_width_local);
+                end;
+            end;
+
         begin
             Result := False;
             out_text := '';
@@ -52939,11 +53786,13 @@ var
             base_state_local.score := 0;
             base_state_local.segments := 0;
             base_state_local.anchor_units := -1;
+            base_state_local.baseline_lineage := True;
             SetLength(state_map_local[syllable_count_local], 1);
             state_map_local[syllable_count_local][0] := base_state_local;
 
             for pos_local := syllable_count_local - 1 downto 0 do
             begin
+                SetLength(baseline_candidates_local, 0);
                 for chunk_len_local := 1 to Min(c_fast_max_chunk_syllables,
                     syllable_count_local - pos_local) do
                 begin
@@ -53133,15 +53982,16 @@ var
                                 candidate_state_local.anchor_units :=
                                     suffix_state_local.anchor_units;
                             end;
+                            candidate_state_local.baseline_lineage :=
+                                suffix_state_local.baseline_lineage;
                             if pos_local = 0 then
                             begin
                                 Inc(candidate_state_local.score,
                                     get_fast_full_path_adjustment_local(
                                     candidate_state_local.path));
                             end;
-                            consider_exact_chunk_chain_state_local(
-                                state_map_local[pos_local], candidate_state_local,
-                                pos_local, get_chain_prebeam_width_local);
+                            consider_generated_fast_state_local(
+                                candidate_state_local);
 
                             if try_get_function_particle_suffix_head_alternative_local(
                                 options_local[option_idx_local].text,
@@ -53186,10 +54036,8 @@ var
                                         get_fast_full_path_adjustment_local(
                                         alternative_state_local.path));
                                 end;
-                                consider_exact_chunk_chain_state_local(
-                                    state_map_local[pos_local],
-                                    alternative_state_local, pos_local,
-                                    get_chain_prebeam_width_local);
+                                consider_generated_fast_state_local(
+                                    alternative_state_local);
                             end;
 
                             if (options_local[option_idx_local].segments = 1) and
@@ -53233,20 +54081,36 @@ var
                                         get_fast_full_path_adjustment_local(
                                         alternative_state_local.path));
                                 end;
-                                consider_exact_chunk_chain_state_local(
-                                    state_map_local[pos_local],
-                                    alternative_state_local, pos_local,
-                                    get_chain_prebeam_width_local);
+                                consider_generated_fast_state_local(
+                                    alternative_state_local);
                             end;
                         end;
                     end;
                 end;
+                prune_baseline_fast_states_by_char_lm_local(
+                    baseline_candidates_local, pos_local);
                 prune_fast_states_by_char_lm_local(
-                    state_map_local[pos_local], pos_local);
+                    state_map_local[pos_local], pos_local,
+                    baseline_candidates_local);
+                merge_baseline_and_expanded_fast_states_local(
+                    state_map_local[pos_local], baseline_candidates_local);
             end;
 
             sort_fast_states_by_order_score_local(state_map_local[0]);
             capture_final_chain_candidates_local(state_map_local[0]);
+
+            baseline_acceptance_score_local := Low(Integer);
+            baseline_acceptance_found_local := False;
+            for debug_state_idx_local := 0 to High(state_map_local[0]) do
+            begin
+                if state_map_local[0][debug_state_idx_local].baseline_lineage then
+                begin
+                    baseline_acceptance_score_local :=
+                        state_map_local[0][debug_state_idx_local].score;
+                    baseline_acceptance_found_local := True;
+                    Break;
+                end;
+            end;
 
             if m_debug_target_recall_text <> '' then
             begin
@@ -53352,11 +54216,15 @@ var
             begin
                 minimum_score_local := input_syllable_count * 5200;
             end;
-            Result := out_score >= minimum_score_local;
+            { Expanded states may be promoted in the returned candidate list,
+              but they must not suppress the legacy fallback search. Keep the
+              old six-state beam as the acceptance authority. }
+            Result := baseline_acceptance_found_local and
+                (baseline_acceptance_score_local >= minimum_score_local);
             if m_debug_target_recall_text <> '' then
             begin
                 m_debug_target_chain_build_accepted := Result;
-                m_debug_target_chain_top_score := out_score;
+                m_debug_target_chain_top_score := baseline_acceptance_score_local;
                 m_debug_target_chain_min_score := minimum_score_local;
             end;
         end;
@@ -57753,7 +58621,8 @@ var
             fast_phase_tick := GetTickCount64;
             fast_repair_inserted := False;
             for fast_state_idx := 0 to Min(
-                get_chain_beam_width_local - 1, High(fast_states)) do
+                c_chain_lattice_baseline_beam_width - 1,
+                High(fast_states)) do
             begin
                 fast_state_to_upsert := fast_states[fast_state_idx];
                 if fast_state_idx = 0 then
