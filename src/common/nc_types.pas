@@ -49,7 +49,9 @@ type
         pis_microsoft_shuangpin,
         pis_xiaohe_shuangpin,
         pis_ziranma_shuangpin,
-        pis_sogou_shuangpin
+        pis_sogou_shuangpin,
+        pis_ziguang_shuangpin,
+        pis_pinyinjiajia_shuangpin
     );
     TncDictionaryVariant = (dv_simplified, dv_traditional);
 

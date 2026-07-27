@@ -318,6 +318,8 @@ resourcestring
     SOptionXiaoheShuangpin = '小鹤双拼';
     SOptionZiranmaShuangpin = '自然码双拼';
     SOptionSogouShuangpin = '搜狗双拼';
+    SOptionZiguangShuangpin = '紫光双拼';
+    SOptionPinyinJiajiaShuangpin = '拼音加加';
     SLabelPunctuationMode = '标点';
     SCheckFullWidthMode = '使用全角输入';
     SCheckShowStatusWidget = '显示状态浮窗';
@@ -1763,6 +1765,8 @@ begin
     m_combo_pinyin_input_scheme.Items.Add(SOptionXiaoheShuangpin);
     m_combo_pinyin_input_scheme.Items.Add(SOptionZiranmaShuangpin);
     m_combo_pinyin_input_scheme.Items.Add(SOptionSogouShuangpin);
+    m_combo_pinyin_input_scheme.Items.Add(SOptionZiguangShuangpin);
+    m_combo_pinyin_input_scheme.Items.Add(SOptionPinyinJiajiaShuangpin);
     m_combo_pinyin_input_scheme.OnChange := mark_dirty;
 
     Inc(top, scale_ui(c_row_height + c_general_row_gap));
@@ -3134,6 +3138,10 @@ begin
             next_config.pinyin_input_scheme := pis_ziranma_shuangpin;
         Ord(pis_sogou_shuangpin):
             next_config.pinyin_input_scheme := pis_sogou_shuangpin;
+        Ord(pis_ziguang_shuangpin):
+            next_config.pinyin_input_scheme := pis_ziguang_shuangpin;
+        Ord(pis_pinyinjiajia_shuangpin):
+            next_config.pinyin_input_scheme := pis_pinyinjiajia_shuangpin;
     else
         next_config.pinyin_input_scheme := pis_full_pinyin;
     end;

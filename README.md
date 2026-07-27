@@ -29,7 +29,7 @@ The project focus is:
 - TSF text service pipeline is available (registration, activation, composition lifecycle).
 - TSF binaries support Win64 and Win32 (`svr.dll` / `svr32.dll`), while host process is Win64 only.
 - Candidate window, paging, selection, and commit flow are implemented.
-- Full Pinyin and four selectable Double Pinyin schemes—Microsoft, Xiaohe, Ziranma, and Sogou—share the same candidate ranking and user-learning data.
+- Full Pinyin and six selectable Double Pinyin schemes—Microsoft, Xiaohe, Ziranma, Sogou, Ziguang, and Pinyin Jiajia—share the same candidate ranking and user-learning data.
 - Dictionary split is supported: simplified base DB, traditional base DB, and user DB.
 - Base dictionary now includes `dict_jianpin` index entries for initial-letter abbreviations (for example `jt -> 今天`; retroflex variants like `zsjs/zhshjsh` are both generated).
 - Full-path segmented phrase decoding is enabled (for example `womenjintian -> 我们今天`) while keeping prefix candidates for partial-commit fallback.
@@ -150,7 +150,7 @@ Default config file:
 - `%LOCALAPPDATA%\CassotisIme\cassotis_ime.ini`
 
 Important options include:
-- Pinyin scheme (Full Pinyin / Microsoft Double Pinyin / Xiaohe Double Pinyin / Ziranma Double Pinyin / Sogou Double Pinyin)
+- Pinyin scheme (Full Pinyin / Microsoft Double Pinyin / Xiaohe Double Pinyin / Ziranma Double Pinyin / Sogou Double Pinyin / Ziguang Double Pinyin / Pinyin Jiajia)
 - simplified/traditional variant switching (`variant`)
 - full-width / punctuation mode
 - debug logging and log path

@@ -1743,6 +1743,16 @@ begin
                 scheme_text := '搜';
                 scheme_hint := '拼音方案：搜狗双拼';
             end;
+        pis_ziguang_shuangpin:
+            begin
+                scheme_text := '紫';
+                scheme_hint := '拼音方案：紫光双拼';
+            end;
+        pis_pinyinjiajia_shuangpin:
+            begin
+                scheme_text := '加';
+                scheme_hint := '拼音方案：拼音加加';
+            end;
     else
         begin
             scheme_text := '拼';

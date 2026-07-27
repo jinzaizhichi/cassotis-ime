@@ -80,11 +80,14 @@ var
     g_xiaohe_codes: TDictionary<string, string>;
     g_ziranma_codes: TDictionary<string, string>;
     g_sogou_codes: TDictionary<string, string>;
+    g_ziguang_codes: TDictionary<string, string>;
+    g_pinyinjiajia_codes: TDictionary<string, string>;
 
 function nc_is_shuangpin_scheme(const scheme: TncPinyinInputScheme): Boolean;
 begin
     Result := scheme in [pis_microsoft_shuangpin, pis_xiaohe_shuangpin,
-        pis_ziranma_shuangpin, pis_sogou_shuangpin];
+        pis_ziranma_shuangpin, pis_sogou_shuangpin,
+        pis_ziguang_shuangpin, pis_pinyinjiajia_shuangpin];
 end;
 
 function ends_with(const value: string; const suffix: string): Boolean;
@@ -425,6 +428,174 @@ begin
     Result := LowerCase(value);
 end;
 
+function transform_ziguang_initial(const value: string): string;
+begin
+    Result := value;
+    if Copy(Result, 1, 2) = 'sh' then
+    begin
+        Result := 'i' + Copy(Result, 3, MaxInt);
+    end
+    else if Copy(Result, 1, 2) = 'ch' then
+    begin
+        Result := 'a' + Copy(Result, 3, MaxInt);
+    end
+    else if Copy(Result, 1, 2) = 'zh' then
+    begin
+        Result := 'u' + Copy(Result, 3, MaxInt);
+    end;
+end;
+
+function transform_ziguang_code(const source: string): string;
+var
+    value: string;
+begin
+    value := LowerCase(source);
+    if ends_with(value, 'uai') then
+        value := replace_suffix(value, 'uai', 'y')
+    else if ends_with(value, 'iang') then
+        value := replace_suffix(value, 'iang', 'g')
+    else if ends_with(value, 'uang') then
+        value := replace_suffix(value, 'uang', 'g')
+    else if ends_with(value, 'iong') then
+        value := replace_suffix(value, 'iong', 'h')
+    else if ends_with(value, 'eng') then
+        value := replace_suffix(value, 'eng', 't')
+    else if ends_with(value, 'ang') then
+        value := replace_suffix(value, 'ang', 's')
+    else if ends_with(value, 'ian') then
+        value := replace_suffix(value, 'ian', 'f')
+    else if ends_with(value, 'uan') then
+        value := replace_suffix(value, 'uan', 'l')
+    else if ends_with(value, 'ing') then
+        value := replace_suffix(value, 'ing', ';')
+    else if ends_with(value, 'iao') then
+        value := replace_suffix(value, 'iao', 'b')
+    else if ends_with(value, 'ong') then
+        value := replace_suffix(value, 'ong', 'h')
+    else if ends_with(value, 'uo') then
+        value := replace_suffix(value, 'uo', 'o')
+    else if ends_with(value, 'ai') then
+        value := replace_suffix(value, 'ai', 'p')
+    else if ends_with(value, 'ie') then
+        value := replace_suffix(value, 'ie', 'd')
+    else if ends_with(value, 'er') then
+        value := replace_suffix(value, 'er', 'j')
+    else if ends_with(value, 'iu') then
+        value := replace_suffix(value, 'iu', 'j')
+    else if ends_with(value, 'ei') then
+        value := replace_suffix(value, 'ei', 'k')
+    else if ends_with(value, 'ou') then
+        value := replace_suffix(value, 'ou', 'z')
+    else if ends_with(value, 'ia') then
+        value := replace_suffix(value, 'ia', 'x')
+    else if ends_with(value, 'ua') then
+        value := replace_suffix(value, 'ua', 'x')
+    else if ends_with(value, 'ue') then
+        value := replace_suffix(value, 'ue', 'n')
+    else if ends_with(value, 've') then
+        value := replace_suffix(value, 've', 'n')
+    else if ends_with(value, 'ui') then
+        value := replace_suffix(value, 'ui', 'n')
+    else if ends_with(value, 'un') then
+        value := replace_suffix(value, 'un', 'm')
+    else if ends_with(value, 'en') then
+        value := replace_suffix(value, 'en', 'w')
+    else if ends_with(value, 'ao') then
+        value := replace_suffix(value, 'ao', 'q')
+    else if ends_with(value, 'an') then
+        value := replace_suffix(value, 'an', 'r')
+    else if ends_with(value, 'in') then
+        value := replace_suffix(value, 'in', 'y');
+
+    Result := LowerCase(transform_ziguang_initial(value));
+end;
+
+function transform_pinyinjiajia_initial(const value: string): string;
+begin
+    Result := value;
+    if Copy(Result, 1, 2) = 'sh' then
+    begin
+        Result := 'i' + Copy(Result, 3, MaxInt);
+    end
+    else if Copy(Result, 1, 2) = 'ch' then
+    begin
+        Result := 'u' + Copy(Result, 3, MaxInt);
+    end
+    else if Copy(Result, 1, 2) = 'zh' then
+    begin
+        Result := 'v' + Copy(Result, 3, MaxInt);
+    end;
+end;
+
+function transform_pinyinjiajia_code(const source: string): string;
+var
+    value: string;
+begin
+    value := LowerCase(source);
+    if ends_with(value, 'uai') then
+        value := replace_suffix(value, 'uai', 'x')
+    else if ends_with(value, 'iang') then
+        value := replace_suffix(value, 'iang', 'h')
+    else if ends_with(value, 'uang') then
+        value := replace_suffix(value, 'uang', 'h')
+    else if ends_with(value, 'iong') then
+        value := replace_suffix(value, 'iong', 'y')
+    else if ends_with(value, 'eng') then
+        value := replace_suffix(value, 'eng', 't')
+    else if ends_with(value, 'ang') then
+        value := replace_suffix(value, 'ang', 'g')
+    else if ends_with(value, 'ian') then
+        value := replace_suffix(value, 'ian', 'j')
+    else if ends_with(value, 'uan') then
+        value := replace_suffix(value, 'uan', 'c')
+    else if ends_with(value, 'van') then
+        value := replace_suffix(value, 'van', 'c')
+    else if ends_with(value, 'ing') then
+        value := replace_suffix(value, 'ing', 'q')
+    else if ends_with(value, 'iao') then
+        value := replace_suffix(value, 'iao', 'k')
+    else if ends_with(value, 'ong') then
+        value := replace_suffix(value, 'ong', 'y')
+    else if ends_with(value, 'iu') then
+        value := replace_suffix(value, 'iu', 'n')
+    else if ends_with(value, 'ia') then
+        value := replace_suffix(value, 'ia', 'b')
+    else if ends_with(value, 'ua') then
+        value := replace_suffix(value, 'ua', 'b')
+    else if ends_with(value, 'er') then
+        value := replace_suffix(value, 'er', 'q')
+    else if ends_with(value, 'ue') then
+        value := replace_suffix(value, 'ue', 'x')
+    else if ends_with(value, 've') then
+        value := replace_suffix(value, 've', 'x')
+    else if ends_with(value, 'uo') then
+        value := replace_suffix(value, 'uo', 'o')
+    else if ends_with(value, 'un') then
+        value := replace_suffix(value, 'un', 'z')
+    else if ends_with(value, 'vn') then
+        value := replace_suffix(value, 'vn', 'z')
+    else if ends_with(value, 'en') then
+        value := replace_suffix(value, 'en', 'r')
+    else if ends_with(value, 'an') then
+        value := replace_suffix(value, 'an', 'f')
+    else if ends_with(value, 'ao') then
+        value := replace_suffix(value, 'ao', 'd')
+    else if ends_with(value, 'ai') then
+        value := replace_suffix(value, 'ai', 's')
+    else if ends_with(value, 'ei') then
+        value := replace_suffix(value, 'ei', 'w')
+    else if ends_with(value, 'ie') then
+        value := replace_suffix(value, 'ie', 'm')
+    else if ends_with(value, 'ui') then
+        value := replace_suffix(value, 'ui', 'v')
+    else if (Length(value) > 2) and ends_with(value, 'ou') then
+        value := replace_suffix(value, 'ou', 'p')
+    else if ends_with(value, 'in') then
+        value := replace_suffix(value, 'in', 'l');
+
+    Result := LowerCase(transform_pinyinjiajia_initial(value));
+end;
+
 procedure append_unique(var values: TArray<string>; const value: string);
 var
     idx: Integer;
@@ -514,6 +685,46 @@ begin
                     append_unique(Result, transform_sogou_code(source));
                 end;
             end;
+        pis_ziguang_shuangpin:
+            begin
+                if CharInSet(normalized[1], ['a', 'o', 'e']) then
+                begin
+                    append_unique(Result,
+                        transform_ziguang_code('o' + normalized));
+                end
+                else
+                begin
+                    for source in sources do
+                    begin
+                        append_unique(Result, transform_ziguang_code(source));
+                    end;
+                end;
+            end;
+        pis_pinyinjiajia_shuangpin:
+            begin
+                if CharInSet(normalized[1], ['a', 'o', 'e']) then
+                begin
+                    if normalized[1] = 'o' then
+                    begin
+                        // The published algebra retains the original o-prefixed
+                        // spelling (o/ou) as well as deriving oo/op aliases.
+                        append_unique(Result,
+                            transform_pinyinjiajia_code(normalized));
+                    end;
+                    append_unique(Result, transform_pinyinjiajia_code(
+                        normalized[1] + normalized));
+                    append_unique(Result,
+                        transform_pinyinjiajia_code('o' + normalized));
+                end
+                else
+                begin
+                    for source in sources do
+                    begin
+                        append_unique(Result,
+                            transform_pinyinjiajia_code(source));
+                    end;
+                end;
+            end;
     end;
 end;
 
@@ -537,8 +748,9 @@ begin
         Exit;
     end;
 
-    // The two real collisions are lo (lo/luo) and ng (neng/ng). Prefer the
-    // productive standard syllable while retaining all non-colliding readings.
+    // Valid syllables can share one code: lo/luo in every scheme; ng with
+    // neng, niang (Ziguang), or nang (Pinyin Jiajia); and hm/hun in Ziguang.
+    // Prefer the productive longer syllable while retaining all other codes.
     if Length(syllable) > Length(current) then
     begin
         code_map.AddOrSetValue(code, syllable);
@@ -573,7 +785,9 @@ begin
     g_xiaohe_codes := TDictionary<string, string>.Create;
     g_ziranma_codes := TDictionary<string, string>.Create;
     g_sogou_codes := TDictionary<string, string>.Create;
-    for scheme := pis_microsoft_shuangpin to pis_sogou_shuangpin do
+    g_ziguang_codes := TDictionary<string, string>.Create;
+    g_pinyinjiajia_codes := TDictionary<string, string>.Create;
+    for scheme := pis_microsoft_shuangpin to pis_pinyinjiajia_shuangpin do
     begin
         case scheme of
             pis_microsoft_shuangpin:
@@ -582,8 +796,12 @@ begin
                 code_map := g_xiaohe_codes;
             pis_ziranma_shuangpin:
                 code_map := g_ziranma_codes;
+            pis_sogou_shuangpin:
+                code_map := g_sogou_codes;
+            pis_ziguang_shuangpin:
+                code_map := g_ziguang_codes;
         else
-            code_map := g_sogou_codes;
+            code_map := g_pinyinjiajia_codes;
         end;
         for syllable in g_syllables do
         begin
@@ -596,14 +814,34 @@ begin
     end;
 end;
 
-function expand_pending_initial(const value: Char): string;
+function expand_pending_initial(const scheme: TncPinyinInputScheme;
+    const value: Char): string;
 begin
-    case value of
-        'v': Result := 'zh';
-        'i': Result := 'ch';
-        'u': Result := 'sh';
+    case scheme of
+        pis_ziguang_shuangpin:
+            case value of
+                'u': Result := 'zh';
+                'a': Result := 'ch';
+                'i': Result := 'sh';
+            else
+                Result := value;
+            end;
+        pis_pinyinjiajia_shuangpin:
+            case value of
+                'v': Result := 'zh';
+                'u': Result := 'ch';
+                'i': Result := 'sh';
+            else
+                Result := value;
+            end;
     else
-        Result := value;
+        case value of
+            'v': Result := 'zh';
+            'i': Result := 'ch';
+            'u': Result := 'sh';
+        else
+            Result := value;
+        end;
     end;
 end;
 
@@ -663,8 +901,12 @@ begin
             code_map := g_xiaohe_codes;
         pis_ziranma_shuangpin:
             code_map := g_ziranma_codes;
+        pis_sogou_shuangpin:
+            code_map := g_sogou_codes;
+        pis_ziguang_shuangpin:
+            code_map := g_ziguang_codes;
     else
-        code_map := g_sogou_codes;
+        code_map := g_pinyinjiajia_codes;
     end;
 
     normalized_raw := LowerCase(raw_text);
@@ -698,7 +940,7 @@ begin
             unit_value.complete := code_map.TryGetValue(code, unit_value.pinyin);
             if not unit_value.complete then
             begin
-                unit_value.pinyin := expand_pending_initial(code[1]);
+                unit_value.pinyin := expand_pending_initial(scheme, code[1]);
                 if Length(code) > 1 then
                 begin
                     unit_value.pinyin := unit_value.pinyin + code[2];
@@ -791,7 +1033,8 @@ var
     idx: Integer;
     segment_length: Integer;
 begin
-    if not (scheme in [pis_microsoft_shuangpin, pis_sogou_shuangpin]) then
+    if not (scheme in [pis_microsoft_shuangpin, pis_sogou_shuangpin,
+        pis_ziguang_shuangpin]) then
     begin
         Exit(False);
     end;
@@ -811,6 +1054,8 @@ initialization
     initialize_maps;
 
 finalization
+    g_pinyinjiajia_codes.Free;
+    g_ziguang_codes.Free;
     g_sogou_codes.Free;
     g_ziranma_codes.Free;
     g_xiaohe_codes.Free;

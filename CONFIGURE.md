@@ -34,11 +34,19 @@ Notes:
 | Key | Meaning | Allowed values | Default | Example | Notes |
 | --- | --- | --- | --- | --- | --- |
 | `input_mode` | Initial input mode | `0` = Chinese, `1` = English | `0` | `input_mode=0` | Any value other than `1` defaults to Chinese. Can be toggled at runtime with the Shift key. |
+| `pinyin_scheme` | Pinyin input scheme | `full-pinyin` / `microsoft-shuangpin` / `xiaohe-shuangpin` / `ziranma-shuangpin` / `sogou-shuangpin` / `ziguang-shuangpin` / `pinyinjiajia-shuangpin` | `full-pinyin` | `pinyin_scheme=microsoft-shuangpin` | Selects Full Pinyin or one of six Double Pinyin layouts. Unknown values fall back to Full Pinyin. |
 | `full_width_mode` | Full-width output | `true` / `false` | `false` | `full_width_mode=false` | When enabled, ASCII characters are mapped to full-width forms. Toggle at runtime with Shift+Space. |
 | `punctuation_full_width` | Chinese punctuation style | `true` / `false` | `true` | `punctuation_full_width=true` | When enabled, punctuation keys produce Chinese full-width symbols. Toggle at runtime with Ctrl+Period. |
 | `debug` | Debug mode | `0` / `1` | `0` | `debug=1` | Shows candidate scores and path info in the candidate window. |
 
 > **Note:** Candidates per page (9), segment candidate enhancement, and keyboard shortcut toggles are fixed at runtime and are not configurable via the INI file.
+
+Double Pinyin follows these rules:
+
+- Changing the scheme takes effect immediately and clears any active composition to avoid mixing layouts.
+- Candidate lookup and user learning use decoded canonical Full Pinyin, so all Pinyin schemes share ranking and user data.
+- An apostrophe explicitly separates syllables. In Microsoft, Sogou, and Ziguang Double Pinyin, semicolon represents the `ing` final only as the second key of a pair; elsewhere it remains punctuation.
+- The status widget uses `拼`, `微`, `鹤`, `自`, `搜`, `紫`, and `加` for Full Pinyin, Microsoft, Xiaohe, Ziranma, Sogou, Ziguang, and Pinyin Jiajia respectively.
 
 ---
 
@@ -77,6 +85,7 @@ version=8
 
 [engine]
 input_mode=0
+pinyin_scheme=full-pinyin
 full_width_mode=false
 punctuation_full_width=true
 debug=0
@@ -116,4 +125,18 @@ variant=traditional
 ```ini
 [engine]
 input_mode=1
+```
+
+### Use Ziguang Double Pinyin
+
+```ini
+[engine]
+pinyin_scheme=ziguang-shuangpin
+```
+
+### Use Pinyin Jiajia
+
+```ini
+[engine]
+pinyin_scheme=pinyinjiajia-shuangpin
 ```

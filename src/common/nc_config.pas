@@ -79,6 +79,10 @@ begin
             Result := 'ziranma-shuangpin';
         pis_sogou_shuangpin:
             Result := 'sogou-shuangpin';
+        pis_ziguang_shuangpin:
+            Result := 'ziguang-shuangpin';
+        pis_pinyinjiajia_shuangpin:
+            Result := 'pinyinjiajia-shuangpin';
     else
         Result := 'full-pinyin';
     end;
@@ -105,6 +109,18 @@ begin
         SameText(Trim(value), 'sogou') or SameText(Trim(value), 'sgpy') then
     begin
         Exit(pis_sogou_shuangpin);
+    end;
+    if SameText(Trim(value), 'ziguang-shuangpin') or
+        SameText(Trim(value), 'ziguang') or SameText(Trim(value), 'zgpy') then
+    begin
+        Exit(pis_ziguang_shuangpin);
+    end;
+    if SameText(Trim(value), 'pinyinjiajia-shuangpin') or
+        SameText(Trim(value), 'pinyinjiajia') or
+        SameText(Trim(value), 'pyjj-shuangpin') or
+        SameText(Trim(value), 'pyjj') then
+    begin
+        Exit(pis_pinyinjiajia_shuangpin);
     end;
     Result := pis_full_pinyin;
 end;
