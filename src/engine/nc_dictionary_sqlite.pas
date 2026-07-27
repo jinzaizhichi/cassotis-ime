@@ -95,7 +95,9 @@ type
         m_candidate_penalty_cache: TDictionary<string, Integer>;
         m_candidate_penalty_pinyin_loaded_cache: TDictionary<string, Boolean>;
         m_lookup_result_cache: TDictionary<string, TncCandidateList>;
+        m_lookup_result_cache_order: TQueue<string>;
         m_exact_lookup_result_cache: TDictionary<string, TncCandidateList>;
+        m_exact_lookup_result_cache_order: TQueue<string>;
         m_prefix_lookup_result_cache: TDictionary<string, TncCandidateList>;
         m_literal_lookup_result_cache: TDictionary<string, TncCandidateList>;
         m_literal_user_words_available: Integer;
@@ -2150,7 +2152,9 @@ begin
     m_candidate_penalty_cache := TDictionary<string, Integer>.Create;
     m_candidate_penalty_pinyin_loaded_cache := TDictionary<string, Boolean>.Create;
     m_lookup_result_cache := TDictionary<string, TncCandidateList>.Create;
+    m_lookup_result_cache_order := TQueue<string>.Create;
     m_exact_lookup_result_cache := TDictionary<string, TncCandidateList>.Create;
+    m_exact_lookup_result_cache_order := TQueue<string>.Create;
     m_prefix_lookup_result_cache := TDictionary<string, TncCandidateList>.Create;
     m_literal_lookup_result_cache := TDictionary<string, TncCandidateList>.Create;
     m_literal_user_words_available := -1;
@@ -2277,10 +2281,20 @@ begin
         m_lookup_result_cache.Free;
         m_lookup_result_cache := nil;
     end;
+    if m_lookup_result_cache_order <> nil then
+    begin
+        m_lookup_result_cache_order.Free;
+        m_lookup_result_cache_order := nil;
+    end;
     if m_exact_lookup_result_cache <> nil then
     begin
         m_exact_lookup_result_cache.Free;
         m_exact_lookup_result_cache := nil;
+    end;
+    if m_exact_lookup_result_cache_order <> nil then
+    begin
+        m_exact_lookup_result_cache_order.Free;
+        m_exact_lookup_result_cache_order := nil;
     end;
     if m_prefix_lookup_result_cache <> nil then
     begin
@@ -6698,9 +6712,17 @@ begin
     begin
         m_lookup_result_cache.Clear;
     end;
+    if m_lookup_result_cache_order <> nil then
+    begin
+        m_lookup_result_cache_order.Clear;
+    end;
     if m_exact_lookup_result_cache <> nil then
     begin
         m_exact_lookup_result_cache.Clear;
+    end;
+    if m_exact_lookup_result_cache_order <> nil then
+    begin
+        m_exact_lookup_result_cache_order.Clear;
     end;
     if m_prefix_lookup_result_cache <> nil then
     begin
@@ -6909,7 +6931,7 @@ end;
 function TncSqliteDictionary.lookup_exact_full_pinyin(const pinyin: string;
     out results: TncCandidateList): Boolean;
 const
-    c_result_cache_limit = 4096;
+    c_result_cache_limit = 16384;
     base_sql = 'SELECT pinyin, text, comment, weight FROM dict_base WHERE pinyin = ?1 ' +
         'ORDER BY weight DESC, text ASC';
     base_alias_sql =
@@ -6932,6 +6954,7 @@ var
     step_result: Integer;
     item: TncCandidate;
     query_key: string;
+    evicted_cache_key: string;
     idx: Integer;
     key: string;
     text_value: string;
@@ -7487,18 +7510,29 @@ begin
     end;
     if m_exact_lookup_result_cache <> nil then
     begin
-        if m_exact_lookup_result_cache.Count >= c_result_cache_limit then
+        while m_exact_lookup_result_cache.Count >= c_result_cache_limit do
         begin
-            m_exact_lookup_result_cache.Clear;
+            if (m_exact_lookup_result_cache_order = nil) or
+                (m_exact_lookup_result_cache_order.Count = 0) then
+            begin
+                m_exact_lookup_result_cache.Clear;
+                Break;
+            end;
+            evicted_cache_key := m_exact_lookup_result_cache_order.Dequeue;
+            m_exact_lookup_result_cache.Remove(evicted_cache_key);
         end;
         m_exact_lookup_result_cache.AddOrSetValue(query_key,
             Copy(results, 0, Length(results)));
+        if m_exact_lookup_result_cache_order <> nil then
+        begin
+            m_exact_lookup_result_cache_order.Enqueue(query_key);
+        end;
     end;
 end;
 
 function TncSqliteDictionary.lookup(const pinyin: string; out results: TncCandidateList): Boolean;
 const
-    c_result_cache_limit = 4096;
+    c_result_cache_limit = 8192;
     base_sql = 'SELECT pinyin, text, comment, weight FROM dict_base WHERE pinyin = ?1 ' +
         'ORDER BY weight DESC, text ASC LIMIT ?2';
     base_exact_entry_normalized_sql =
@@ -7593,6 +7627,7 @@ var
     i: Integer;
     key: string;
     query_key: string;
+    evicted_cache_key: string;
     candidate_pinyin: string;
     stat_pinyin_value: string;
     candidate_score_cap: Integer;
@@ -10325,12 +10360,23 @@ begin
     end;
     if m_lookup_result_cache <> nil then
     begin
-        if m_lookup_result_cache.Count >= c_result_cache_limit then
+        while m_lookup_result_cache.Count >= c_result_cache_limit do
         begin
-            m_lookup_result_cache.Clear;
+            if (m_lookup_result_cache_order = nil) or
+                (m_lookup_result_cache_order.Count = 0) then
+            begin
+                m_lookup_result_cache.Clear;
+                Break;
+            end;
+            evicted_cache_key := m_lookup_result_cache_order.Dequeue;
+            m_lookup_result_cache.Remove(evicted_cache_key);
         end;
         m_lookup_result_cache.AddOrSetValue(LowerCase(pinyin),
             Copy(results, 0, Length(results)));
+        if m_lookup_result_cache_order <> nil then
+        begin
+            m_lookup_result_cache_order.Enqueue(LowerCase(pinyin));
+        end;
     end;
 end;
 

@@ -44,6 +44,25 @@ type
         segment_count: Integer;
     end;
 
+    TncCharLmScoreMode = (clsm_full, clsm_suffix, clsm_context);
+
+    TncLongPathStructureCacheValue = record
+        segment_count: Integer;
+        single_segment_count: Integer;
+        max_segment_units: Integer;
+        min_segment_units: Integer;
+        segment_units_square_sum: Integer;
+        first_segment_units: Integer;
+        last_segment_units: Integer;
+        nonprimary_multi_char_state: Byte;
+    end;
+
+    TncExactLexicalFeatureCacheValue = record
+        selected_rank: Integer;
+        selected_weight: Integer;
+        top_weight: Integer;
+    end;
+
     TncTargetRecallDebug = record
         found: Boolean;
         raw_rank: Integer;
@@ -207,10 +226,21 @@ type
     TncLongChainRuntimeCandidate = record
         text: string;
         segment_path: string;
+        feature_query_key: string;
+        feature_context_key: string;
         rank: Integer;
         original_rank: Integer;
         first_stage_score: Integer;
         second_stage_score: Int64;
+        features_valid: Boolean;
+        char_lm_score: Integer;
+        char_lm_suffix_score: Integer;
+        char_lm_context_score: Integer;
+        path_segments: Integer;
+        path_single_segments: Integer;
+        path_max_segment_units: Integer;
+        query_path_bonus: Integer;
+        query_path_penalty: Integer;
     end;
 
     TncLongChainRuntimeCandidateArray = TArray<TncLongChainRuntimeCandidate>;
@@ -294,6 +324,12 @@ type
         m_lookup_candidate_path_confidence_cache: TDictionary<string, Integer>;
         m_lookup_single_char_match_cache: TDictionary<string, Integer>;
         m_lookup_inferred_segment_path_cache: TDictionary<string, TncInferredPathCacheValue>;
+        m_lookup_char_lm_full_score_cache: TDictionary<string, Integer>;
+        m_lookup_char_lm_suffix_score_cache: TDictionary<string, Integer>;
+        m_lookup_char_lm_context_score_cache: TDictionary<string, Integer>;
+        m_lookup_long_path_structure_cache: TDictionary<string, TncLongPathStructureCacheValue>;
+        m_lookup_exact_lexical_feature_cache: TDictionary<string, TncExactLexicalFeatureCacheValue>;
+        m_lookup_display_feature_cache: TDictionary<string, Integer>;
         m_full_pinyin_key_cache: TDictionary<string, Boolean>;
         m_effective_pinyin_parse_cache: TDictionary<string, TncPinyinParseResult>;
         m_build_lookup_cache: TDictionary<string, TncCandidateList>;
@@ -467,6 +503,17 @@ type
         function get_rank_score(const candidate: TncCandidate): Integer;
         procedure sort_candidates(var candidates: TncCandidateList);
         procedure clear_lookup_bonus_caches;
+        function get_cached_char_lm_scores(const texts: TArray<string>;
+            out scores: TArray<Integer>; const score_mode: TncCharLmScoreMode;
+            const left_context: string): Boolean;
+        function get_cached_long_path_structure(const encoded_path: string;
+            out value: TncLongPathStructureCacheValue): Boolean;
+        function get_cached_query_segment_path_bonus(const query_key: string;
+            const encoded_path: string): Integer;
+        function get_cached_query_segment_path_penalty(const query_key: string;
+            const encoded_path: string): Integer;
+        function get_cached_query_latest_choice_text(
+            const query_key: string): string;
         procedure clear_session_learning_after_user_removal;
         function build_candidate_identity_key(const candidate_text: string; const comment_text: string): string;
         procedure clear_segment_path_tracking;
@@ -886,6 +933,14 @@ begin
     m_lookup_single_char_match_cache := TDictionary<string, Integer>.Create;
     m_lookup_inferred_segment_path_cache :=
         TDictionary<string, TncInferredPathCacheValue>.Create;
+    m_lookup_char_lm_full_score_cache := TDictionary<string, Integer>.Create;
+    m_lookup_char_lm_suffix_score_cache := TDictionary<string, Integer>.Create;
+    m_lookup_char_lm_context_score_cache := TDictionary<string, Integer>.Create;
+    m_lookup_long_path_structure_cache :=
+        TDictionary<string, TncLongPathStructureCacheValue>.Create;
+    m_lookup_exact_lexical_feature_cache :=
+        TDictionary<string, TncExactLexicalFeatureCacheValue>.Create;
+    m_lookup_display_feature_cache := TDictionary<string, Integer>.Create;
     m_full_pinyin_key_cache := TDictionary<string, Boolean>.Create;
     m_effective_pinyin_parse_cache :=
         TDictionary<string, TncPinyinParseResult>.Create;
@@ -1113,6 +1168,36 @@ begin
         m_lookup_inferred_segment_path_cache.Free;
         m_lookup_inferred_segment_path_cache := nil;
     end;
+    if m_lookup_char_lm_full_score_cache <> nil then
+    begin
+        m_lookup_char_lm_full_score_cache.Free;
+        m_lookup_char_lm_full_score_cache := nil;
+    end;
+    if m_lookup_char_lm_suffix_score_cache <> nil then
+    begin
+        m_lookup_char_lm_suffix_score_cache.Free;
+        m_lookup_char_lm_suffix_score_cache := nil;
+    end;
+    if m_lookup_char_lm_context_score_cache <> nil then
+    begin
+        m_lookup_char_lm_context_score_cache.Free;
+        m_lookup_char_lm_context_score_cache := nil;
+    end;
+    if m_lookup_long_path_structure_cache <> nil then
+    begin
+        m_lookup_long_path_structure_cache.Free;
+        m_lookup_long_path_structure_cache := nil;
+    end;
+    if m_lookup_exact_lexical_feature_cache <> nil then
+    begin
+        m_lookup_exact_lexical_feature_cache.Free;
+        m_lookup_exact_lexical_feature_cache := nil;
+    end;
+    if m_lookup_display_feature_cache <> nil then
+    begin
+        m_lookup_display_feature_cache.Free;
+        m_lookup_display_feature_cache := nil;
+    end;
     if m_full_pinyin_key_cache <> nil then
     begin
         m_full_pinyin_key_cache.Free;
@@ -1252,6 +1337,263 @@ begin
     if m_lookup_inferred_segment_path_cache <> nil then
     begin
         m_lookup_inferred_segment_path_cache.Clear;
+    end;
+    if m_lookup_char_lm_full_score_cache <> nil then
+    begin
+        m_lookup_char_lm_full_score_cache.Clear;
+    end;
+    if m_lookup_char_lm_suffix_score_cache <> nil then
+    begin
+        m_lookup_char_lm_suffix_score_cache.Clear;
+    end;
+    if m_lookup_char_lm_context_score_cache <> nil then
+    begin
+        m_lookup_char_lm_context_score_cache.Clear;
+    end;
+    if m_lookup_long_path_structure_cache <> nil then
+    begin
+        m_lookup_long_path_structure_cache.Clear;
+    end;
+    if m_lookup_exact_lexical_feature_cache <> nil then
+    begin
+        m_lookup_exact_lexical_feature_cache.Clear;
+    end;
+    if m_lookup_display_feature_cache <> nil then
+    begin
+        m_lookup_display_feature_cache.Clear;
+    end;
+end;
+
+function TncEngine.get_cached_char_lm_scores(const texts: TArray<string>;
+    out scores: TArray<Integer>; const score_mode: TncCharLmScoreMode;
+    const left_context: string): Boolean;
+var
+    cache: TDictionary<string, Integer>;
+    cache_key: string;
+    context_key: string;
+    idx: Integer;
+    missing_count: Integer;
+    missing_indices: TArray<Integer>;
+    missing_texts: TArray<string>;
+    missing_scores: TArray<Integer>;
+    provider_ok: Boolean;
+begin
+    SetLength(scores, Length(texts));
+    Result := False;
+    if (m_dictionary = nil) or (Length(texts) = 0) then
+    begin
+        Exit;
+    end;
+
+    case score_mode of
+        clsm_full:
+            cache := m_lookup_char_lm_full_score_cache;
+        clsm_suffix:
+            cache := m_lookup_char_lm_suffix_score_cache;
+        clsm_context:
+            cache := m_lookup_char_lm_context_score_cache;
+    else
+        cache := nil;
+    end;
+    if cache = nil then
+    begin
+        case score_mode of
+            clsm_full:
+                provider_ok := m_dictionary.get_char_lm_text_scores(
+                    texts, scores);
+            clsm_suffix:
+                provider_ok := m_dictionary.get_char_lm_suffix_scores(
+                    texts, scores);
+            clsm_context:
+                provider_ok := m_dictionary.get_char_lm_continuation_scores(
+                    left_context, texts, scores);
+        else
+            provider_ok := False;
+        end;
+        Exit(provider_ok and (Length(scores) = Length(texts)));
+    end;
+
+    context_key := '';
+    if score_mode = clsm_context then
+    begin
+        context_key := Trim(left_context) + #1;
+    end;
+    SetLength(missing_indices, 0);
+    SetLength(missing_texts, 0);
+    missing_count := 0;
+    for idx := 0 to High(texts) do
+    begin
+        cache_key := context_key + Trim(texts[idx]);
+        if not cache.TryGetValue(cache_key, scores[idx]) then
+        begin
+            if missing_count = 0 then
+            begin
+                SetLength(missing_indices, Length(texts));
+                SetLength(missing_texts, Length(texts));
+            end;
+            missing_indices[missing_count] := idx;
+            missing_texts[missing_count] := texts[idx];
+            Inc(missing_count);
+        end;
+    end;
+    if missing_count = 0 then
+    begin
+        Exit(True);
+    end;
+
+    SetLength(missing_indices, missing_count);
+    SetLength(missing_texts, missing_count);
+    case score_mode of
+        clsm_full:
+            provider_ok := m_dictionary.get_char_lm_text_scores(
+                missing_texts, missing_scores);
+        clsm_suffix:
+            provider_ok := m_dictionary.get_char_lm_suffix_scores(
+                missing_texts, missing_scores);
+        clsm_context:
+            provider_ok := m_dictionary.get_char_lm_continuation_scores(
+                left_context, missing_texts, missing_scores);
+    else
+        provider_ok := False;
+    end;
+    if (not provider_ok) or (Length(missing_scores) <> missing_count) then
+    begin
+        Exit(False);
+    end;
+
+    for idx := 0 to missing_count - 1 do
+    begin
+        scores[missing_indices[idx]] := missing_scores[idx];
+        cache_key := context_key + Trim(missing_texts[idx]);
+        cache.AddOrSetValue(cache_key, missing_scores[idx]);
+    end;
+    Result := True;
+end;
+
+function TncEngine.get_cached_long_path_structure(const encoded_path: string;
+    out value: TncLongPathStructureCacheValue): Boolean;
+var
+    cache_key: string;
+    part: string;
+    part_units: Integer;
+    parts: TArray<string>;
+begin
+    FillChar(value, SizeOf(value), 0);
+    cache_key := Trim(encoded_path);
+    if cache_key = '' then
+    begin
+        Exit(False);
+    end;
+    if (m_lookup_long_path_structure_cache <> nil) and
+        m_lookup_long_path_structure_cache.TryGetValue(cache_key, value) then
+    begin
+        Exit(True);
+    end;
+
+    value.min_segment_units := MaxInt;
+    parts := cache_key.Split([c_segment_path_separator]);
+    for part in parts do
+    begin
+        part_units := get_candidate_text_unit_count(Trim(part));
+        if part_units <= 0 then
+        begin
+            Continue;
+        end;
+        Inc(value.segment_count);
+        if part_units = 1 then
+        begin
+            Inc(value.single_segment_count);
+        end;
+        value.max_segment_units := Max(value.max_segment_units, part_units);
+        value.min_segment_units := Min(value.min_segment_units, part_units);
+        Inc(value.segment_units_square_sum, part_units * part_units);
+        if value.first_segment_units = 0 then
+        begin
+            value.first_segment_units := part_units;
+        end;
+        value.last_segment_units := part_units;
+    end;
+    if value.min_segment_units = MaxInt then
+    begin
+        value.min_segment_units := 0;
+    end;
+    if m_lookup_long_path_structure_cache <> nil then
+    begin
+        m_lookup_long_path_structure_cache.AddOrSetValue(cache_key, value);
+    end;
+    Result := value.segment_count > 0;
+end;
+
+function TncEngine.get_cached_query_segment_path_bonus(const query_key: string;
+    const encoded_path: string): Integer;
+var
+    cache_key: string;
+begin
+    Result := 0;
+    if m_dictionary = nil then
+    begin
+        Exit;
+    end;
+    cache_key := 'DB' + #1 + LowerCase(Trim(query_key)) + #1 +
+        Trim(encoded_path);
+    if (m_lookup_query_path_bonus_cache <> nil) and
+        m_lookup_query_path_bonus_cache.TryGetValue(cache_key, Result) then
+    begin
+        Exit;
+    end;
+    Result := m_dictionary.get_query_segment_path_bonus(query_key,
+        encoded_path);
+    if m_lookup_query_path_bonus_cache <> nil then
+    begin
+        m_lookup_query_path_bonus_cache.AddOrSetValue(cache_key, Result);
+    end;
+end;
+
+function TncEngine.get_cached_query_segment_path_penalty(
+    const query_key: string; const encoded_path: string): Integer;
+var
+    cache_key: string;
+begin
+    Result := 0;
+    if m_dictionary = nil then
+    begin
+        Exit;
+    end;
+    cache_key := 'DN' + #1 + LowerCase(Trim(query_key)) + #1 +
+        Trim(encoded_path);
+    if (m_lookup_query_path_bonus_cache <> nil) and
+        m_lookup_query_path_bonus_cache.TryGetValue(cache_key, Result) then
+    begin
+        Exit;
+    end;
+    Result := m_dictionary.get_query_segment_path_penalty(query_key,
+        encoded_path);
+    if m_lookup_query_path_bonus_cache <> nil then
+    begin
+        m_lookup_query_path_bonus_cache.AddOrSetValue(cache_key, Result);
+    end;
+end;
+
+function TncEngine.get_cached_query_latest_choice_text(
+    const query_key: string): string;
+var
+    cache_key: string;
+begin
+    Result := '';
+    cache_key := Trim(query_key);
+    if (m_dictionary = nil) or (cache_key = '') then
+    begin
+        Exit;
+    end;
+    if (m_lookup_query_latest_text_cache <> nil) and
+        m_lookup_query_latest_text_cache.TryGetValue(cache_key, Result) then
+    begin
+        Exit;
+    end;
+    Result := Trim(m_dictionary.get_query_latest_choice_text(cache_key));
+    if m_lookup_query_latest_text_cache <> nil then
+    begin
+        m_lookup_query_latest_text_cache.AddOrSetValue(cache_key, Result);
     end;
 end;
 
@@ -1594,6 +1936,7 @@ var
     function lookup_cached(const pinyin_key: string; out out_results: TncCandidateList): Boolean;
     var
         build_cache_key: string;
+        full_results: TncCandidateList;
     begin
         SetLength(out_results, 0);
         if (m_dictionary = nil) or (pinyin_key = '') then
@@ -1608,25 +1951,31 @@ var
 
         build_cache_key := '#exact#' + pinyin_key;
         if (m_build_lookup_cache <> nil) and
-            m_build_lookup_cache.TryGetValue(build_cache_key, out_results) then
+            m_build_lookup_cache.TryGetValue(build_cache_key, full_results) then
         begin
+            out_results := Copy(full_results, 0, Length(full_results));
+            if Length(out_results) > c_infer_segment_lookup_probe_limit then
+            begin
+                SetLength(out_results, c_infer_segment_lookup_probe_limit);
+            end;
             lookup_cache.AddOrSetValue(pinyin_key, out_results);
             Exit(Length(out_results) > 0);
         end;
 
-        if not m_dictionary.lookup_exact_full_pinyin(pinyin_key, out_results) then
+        if not m_dictionary.lookup_exact_full_pinyin(pinyin_key, full_results) then
         begin
-            SetLength(out_results, 0);
+            SetLength(full_results, 0);
         end;
+        if m_build_lookup_cache <> nil then
+        begin
+            m_build_lookup_cache.AddOrSetValue(build_cache_key, full_results);
+        end;
+        out_results := Copy(full_results, 0, Length(full_results));
         if Length(out_results) > c_infer_segment_lookup_probe_limit then
         begin
             SetLength(out_results, c_infer_segment_lookup_probe_limit);
         end;
         lookup_cache.AddOrSetValue(pinyin_key, out_results);
-        if m_build_lookup_cache <> nil then
-        begin
-            m_build_lookup_cache.AddOrSetValue(build_cache_key, out_results);
-        end;
         Result := Length(out_results) > 0;
     end;
 
@@ -3353,6 +3702,16 @@ var
             Inc(lookup_cache_hits);
             Exit(Length(out_results) > 0);
         end;
+        if (m_build_lookup_cache <> nil) and
+            m_build_lookup_cache.TryGetValue(cache_key, out_results) then
+        begin
+            Inc(lookup_cache_hits);
+            if lookup_cache <> nil then
+            begin
+                lookup_cache.AddOrSetValue(cache_key, out_results);
+            end;
+            Exit(Length(out_results) > 0);
+        end;
 
         Inc(lookup_cache_misses);
         phase_tick := GetTickCount64;
@@ -3364,6 +3723,10 @@ var
         if lookup_cache <> nil then
         begin
             lookup_cache.AddOrSetValue(cache_key, out_results);
+        end;
+        if m_build_lookup_cache <> nil then
+        begin
+            m_build_lookup_cache.AddOrSetValue(cache_key, out_results);
         end;
         Result := Length(out_results) > 0;
     end;
@@ -5328,8 +5691,8 @@ var
                 Inc(Result, 200000);
             end;
 
-            latest_text_local := Trim(
-                m_dictionary.get_query_latest_choice_text(normalized_query_local));
+            latest_text_local := get_cached_query_latest_choice_text(
+                normalized_query_local);
             if (latest_text_local <> '') and SameText(text_key_local,
                 latest_text_local) then
             begin
@@ -6517,9 +6880,8 @@ var
             end;
             if (learned_text_local = '') and (m_dictionary <> nil) then
             begin
-                learned_text_local := Trim(
-                    m_dictionary.get_query_latest_choice_text(
-                    normalized_query_local));
+                learned_text_local := get_cached_query_latest_choice_text(
+                    normalized_query_local);
                 latest_from_dictionary_local := learned_text_local <> '';
             end;
             trusted_latest_choice_local := latest_from_session_local or
@@ -14796,38 +15158,9 @@ var
 
         function lookup_exact_resolved_cached_local(const pinyin_key: string;
             out out_results: TncCandidateList): Boolean;
-        var
-            cache_key_local: string;
-            phase_start_tick_local: UInt64;
         begin
-            SetLength(out_results, 0);
-            if (m_dictionary = nil) or (pinyin_key = '') then
-            begin
-                Exit(False);
-            end;
-
-            cache_key_local := '#preferred_exact#' + pinyin_key;
-            if (lookup_cache <> nil) and
-                lookup_cache.TryGetValue(cache_key_local, out_results) then
-            begin
-                Inc(lookup_cache_hits);
-                Exit(Length(out_results) > 0);
-            end;
-
-            Inc(lookup_cache_misses);
-            phase_start_tick_local := GetTickCount64;
-            if not m_dictionary.lookup_exact_full_pinyin(pinyin_key,
-                out_results) then
-            begin
-                SetLength(out_results, 0);
-            end;
-            Inc(lookup_elapsed_ms, Int64(GetTickCount64 -
-                phase_start_tick_local));
-            if lookup_cache <> nil then
-            begin
-                lookup_cache.AddOrSetValue(cache_key_local, out_results);
-            end;
-            Result := Length(out_results) > 0;
+            Result := lookup_exact_full_pinyin_cached_local(pinyin_key,
+                out_results);
         end;
 
         function build_query_key_local(const start_idx: Integer;
@@ -16820,8 +17153,8 @@ var
         end
         else
         begin
-            latest_text_local := Trim(
-                m_dictionary.get_query_latest_choice_text(normalized_query_local));
+            latest_text_local := get_cached_query_latest_choice_text(
+                normalized_query_local);
             if m_lookup_query_latest_text_cache <> nil then
             begin
                 m_lookup_query_latest_text_cache.AddOrSetValue(
@@ -17062,8 +17395,8 @@ var
         end
         else
         begin
-            latest_text_local := Trim(
-                m_dictionary.get_query_latest_choice_text(normalized_query_local));
+            latest_text_local := get_cached_query_latest_choice_text(
+                normalized_query_local);
             if m_lookup_query_latest_text_cache <> nil then
             begin
                 m_lookup_query_latest_text_cache.AddOrSetValue(
@@ -17445,7 +17778,7 @@ var
 
             segment_path := get_segment_path_for_candidate(candidates[0], 0);
             if (segment_path = '') or
-                (m_dictionary.get_query_segment_path_bonus(lookup_text,
+                (get_cached_query_segment_path_bonus(lookup_text,
                 segment_path) <= 0) then
             begin
                 Exit;
@@ -24608,8 +24941,8 @@ var
         latest_choice_text_local := '';
         if normalized_query_local <> '' then
         begin
-            latest_choice_text_local := Trim(
-                m_dictionary.get_query_latest_choice_text(normalized_query_local));
+            latest_choice_text_local := get_cached_query_latest_choice_text(
+                normalized_query_local);
         end;
         query_syllables_local := get_effective_compact_pinyin_syllables(
             lookup_text);
@@ -26614,7 +26947,7 @@ var
                 Exit;
             end;
 
-            best_total := io_bonus + m_dictionary.get_query_segment_path_bonus(
+            best_total := io_bonus + get_cached_query_segment_path_bonus(
                 lookup_text, current_path + c_segment_path_separator + io_text);
             for local_idx := 0 to High(local_results) do
             begin
@@ -26639,14 +26972,14 @@ var
                     local_span_len * 180;
                 candidate_path := current_path + c_segment_path_separator +
                     candidate_text;
-                candidate_path_bonus := m_dictionary.get_query_segment_path_bonus(
+                candidate_path_bonus := get_cached_query_segment_path_bonus(
                     lookup_text, candidate_path);
                 candidate_path := split_last_segment_path_variant_local(
                     current_path, candidate_text);
                 if candidate_path <> '' then
                 begin
                     candidate_path_bonus := Max(candidate_path_bonus,
-                        m_dictionary.get_query_segment_path_bonus(lookup_text,
+                        get_cached_query_segment_path_bonus(lookup_text,
                         candidate_path));
                 end;
                 candidate_total := candidate_bonus + candidate_path_bonus;
@@ -27079,8 +27412,8 @@ var
                 end
                 else if m_dictionary <> nil then
                 begin
-                    latest_query_choice_text := Trim(
-                        m_dictionary.get_query_latest_choice_text(lookup_text));
+                    latest_query_choice_text :=
+                        get_cached_query_latest_choice_text(lookup_text);
                 end;
             end;
 
@@ -31120,9 +31453,8 @@ var
 
             if m_dictionary <> nil then
             begin
-                latest_text_local := Trim(
-                    m_dictionary.get_query_latest_choice_text(
-                    normalized_query_local));
+                latest_text_local := get_cached_query_latest_choice_text(
+                    normalized_query_local);
                 if (latest_text_local <> '') and
                     SameText(text_key_local, latest_text_local) then
                 begin
@@ -44032,6 +44364,9 @@ var
             ranker_first_stage_score: Integer;
             ranker_second_stage_score: Int64;
             ranker_model_ordered: Boolean;
+            ranker_features_valid: Boolean;
+            ranker_feature_context_key: string;
+            ranker_features: TncLongSecondStageFeatures;
         end;
         TExactChunkChainStateArray = TArray<TExactChunkChainState>;
         TExactChunkChainOption = record
@@ -46171,7 +46506,7 @@ var
                 Exit;
             end;
 
-            if not m_dictionary.lookup_exact_full_pinyin(query_key_local,
+            if not lookup_exact_full_pinyin_cached_local(query_key_local,
                 local_results_local) then
             begin
                 Exit;
@@ -46556,7 +46891,7 @@ var
                 Exit;
             end;
 
-            if not m_dictionary.lookup_exact_full_pinyin(query_key_local,
+            if not lookup_exact_full_pinyin_cached_local(query_key_local,
                 local_results) then
             begin
                 Exit;
@@ -46621,7 +46956,7 @@ var
                 Exit;
             end;
 
-            if not m_dictionary.lookup_exact_full_pinyin(query_key_local,
+            if not lookup_exact_full_pinyin_cached_local(query_key_local,
                 local_results) then
             begin
                 Exit;
@@ -46781,7 +47116,7 @@ var
                     begin
                         left_text_local := fixed_text_local;
                         left_score_local := 1200;
-                        if m_dictionary.lookup_exact_full_pinyin(left_key,
+                        if lookup_exact_full_pinyin_cached_local(left_key,
                             local_results) then
                         begin
                             for local_idx := 0 to High(local_results) do
@@ -46821,7 +47156,7 @@ var
                     begin
                         right_text_local := fixed_text_local;
                         right_score_local := 1200;
-                        if m_dictionary.lookup_exact_full_pinyin(right_key,
+                        if lookup_exact_full_pinyin_cached_local(right_key,
                             local_results) then
                         begin
                             for local_idx := 0 to High(local_results) do
@@ -47103,7 +47438,7 @@ var
                 if fixed_single_text_local <> '' then
                 begin
                     candidate_score_local := 0;
-                    if m_dictionary.lookup_exact_full_pinyin(query_key_local,
+                    if lookup_exact_full_pinyin_cached_local(query_key_local,
                         local_results) then
                     begin
                         for local_idx := 0 to High(local_results) do
@@ -47146,7 +47481,7 @@ var
                     Exit(Length(out_options) > 0);
                 end;
 
-                if m_dictionary.lookup_exact_full_pinyin(query_key_local,
+                if lookup_exact_full_pinyin_cached_local(query_key_local,
                     local_results) then
                 begin
                     for local_idx := 0 to High(local_results) do
@@ -47205,7 +47540,7 @@ var
 
             if expected_syllables = 2 then
             begin
-                if m_dictionary.lookup_exact_full_pinyin(query_key_local,
+                if lookup_exact_full_pinyin_cached_local(query_key_local,
                     local_results) then
                 begin
                     for local_idx := 0 to High(local_results) do
@@ -47334,7 +47669,7 @@ var
             has_best_partial_option_local := False;
             has_best_split_option_local := False;
 
-            if m_dictionary.lookup_exact_full_pinyin(query_key_local,
+            if lookup_exact_full_pinyin_cached_local(query_key_local,
                 local_results) then
             begin
                 for local_idx := 0 to High(local_results) do
@@ -50242,7 +50577,7 @@ var
                                 local_candidate_path := out_state_local.path +
                                     c_segment_path_separator + local_text;
                                 local_path_bonus := Max(0,
-                                    m_dictionary.get_query_segment_path_bonus(
+                                    get_cached_query_segment_path_bonus(
                                     lookup_text, local_candidate_path));
                                 local_expanded_candidate_path :=
                                     expand_unambiguous_function_tail_path_local(
@@ -50253,7 +50588,7 @@ var
                                 begin
                                     local_path_bonus := Max(local_path_bonus,
                                         Max(0,
-                                        m_dictionary.get_query_segment_path_bonus(
+                                        get_cached_query_segment_path_bonus(
                                         lookup_text,
                                         local_expanded_candidate_path)));
                                 end;
@@ -50597,7 +50932,7 @@ var
                 end;
 
                 bonus_local := Max(0,
-                    m_dictionary.get_query_segment_path_bonus(lookup_text,
+                    get_cached_query_segment_path_bonus(lookup_text,
                     path_value_local));
                 Inc(bonus_local, Max(0, get_session_query_path_bonus(
                     lookup_text, path_value_local)));
@@ -50610,7 +50945,7 @@ var
                     (not SameText(expanded_path_local, path_value_local)) then
                 begin
                     expanded_bonus_local := Max(0,
-                        m_dictionary.get_query_segment_path_bonus(lookup_text,
+                        get_cached_query_segment_path_bonus(lookup_text,
                         expanded_path_local));
                     Inc(expanded_bonus_local, Max(0,
                         get_session_query_path_bonus(lookup_text,
@@ -50625,7 +50960,7 @@ var
                 end;
 
                 penalty_local := Max(0,
-                    m_dictionary.get_query_segment_path_penalty(lookup_text,
+                    get_cached_query_segment_path_penalty(lookup_text,
                     path_value_local));
                 Inc(penalty_local, Max(0, get_session_query_path_penalty(
                     lookup_text, path_value_local)));
@@ -51482,24 +51817,17 @@ var
                 out single_segments_inner: Integer;
                 out max_segment_units_inner: Integer);
             var
-                part_units_inner: Integer;
-                parts_inner: TArray<string>;
-                part_inner: string;
+                structure_inner: TncLongPathStructureCacheValue;
             begin
                 single_segments_inner := 0;
                 max_segment_units_inner := 0;
-                parts_inner := state_inner.path.Split(
-                    [c_segment_path_separator]);
-                for part_inner in parts_inner do
+                if get_cached_long_path_structure(state_inner.path,
+                    structure_inner) then
                 begin
-                    part_units_inner := get_candidate_text_unit_count(
-                        Trim(part_inner));
-                    if part_units_inner = 1 then
-                    begin
-                        Inc(single_segments_inner);
-                    end;
-                    max_segment_units_inner := Max(max_segment_units_inner,
-                        part_units_inner);
+                    single_segments_inner :=
+                        structure_inner.single_segment_count;
+                    max_segment_units_inner :=
+                        structure_inner.max_segment_units;
                 end;
             end;
 
@@ -51509,26 +51837,27 @@ var
                 out suffix_scores_inner: TArray<Integer>;
                 out context_scores_inner: TArray<Integer>;
                 out full_scores_ok_inner: Boolean;
-                out has_left_context_inner: Boolean);
+                out has_left_context_inner: Boolean;
+                out left_context_inner: string);
             var
                 idx_inner: Integer;
                 previous_previous_text_inner: string;
                 previous_text_inner: string;
-                left_context_inner: string;
             begin
                 SetLength(full_scores_inner, Length(state_texts_inner));
                 SetLength(suffix_scores_inner, Length(state_texts_inner));
                 SetLength(context_scores_inner, Length(state_texts_inner));
                 full_scores_ok_inner := False;
                 has_left_context_inner := False;
+                left_context_inner := '';
                 if (m_dictionary = nil) or (Length(state_texts_inner) = 0) then
                 begin
                     Exit;
                 end;
 
                 full_scores_ok_inner :=
-                    m_dictionary.get_char_lm_text_scores(state_texts_inner,
-                    full_scores_inner) and
+                    get_cached_char_lm_scores(state_texts_inner,
+                    full_scores_inner, clsm_full, '') and
                     (Length(full_scores_inner) = Length(state_texts_inner));
                 if not full_scores_ok_inner then
                 begin
@@ -51536,8 +51865,8 @@ var
                     Exit;
                 end;
 
-                if (not m_dictionary.get_char_lm_suffix_scores(
-                    state_texts_inner, suffix_scores_inner)) or
+                if (not get_cached_char_lm_scores(state_texts_inner,
+                    suffix_scores_inner, clsm_suffix, '')) or
                     (Length(suffix_scores_inner) <> Length(state_texts_inner)) then
                 begin
                     suffix_scores_inner := Copy(full_scores_inner);
@@ -51549,9 +51878,9 @@ var
                     Trim(previous_text_inner);
                 has_left_context_inner := left_context_inner <> '';
                 if has_left_context_inner and
-                    m_dictionary.get_char_lm_continuation_scores(
-                    left_context_inner, state_texts_inner,
-                    context_scores_inner) and
+                    get_cached_char_lm_scores(state_texts_inner,
+                    context_scores_inner, clsm_context,
+                    left_context_inner) and
                     (Length(context_scores_inner) = Length(state_texts_inner)) then
                 begin
                     Exit;
@@ -51601,6 +51930,11 @@ var
                 known_segments_inner: Integer;
                 top_segments_inner: Integer;
                 margin_inner: Integer;
+                path_structure_inner: TncLongPathStructureCacheValue;
+                path_structure_cached_inner: Boolean;
+                lexical_cache_key_inner: string;
+                lexical_cache_value_inner: TncExactLexicalFeatureCacheValue;
+                lexical_cache_hit_inner: Boolean;
             begin
                 FillChar(features_inner, SizeOf(features_inner), 0);
                 features_inner.first_stage_score := first_stage_score_inner;
@@ -51645,15 +51979,30 @@ var
                     (state_inner.path <> '') then
                 begin
                     features_inner.query_path_bonus :=
-                        m_dictionary.get_query_segment_path_bonus(
+                        get_cached_query_segment_path_bonus(
                         lookup_text, state_inner.path);
                     features_inner.query_path_penalty :=
-                        m_dictionary.get_query_segment_path_penalty(
+                        get_cached_query_segment_path_penalty(
                         lookup_text, state_inner.path);
                 end;
 
                 features_inner.lexical_weight_min := MaxInt;
                 features_inner.lexical_margin_min := MaxInt;
+                features_inner.min_segment_units := MaxInt;
+                path_structure_cached_inner :=
+                    get_cached_long_path_structure(state_inner.path,
+                    path_structure_inner);
+                if path_structure_cached_inner then
+                begin
+                    features_inner.min_segment_units :=
+                        path_structure_inner.min_segment_units;
+                    features_inner.segment_units_square_sum :=
+                        path_structure_inner.segment_units_square_sum;
+                    features_inner.first_segment_units :=
+                        path_structure_inner.first_segment_units;
+                    features_inner.last_segment_units :=
+                        path_structure_inner.last_segment_units;
+                end;
                 parts_inner := state_inner.path.Split(
                     [c_segment_path_separator]);
                 query_offset_inner := 0;
@@ -51670,15 +52019,19 @@ var
                         Continue;
                     end;
 
-                    if features_inner.first_segment_units = 0 then
+                    if (not path_structure_cached_inner) and
+                        (features_inner.first_segment_units = 0) then
                     begin
                         features_inner.first_segment_units := part_units_inner;
                     end;
-                    features_inner.last_segment_units := part_units_inner;
-                    features_inner.min_segment_units := Min(
-                        features_inner.min_segment_units, part_units_inner);
-                    Inc(features_inner.segment_units_square_sum,
-                        part_units_inner * part_units_inner);
+                    if not path_structure_cached_inner then
+                    begin
+                        features_inner.last_segment_units := part_units_inner;
+                        features_inner.min_segment_units := Min(
+                            features_inner.min_segment_units, part_units_inner);
+                        Inc(features_inner.segment_units_square_sum,
+                            part_units_inner * part_units_inner);
+                    end;
 
                     selected_weight_inner := 0;
                     selected_rank_inner := 0;
@@ -51686,40 +52039,72 @@ var
                     eligible_rank_inner := 0;
                     query_key_inner := build_query_key_local(
                         query_offset_inner, part_units_inner);
-                    if (query_key_inner <> '') and
-                        lookup_exact_full_pinyin_cached_local(query_key_inner,
-                        lookup_results_inner) then
+                    lexical_cache_key_inner := query_key_inner + #1 +
+                        part_text_inner;
+                    lexical_cache_hit_inner :=
+                        (m_lookup_exact_lexical_feature_cache <> nil) and
+                        m_lookup_exact_lexical_feature_cache.TryGetValue(
+                        lexical_cache_key_inner, lexical_cache_value_inner);
+                    if lexical_cache_hit_inner then
                     begin
-                        for lookup_idx_inner := 0 to
-                            High(lookup_results_inner) do
+                        selected_rank_inner :=
+                            lexical_cache_value_inner.selected_rank;
+                        selected_weight_inner :=
+                            lexical_cache_value_inner.selected_weight;
+                        top_weight_inner := lexical_cache_value_inner.top_weight;
+                    end
+                    else
+                    begin
+                        if (query_key_inner <> '') and
+                            lookup_exact_full_pinyin_cached_local(query_key_inner,
+                            lookup_results_inner) then
                         begin
-                            if eligible_rank_inner >= c_unknown_lexical_rank - 1 then
+                            for lookup_idx_inner := 0 to
+                                High(lookup_results_inner) do
                             begin
-                                Break;
+                                if eligible_rank_inner >=
+                                    c_unknown_lexical_rank - 1 then
+                                begin
+                                    Break;
+                                end;
+                                if Trim(lookup_results_inner[
+                                    lookup_idx_inner].comment) <> '' then
+                                begin
+                                    Continue;
+                                end;
+                                lookup_text_inner := Trim(lookup_results_inner[
+                                    lookup_idx_inner].text);
+                                if get_candidate_text_unit_count(
+                                    lookup_text_inner) <> part_units_inner then
+                                begin
+                                    Continue;
+                                end;
+                                Inc(eligible_rank_inner);
+                                raw_weight_inner :=
+                                    get_exact_chunk_raw_weight_local(
+                                    lookup_results_inner[lookup_idx_inner]);
+                                top_weight_inner := Max(top_weight_inner,
+                                    raw_weight_inner);
+                                if (selected_rank_inner = 0) and
+                                    SameText(lookup_text_inner,
+                                    part_text_inner) then
+                                begin
+                                    selected_rank_inner := eligible_rank_inner;
+                                    selected_weight_inner := raw_weight_inner;
+                                end;
                             end;
-                            if Trim(lookup_results_inner[
-                                lookup_idx_inner].comment) <> '' then
-                            begin
-                                Continue;
-                            end;
-                            lookup_text_inner := Trim(lookup_results_inner[
-                                lookup_idx_inner].text);
-                            if get_candidate_text_unit_count(lookup_text_inner) <>
-                                part_units_inner then
-                            begin
-                                Continue;
-                            end;
-                            Inc(eligible_rank_inner);
-                            raw_weight_inner := get_exact_chunk_raw_weight_local(
-                                lookup_results_inner[lookup_idx_inner]);
-                            top_weight_inner := Max(top_weight_inner,
-                                raw_weight_inner);
-                            if (selected_rank_inner = 0) and
-                                SameText(lookup_text_inner, part_text_inner) then
-                            begin
-                                selected_rank_inner := eligible_rank_inner;
-                                selected_weight_inner := raw_weight_inner;
-                            end;
+                        end;
+                        if m_lookup_exact_lexical_feature_cache <> nil then
+                        begin
+                            lexical_cache_value_inner.selected_rank :=
+                                selected_rank_inner;
+                            lexical_cache_value_inner.selected_weight :=
+                                selected_weight_inner;
+                            lexical_cache_value_inner.top_weight :=
+                                top_weight_inner;
+                            m_lookup_exact_lexical_feature_cache.AddOrSetValue(
+                                lexical_cache_key_inner,
+                                lexical_cache_value_inner);
                         end;
                     end;
 
@@ -51877,6 +52262,7 @@ var
                 ranker_profile_inner: Integer;
                 char_scores_ok_inner: Boolean;
                 has_left_context_inner: Boolean;
+                left_context_inner: string;
                 compare_idx_inner: Integer;
 
                 function is_extra_index_better_inner(
@@ -51942,11 +52328,13 @@ var
                     get_long_ranker_char_scores_local(state_texts_inner,
                         char_scores_inner, char_suffix_scores_inner,
                         char_context_scores_inner, char_scores_ok_inner,
-                        has_left_context_inner);
+                        has_left_context_inner, left_context_inner);
                 end;
                 for idx_inner := 0 to High(states_inner) do
                 begin
                     states_inner[idx_inner].ranker_model_ordered := False;
+                    states_inner[idx_inner].ranker_features_valid := False;
+                    states_inner[idx_inner].ranker_feature_context_key := '';
                     get_long_chain_structure_stats_local(
                         states_inner[idx_inner],
                         single_segment_counts_inner[idx_inner],
@@ -52006,6 +52394,11 @@ var
                             get_long_second_stage_score_local(
                             ranker_profile_inner,
                             feature_values_inner[idx_inner]);
+                        states_inner[idx_inner].ranker_features :=
+                            feature_values_inner[idx_inner];
+                        states_inner[idx_inner].ranker_features_valid := True;
+                        states_inner[idx_inner].ranker_feature_context_key :=
+                            left_context_inner;
                     end
                     else
                     begin
@@ -52146,6 +52539,7 @@ var
                 captured_has_target_inner: Boolean;
                 char_scores_ok_inner: Boolean;
                 has_left_context_inner: Boolean;
+                left_context_inner: string;
                 word_lm_bonus_inner: Integer;
                 baseline_count_inner: Integer;
                 features_inner: TncLongSecondStageFeatures;
@@ -52166,6 +52560,31 @@ var
                         states_inner[state_idx_inner].ranker_first_stage_score;
                     m_runtime_long_chain_candidates[state_idx_inner].second_stage_score :=
                         states_inner[state_idx_inner].ranker_second_stage_score;
+                    m_runtime_long_chain_candidates[state_idx_inner].feature_query_key :=
+                        lookup_text;
+                    m_runtime_long_chain_candidates[state_idx_inner].feature_context_key :=
+                        states_inner[state_idx_inner].ranker_feature_context_key;
+                    m_runtime_long_chain_candidates[state_idx_inner].features_valid :=
+                        states_inner[state_idx_inner].ranker_features_valid;
+                    if states_inner[state_idx_inner].ranker_features_valid then
+                    begin
+                        m_runtime_long_chain_candidates[state_idx_inner].char_lm_score :=
+                            states_inner[state_idx_inner].ranker_features.char_lm_score;
+                        m_runtime_long_chain_candidates[state_idx_inner].char_lm_suffix_score :=
+                            states_inner[state_idx_inner].ranker_features.char_lm_suffix_score;
+                        m_runtime_long_chain_candidates[state_idx_inner].char_lm_context_score :=
+                            states_inner[state_idx_inner].ranker_features.char_lm_context_score;
+                        m_runtime_long_chain_candidates[state_idx_inner].path_segments :=
+                            states_inner[state_idx_inner].ranker_features.segments;
+                        m_runtime_long_chain_candidates[state_idx_inner].path_single_segments :=
+                            states_inner[state_idx_inner].ranker_features.single_segments;
+                        m_runtime_long_chain_candidates[state_idx_inner].path_max_segment_units :=
+                            states_inner[state_idx_inner].ranker_features.max_segment_units;
+                        m_runtime_long_chain_candidates[state_idx_inner].query_path_bonus :=
+                            states_inner[state_idx_inner].ranker_features.query_path_bonus;
+                        m_runtime_long_chain_candidates[state_idx_inner].query_path_penalty :=
+                            states_inner[state_idx_inner].ranker_features.query_path_penalty;
+                    end;
                 end;
 
                 if (m_debug_target_recall_text = '') or
@@ -52183,7 +52602,7 @@ var
                 get_long_ranker_char_scores_local(state_texts_inner,
                     char_scores_inner, char_suffix_scores_inner,
                     char_context_scores_inner, char_scores_ok_inner,
-                    has_left_context_inner);
+                    has_left_context_inner, left_context_inner);
                 if not char_scores_ok_inner then
                 begin
                     has_left_context_inner := False;
@@ -52382,14 +52801,14 @@ var
                     if state_start_pos_inner > 0 then
                     begin
                         char_scores_ok_inner :=
-                            m_dictionary.get_char_lm_suffix_scores(
-                            state_texts_inner, char_scores_inner);
+                            get_cached_char_lm_scores(state_texts_inner,
+                            char_scores_inner, clsm_suffix, '');
                     end
                     else
                     begin
                         char_scores_ok_inner :=
-                            m_dictionary.get_char_lm_text_scores(
-                            state_texts_inner, char_scores_inner);
+                            get_cached_char_lm_scores(state_texts_inner,
+                            char_scores_inner, clsm_full, '');
                     end;
                 end;
                 if (not char_scores_ok_inner) or
@@ -52894,14 +53313,14 @@ var
                     if state_start_pos_inner > 0 then
                     begin
                         char_scores_ok_inner :=
-                            m_dictionary.get_char_lm_suffix_scores(
-                            state_texts_inner, scored_char_scores_inner);
+                            get_cached_char_lm_scores(state_texts_inner,
+                            scored_char_scores_inner, clsm_suffix, '');
                     end
                     else
                     begin
                         char_scores_ok_inner :=
-                            m_dictionary.get_char_lm_text_scores(
-                            state_texts_inner, scored_char_scores_inner);
+                            get_cached_char_lm_scores(state_texts_inner,
+                            scored_char_scores_inner, clsm_full, '');
                     end;
                 end;
                 if (not char_scores_ok_inner) or
@@ -54063,10 +54482,10 @@ var
                                 split_path_inner := left_text_inner +
                                     c_segment_path_separator + right_text_inner;
                                 split_path_bonus_inner := Max(0,
-                                    m_dictionary.get_query_segment_path_bonus(
+                                    get_cached_query_segment_path_bonus(
                                     query_key_inner, split_path_inner));
                                 split_path_penalty_inner := Max(0,
-                                    m_dictionary.get_query_segment_path_penalty(
+                                    get_cached_query_segment_path_penalty(
                                     query_key_inner, split_path_inner));
                                 if split_path_bonus_inner <= split_path_penalty_inner then
                                 begin
@@ -67827,8 +68246,8 @@ var
         latest_query_choice_text := '';
         if (normalized_query <> '') and (m_dictionary <> nil) then
         begin
-            latest_query_choice_text := Trim(
-                m_dictionary.get_query_latest_choice_text(normalized_query));
+            latest_query_choice_text := get_cached_query_latest_choice_text(
+                normalized_query);
         end;
 
         best_index := -1;
@@ -68659,32 +69078,9 @@ var
         end;
         function lookup_exact_tail_cached(const pinyin_key: string;
             out out_results: TncCandidateList): Boolean;
-        var
-            cache_key: string;
-            phase_start_tick: UInt64;
         begin
-            SetLength(out_results, 0);
-            if (m_dictionary = nil) or (pinyin_key = '') then
-            begin
-                Exit(False);
-            end;
-
-            cache_key := '#exact#' + pinyin_key;
-            if lookup_cache.TryGetValue(cache_key, out_results) then
-            begin
-                Inc(lookup_cache_hits);
-                Exit(Length(out_results) > 0);
-            end;
-
-            Inc(lookup_cache_misses);
-            phase_start_tick := GetTickCount64;
-            if not m_dictionary.lookup_exact_full_pinyin(pinyin_key, out_results) then
-            begin
-                SetLength(out_results, 0);
-            end;
-            Inc(lookup_elapsed_ms, Int64(GetTickCount64 - phase_start_tick));
-            lookup_cache.AddOrSetValue(cache_key, out_results);
-            Result := Length(out_results) > 0;
+            Result := lookup_exact_full_pinyin_cached_local(pinyin_key,
+                out_results);
         end;
         function is_preferred_prefix_single_char(const value: string): Boolean;
         begin
@@ -69909,6 +70305,7 @@ var
 
     function dictionary_lookup_cached(const pinyin_key: string; out out_results: TncCandidateList): Boolean;
     var
+        build_cache_key: string;
         phase_start_tick: UInt64;
     begin
         SetLength(out_results, 0);
@@ -69920,6 +70317,15 @@ var
         if lookup_cache.TryGetValue(pinyin_key, out_results) then
         begin
             Inc(lookup_cache_hits);
+            Exit(Length(out_results) > 0);
+        end;
+
+        build_cache_key := '#lookup#' + pinyin_key;
+        if (m_build_lookup_cache <> nil) and
+            m_build_lookup_cache.TryGetValue(build_cache_key, out_results) then
+        begin
+            Inc(lookup_cache_hits);
+            lookup_cache.AddOrSetValue(pinyin_key, out_results);
             Exit(Length(out_results) > 0);
         end;
 
@@ -69937,43 +70343,18 @@ var
         end;
         Inc(lookup_elapsed_ms, Int64(GetTickCount64 - phase_start_tick));
         lookup_cache.AddOrSetValue(pinyin_key, out_results);
+        if m_build_lookup_cache <> nil then
+        begin
+            m_build_lookup_cache.AddOrSetValue(build_cache_key, out_results);
+        end;
         Result := Length(out_results) > 0;
     end;
 
     function dictionary_exact_lookup_cached(const pinyin_key: string;
         out out_results: TncCandidateList): Boolean;
-    var
-        cache_key: string;
-        phase_start_tick: UInt64;
     begin
-        SetLength(out_results, 0);
-        if (m_dictionary = nil) or (pinyin_key = '') then
-        begin
-            Exit(False);
-        end;
-
-        cache_key := '#exact#' + pinyin_key;
-        if lookup_cache.TryGetValue(cache_key, out_results) then
-        begin
-            Inc(lookup_cache_hits);
-            Exit(Length(out_results) > 0);
-        end;
-
-        Inc(lookup_cache_misses);
-        if m_config.debug_mode and
-            (Length(m_last_full_path_debug_info) < 768) then
-        begin
-            m_last_full_path_debug_info := m_last_full_path_debug_info +
-                ' emiss=' + pinyin_key;
-        end;
-        phase_start_tick := GetTickCount64;
-        if not m_dictionary.lookup_exact_full_pinyin(pinyin_key, out_results) then
-        begin
-            SetLength(out_results, 0);
-        end;
-        Inc(lookup_elapsed_ms, Int64(GetTickCount64 - phase_start_tick));
-        lookup_cache.AddOrSetValue(cache_key, out_results);
-        Result := Length(out_results) > 0;
+        Result := lookup_exact_full_pinyin_cached_local(pinyin_key,
+            out_results);
     end;
 
     function try_build_explicit_apostrophe_lookup_seed_local(
@@ -89274,7 +89655,7 @@ var
 
             if m_dictionary <> nil then
             begin
-                latest_text := Trim(m_dictionary.get_query_latest_choice_text(normalized_query));
+                latest_text := get_cached_query_latest_choice_text(normalized_query);
                 Result := SameText(Trim(candidate_text), latest_text);
             end;
         end;
@@ -90583,9 +90964,9 @@ var
                     exact_sorted_states[exact_state_pos].path_text);
                 if m_dictionary <> nil then
                 begin
-                    Inc(exact_path_bonus, m_dictionary.get_query_segment_path_bonus(pinyin_key,
+                    Inc(exact_path_bonus, get_cached_query_segment_path_bonus(pinyin_key,
                         exact_sorted_states[exact_state_pos].path_text));
-                    Dec(exact_path_bonus, m_dictionary.get_query_segment_path_penalty(
+                    Dec(exact_path_bonus, get_cached_query_segment_path_penalty(
                         pinyin_key, exact_sorted_states[exact_state_pos].path_text));
                 end;
                 Inc(exact_path_bonus, get_persistent_query_path_prefix_support(
@@ -98352,10 +98733,10 @@ var
                         (local_candidate_path <> '') then
                     begin
                         Inc(local_candidate_score,
-                            m_dictionary.get_query_segment_path_bonus(
+                            get_cached_query_segment_path_bonus(
                             lookup_text, local_candidate_path));
                         Dec(local_candidate_score,
-                            m_dictionary.get_query_segment_path_penalty(
+                            get_cached_query_segment_path_penalty(
                             lookup_text, local_candidate_path));
                     end;
                     local_candidate_phrase_count := 1 + local_tail_phrase_count;
@@ -99881,10 +100262,10 @@ var
                     (m_dictionary <> nil) then
                 begin
                     Inc(best_state_local.score,
-                        m_dictionary.get_query_segment_path_bonus(lookup_text,
+                        get_cached_query_segment_path_bonus(lookup_text,
                         best_state_local.path_text));
                     Dec(best_state_local.score,
-                        m_dictionary.get_query_segment_path_penalty(
+                        get_cached_query_segment_path_penalty(
                         lookup_text, best_state_local.path_text));
                 end;
                 if get_candidate_text_unit_count(best_state_local.text) <>
@@ -105030,9 +105411,9 @@ var
             begin
                 Exit;
             end;
-            Inc(Result, m_dictionary.get_query_segment_path_bonus(lookup_text,
+            Inc(Result, get_cached_query_segment_path_bonus(lookup_text,
                 path_value_local));
-            Dec(Result, m_dictionary.get_query_segment_path_penalty(lookup_text,
+            Dec(Result, get_cached_query_segment_path_penalty(lookup_text,
                 path_value_local));
         end;
     begin
@@ -105779,9 +106160,9 @@ var
             begin
                 Exit;
             end;
-            Inc(Result, m_dictionary.get_query_segment_path_bonus(lookup_text,
+            Inc(Result, get_cached_query_segment_path_bonus(lookup_text,
                 path_value_local));
-            Dec(Result, m_dictionary.get_query_segment_path_penalty(lookup_text,
+            Dec(Result, get_cached_query_segment_path_penalty(lookup_text,
                 path_value_local));
         end;
 
@@ -108918,7 +109299,7 @@ var
                 Exit;
             end;
 
-            bonus_local := Max(0, m_dictionary.get_query_segment_path_bonus(
+            bonus_local := Max(0, get_cached_query_segment_path_bonus(
                 lookup_text, encoded_path_local));
             Inc(bonus_local, Max(0, get_session_query_path_bonus(lookup_text,
                 encoded_path_local)));
@@ -108930,7 +109311,7 @@ var
                 (not SameText(expanded_path_local, encoded_path_local)) then
             begin
                 expanded_bonus_local := Max(0,
-                    m_dictionary.get_query_segment_path_bonus(lookup_text,
+                    get_cached_query_segment_path_bonus(lookup_text,
                     expanded_path_local));
                 Inc(expanded_bonus_local, Max(0, get_session_query_path_bonus(
                     lookup_text, expanded_path_local)));
@@ -108942,7 +109323,7 @@ var
                     bonus_local := expanded_bonus_local;
                 end;
             end;
-            penalty_local := Max(0, m_dictionary.get_query_segment_path_penalty(
+            penalty_local := Max(0, get_cached_query_segment_path_penalty(
                 lookup_text, encoded_path_local));
             Inc(penalty_local, Max(0, get_session_query_path_penalty(lookup_text,
                 encoded_path_local)));
@@ -111421,9 +111802,8 @@ begin
             phase_start_tick := GetTickCount64;
             if m_dictionary <> nil then
             begin
-                latest_query_choice_text := Trim(
-                    m_dictionary.get_query_latest_choice_text(
-                    normalize_pinyin_text(lookup_text)));
+                latest_query_choice_text := get_cached_query_latest_choice_text(
+                    normalize_pinyin_text(lookup_text));
             end;
             for i := 0 to High(m_candidates) do
             begin
@@ -113007,8 +113387,8 @@ begin
                 finalize_modal_tail_sentence_candidate(m_candidates);
                 SetLength(prefast_char_lm_texts, 1);
                 prefast_char_lm_texts[0] := Trim(m_candidates[0].text);
-                if m_dictionary.get_char_lm_text_scores(
-                    prefast_char_lm_texts, prefast_char_lm_scores) and
+                if get_cached_char_lm_scores(prefast_char_lm_texts,
+                    prefast_char_lm_scores, clsm_full, '') and
                     (Length(prefast_char_lm_scores) = 1) and
                     (prefast_char_lm_scores[0] <
                     c_long_prefast_catchup_char_lm_threshold) then
@@ -114916,8 +115296,8 @@ begin
             end;
             if m_dictionary <> nil then
             begin
-                latest_query_choice_text := Trim(
-                    m_dictionary.get_query_latest_choice_text(normalize_pinyin_text(lookup_text)));
+                latest_query_choice_text := get_cached_query_latest_choice_text(
+                    normalize_pinyin_text(lookup_text));
             end;
 
             phase_start_tick := GetTickCount64;
@@ -118535,11 +118915,9 @@ var
     candidate_count: Integer;
     candidate_idx: Integer;
     source_idx: Integer;
-    compare_idx: Integer;
     insert_idx: Integer;
     current_idx: Integer;
     chain_idx: Integer;
-    path_part: string;
     normalized_query: string;
     latest_choice_text: string;
     previous_previous_text: string;
@@ -118551,6 +118929,12 @@ var
     char_scores: TArray<Integer>;
     char_suffix_scores: TArray<Integer>;
     char_context_scores: TArray<Integer>;
+    candidate_chain_indices: TArray<Integer>;
+    missing_candidate_indices: TArray<Integer>;
+    missing_candidate_texts: TArray<string>;
+    missing_char_scores: TArray<Integer>;
+    missing_char_suffix_scores: TArray<Integer>;
+    missing_char_context_scores: TArray<Integer>;
     rank_features: TArray<TncLongFinalRankerFeatures>;
     rank_scores: TArray<Int64>;
     ordered_indices: TArray<Integer>;
@@ -118560,7 +118944,7 @@ var
     ordered_candidates: TncCandidateList;
     legacy_source_indices: TArray<Integer>;
     ordered_source_indices: TArray<Integer>;
-    path_parts: TArray<string>;
+    path_structure: TncLongPathStructureCacheValue;
     top_chain_score: Int64;
     abstain_features: TncLongFinalAbstainFeatures;
     abstain_score: Int64;
@@ -118571,6 +118955,10 @@ var
     second_idx: Integer;
     third_idx: Integer;
     lowest_idx: Integer;
+    missing_count: Integer;
+    missing_idx: Integer;
+    runtime_features_match: Boolean;
+    runtime_path_features_match: Boolean;
 
     function find_chain_candidate_index(const candidate_text: string): Integer;
     var
@@ -118703,40 +119091,115 @@ begin
     end;
 
     normalized_query := normalize_pinyin_text(m_last_lookup_key);
-    latest_choice_text := Trim(
-        m_dictionary.get_query_latest_choice_text(normalized_query));
+    latest_choice_text := get_cached_query_latest_choice_text(normalized_query);
     get_recent_path_context_seed(previous_previous_text, previous_text);
     left_context := Trim(previous_previous_text) + Trim(previous_text);
     has_left_context := left_context <> '';
 
     SetLength(candidate_texts, candidate_count);
+    SetLength(candidate_chain_indices, candidate_count);
+    SetLength(char_scores, candidate_count);
+    SetLength(char_suffix_scores, candidate_count);
+    SetLength(char_context_scores, candidate_count);
+    SetLength(missing_candidate_indices, candidate_count);
+    SetLength(missing_candidate_texts, candidate_count);
+    missing_count := 0;
     for candidate_idx := 0 to candidate_count - 1 do
     begin
         candidate_texts[candidate_idx] :=
             Trim(legacy_candidates[candidate_idx].text);
+        chain_idx := find_chain_candidate_index(candidate_texts[candidate_idx]);
+        candidate_chain_indices[candidate_idx] := chain_idx;
+        runtime_features_match := (chain_idx >= 0) and
+            m_runtime_long_chain_candidates[chain_idx].features_valid and
+            SameText(m_runtime_long_chain_candidates[chain_idx].feature_query_key,
+            normalized_query) and
+            SameText(m_runtime_long_chain_candidates[chain_idx].feature_context_key,
+            left_context);
+        if runtime_features_match then
+        begin
+            char_scores[candidate_idx] :=
+                m_runtime_long_chain_candidates[chain_idx].char_lm_score;
+            char_suffix_scores[candidate_idx] :=
+                m_runtime_long_chain_candidates[chain_idx].char_lm_suffix_score;
+            char_context_scores[candidate_idx] :=
+                m_runtime_long_chain_candidates[chain_idx].char_lm_context_score;
+        end
+        else
+        begin
+            missing_candidate_indices[missing_count] := candidate_idx;
+            missing_candidate_texts[missing_count] :=
+                candidate_texts[candidate_idx];
+            Inc(missing_count);
+        end;
     end;
-    char_scores_ok := m_dictionary.get_char_lm_text_scores(candidate_texts,
-        char_scores) and (Length(char_scores) = candidate_count);
+    SetLength(missing_candidate_indices, missing_count);
+    SetLength(missing_candidate_texts, missing_count);
+    char_scores_ok := True;
+    if missing_count > 0 then
+    begin
+        char_scores_ok := get_cached_char_lm_scores(missing_candidate_texts,
+            missing_char_scores, clsm_full, '') and
+            (Length(missing_char_scores) = missing_count);
+        if char_scores_ok then
+        begin
+            if (not get_cached_char_lm_scores(missing_candidate_texts,
+                missing_char_suffix_scores, clsm_suffix, '')) or
+                (Length(missing_char_suffix_scores) <> missing_count) then
+            begin
+                missing_char_suffix_scores := Copy(missing_char_scores);
+            end;
+            if has_left_context and
+                get_cached_char_lm_scores(missing_candidate_texts,
+                missing_char_context_scores, clsm_context, left_context) and
+                (Length(missing_char_context_scores) = missing_count) then
+            begin
+                { Keep the contextual scores returned by the dictionary. }
+            end
+            else
+            begin
+                missing_char_context_scores :=
+                    Copy(missing_char_suffix_scores);
+            end;
+            for missing_idx := 0 to missing_count - 1 do
+            begin
+                candidate_idx := missing_candidate_indices[missing_idx];
+                char_scores[candidate_idx] :=
+                    missing_char_scores[missing_idx];
+                char_suffix_scores[candidate_idx] :=
+                    missing_char_suffix_scores[missing_idx];
+                char_context_scores[candidate_idx] :=
+                    missing_char_context_scores[missing_idx];
+            end;
+        end;
+    end;
     if not char_scores_ok then
     begin
-        SetLength(char_scores, candidate_count);
-    end;
-    if (not m_dictionary.get_char_lm_suffix_scores(candidate_texts,
-        char_suffix_scores)) or
-        (Length(char_suffix_scores) <> candidate_count) then
-    begin
-        char_suffix_scores := Copy(char_scores);
-    end;
-    if has_left_context and
-        m_dictionary.get_char_lm_continuation_scores(left_context,
-        candidate_texts, char_context_scores) and
-        (Length(char_context_scores) = candidate_count) then
-    begin
-        { Keep the contextual scores returned by the dictionary. }
-    end
-    else
-    begin
-        char_context_scores := Copy(char_suffix_scores);
+        { Preserve the legacy all-candidate fallback if a partial batch fails. }
+        char_scores_ok := get_cached_char_lm_scores(candidate_texts,
+            char_scores, clsm_full, '') and
+            (Length(char_scores) = candidate_count);
+        if not char_scores_ok then
+        begin
+            SetLength(char_scores, candidate_count);
+        end;
+        if (not get_cached_char_lm_scores(candidate_texts,
+            char_suffix_scores, clsm_suffix, '')) or
+            (Length(char_suffix_scores) <> candidate_count) then
+        begin
+            char_suffix_scores := Copy(char_scores);
+        end;
+        if has_left_context and
+            get_cached_char_lm_scores(candidate_texts, char_context_scores,
+            clsm_context, left_context) and
+            (Length(char_context_scores) = candidate_count) then
+        begin
+            { Keep the contextual scores returned by the dictionary. }
+        end
+        else
+        begin
+            char_context_scores := Copy(char_suffix_scores);
+        end;
     end;
 
     top_chain_score := 0;
@@ -118771,8 +119234,7 @@ begin
                 legacy_candidates[candidate_idx].text);
             legacy_rank := candidate_idx + 1;
             legacy_top := candidate_idx = 0;
-            chain_idx := find_chain_candidate_index(
-                legacy_candidates[candidate_idx].text);
+            chain_idx := candidate_chain_indices[candidate_idx];
             source_chain := chain_idx >= 0;
             chain_present := source_chain;
             if chain_present then
@@ -118807,26 +119269,29 @@ begin
                 legacy_candidates[candidate_idx]);
             path_confidence_tier := get_candidate_path_confidence_tier(
                 legacy_candidates[candidate_idx]);
-            if path_available then
+            runtime_path_features_match := chain_present and
+                m_runtime_long_chain_candidates[chain_idx].features_valid and
+                SameText(m_runtime_long_chain_candidates[chain_idx].feature_query_key,
+                normalized_query) and
+                SameText(m_runtime_long_chain_candidates[chain_idx].segment_path,
+                legacy_paths[candidate_idx]);
+            if path_available and runtime_path_features_match then
             begin
-                path_parts := legacy_paths[candidate_idx].Split(
-                    [c_segment_path_separator]);
-                for path_part in path_parts do
-                begin
-                    if Trim(path_part) = '' then
-                    begin
-                        Continue;
-                    end;
-                    Inc(path_segments);
-                    compare_idx := get_candidate_text_unit_count(
-                        Trim(path_part));
-                    if compare_idx = 1 then
-                    begin
-                        Inc(path_single_segments);
-                    end;
-                    path_max_segment_units := Max(path_max_segment_units,
-                        compare_idx);
-                end;
+                path_segments :=
+                    m_runtime_long_chain_candidates[chain_idx].path_segments;
+                path_single_segments :=
+                    m_runtime_long_chain_candidates[chain_idx].path_single_segments;
+                path_max_segment_units :=
+                    m_runtime_long_chain_candidates[chain_idx].path_max_segment_units;
+            end
+            else if path_available and get_cached_long_path_structure(
+                legacy_paths[candidate_idx], path_structure) then
+            begin
+                path_segments := path_structure.segment_count;
+                path_single_segments :=
+                    path_structure.single_segment_count;
+                path_max_segment_units :=
+                    path_structure.max_segment_units;
             end;
             char_lm_score := char_scores[candidate_idx];
             char_lm_suffix_score := char_suffix_scores[candidate_idx];
@@ -118839,12 +119304,19 @@ begin
             latest_query_choice := (latest_choice_text <> '') and
                 SameText(latest_choice_text,
                 Trim(legacy_candidates[candidate_idx].text));
-            if path_available then
+            if path_available and runtime_path_features_match then
             begin
-                query_path_bonus := m_dictionary.get_query_segment_path_bonus(
+                query_path_bonus :=
+                    m_runtime_long_chain_candidates[chain_idx].query_path_bonus;
+                query_path_penalty :=
+                    m_runtime_long_chain_candidates[chain_idx].query_path_penalty;
+            end
+            else if path_available then
+            begin
+                query_path_bonus := get_cached_query_segment_path_bonus(
                     normalized_query, legacy_paths[candidate_idx]);
                 query_path_penalty :=
-                    m_dictionary.get_query_segment_path_penalty(
+                    get_cached_query_segment_path_penalty(
                     normalized_query, legacy_paths[candidate_idx]);
             end;
             input_syllable_count := m_last_lookup_syllable_count;
@@ -119364,8 +119836,8 @@ var
         end
         else
         begin
-            latest_text_local := Trim(
-                m_dictionary.get_query_latest_choice_text(m_last_lookup_key));
+            latest_text_local := get_cached_query_latest_choice_text(
+                m_last_lookup_key);
             if m_lookup_query_latest_text_cache <> nil then
             begin
                 m_lookup_query_latest_text_cache.AddOrSetValue(
@@ -120143,8 +120615,10 @@ begin
             Continue;
         end;
 
-        bonus_value := m_dictionary.get_query_segment_path_bonus(prefix_query, prefix_path);
-        penalty_value := m_dictionary.get_query_segment_path_penalty(prefix_query, prefix_path);
+        bonus_value := get_cached_query_segment_path_bonus(prefix_query,
+            prefix_path);
+        penalty_value := get_cached_query_segment_path_penalty(prefix_query,
+            prefix_path);
         if bonus_value > 0 then
         begin
             Inc(positive_total, bonus_value);
@@ -120503,7 +120977,7 @@ begin
     end
     else
     begin
-        latest_text := Trim(m_dictionary.get_query_latest_choice_text(m_last_lookup_key));
+        latest_text := get_cached_query_latest_choice_text(m_last_lookup_key);
         if m_lookup_query_latest_text_cache <> nil then
         begin
             m_lookup_query_latest_text_cache.AddOrSetValue(m_last_lookup_key, latest_text);
@@ -121636,8 +122110,10 @@ begin
         end;
         if m_dictionary <> nil then
         begin
-            Inc(Result, m_dictionary.get_query_segment_path_bonus(m_last_lookup_key, normalized_path));
-            path_penalty := m_dictionary.get_query_segment_path_penalty(m_last_lookup_key, normalized_path);
+            Inc(Result, get_cached_query_segment_path_bonus(
+                m_last_lookup_key, normalized_path));
+            path_penalty := get_cached_query_segment_path_penalty(
+                m_last_lookup_key, normalized_path);
             if path_penalty > 0 then
             begin
                 Dec(Result, path_penalty);
@@ -122157,12 +122633,14 @@ begin
         end;
         if m_dictionary <> nil then
         begin
-            transition_bonus := m_dictionary.get_query_segment_path_bonus(m_last_lookup_key, encoded_path);
+            transition_bonus := get_cached_query_segment_path_bonus(
+                m_last_lookup_key, encoded_path);
             if transition_bonus > 0 then
             begin
                 Inc(Result, transition_bonus);
             end;
-            path_penalty := m_dictionary.get_query_segment_path_penalty(m_last_lookup_key, encoded_path);
+            path_penalty := get_cached_query_segment_path_penalty(
+                m_last_lookup_key, encoded_path);
             if path_penalty > 0 then
             begin
                 Dec(Result, path_penalty);
@@ -128175,8 +128653,10 @@ var
             end;
 
             encoded_path := Trim(left_text) + c_segment_path_separator + Trim(right_text);
-            bonus_value := m_dictionary.get_query_segment_path_bonus(m_last_lookup_key, encoded_path);
-            penalty_value := m_dictionary.get_query_segment_path_penalty(m_last_lookup_key, encoded_path);
+            bonus_value := get_cached_query_segment_path_bonus(
+                m_last_lookup_key, encoded_path);
+            penalty_value := get_cached_query_segment_path_penalty(
+                m_last_lookup_key, encoded_path);
             Result := bonus_value - penalty_value;
         end;
     begin
@@ -129833,9 +130313,9 @@ var
                 Exit;
             end;
 
-            bonus_value := Max(0, m_dictionary.get_query_segment_path_bonus(
+            bonus_value := Max(0, get_cached_query_segment_path_bonus(
                 local_query, local_path));
-            penalty_value := Max(0, m_dictionary.get_query_segment_path_penalty(
+            penalty_value := Max(0, get_cached_query_segment_path_penalty(
                 local_query, local_path));
             Result := Min(c_local_query_path_bonus_cap, bonus_value) -
                 Min(c_local_query_path_penalty_cap, penalty_value);
@@ -130896,7 +131376,7 @@ var
                                 (candidate_option.path_text <> '') then
                             begin
                                 Inc(candidate_option.score,
-                                    m_dictionary.get_query_segment_path_bonus(
+                                    get_cached_query_segment_path_bonus(
                                     m_last_lookup_key, candidate_option.path_text));
                             end;
                         end;
@@ -132028,14 +132508,14 @@ var
                                         end;
                                         if m_dictionary <> nil then
                                         begin
-                                            local_query_path_bonus := m_dictionary.get_query_segment_path_bonus(
+                                            local_query_path_bonus := get_cached_query_segment_path_bonus(
                                                 m_last_lookup_key, local_new_state.path_text);
                                             if local_query_path_bonus > 0 then
                                             begin
                                                 Inc(local_new_state.score, local_query_path_bonus div 2);
                                                 Inc(local_path_preference_score, local_query_path_bonus);
                                             end;
-                                            local_path_penalty_value := m_dictionary.get_query_segment_path_penalty(
+                                            local_path_penalty_value := get_cached_query_segment_path_penalty(
                                                 m_last_lookup_key, local_new_state.path_text);
                                             if local_path_penalty_value > 0 then
                                             begin
@@ -135000,6 +135480,14 @@ var
     has_explicit_apostrophe_entry_top_partial_candidate: Boolean;
     visible_ranked_top_path: string;
     visible_ranked_source_index: Integer;
+    relaxed_boundary_cache_ready: Boolean;
+    relaxed_boundary_cache_found: Boolean;
+    relaxed_boundary_cache_head_key: string;
+    relaxed_boundary_cache_tail_key: string;
+    relaxed_boundary_cache_head_units: Integer;
+    relaxed_boundary_cache_tail_units: Integer;
+    display_query_key_cache: TArray<string>;
+    display_normalized_syllable_cache: TArray<string>;
 
     function is_short_repeated_initial_display_query_local: Boolean;
     var
@@ -135507,18 +135995,38 @@ var
         const syllable_count: Integer): string;
     var
         idx: Integer;
+        cache_idx: Integer;
+        syllable_total: Integer;
     begin
         Result := '';
+        syllable_total := Length(syllables);
         if (start_idx < 0) or (syllable_count <= 0) or
-            (start_idx + syllable_count > Length(syllables)) then
+            (start_idx + syllable_count > syllable_total) then
         begin
             Exit;
         end;
 
+        if Length(display_query_key_cache) <> syllable_total * syllable_total then
+        begin
+            SetLength(display_query_key_cache, syllable_total * syllable_total);
+            SetLength(display_normalized_syllable_cache, syllable_total);
+        end;
+        cache_idx := start_idx * syllable_total + syllable_count - 1;
+        if display_query_key_cache[cache_idx] <> '' then
+        begin
+            Exit(display_query_key_cache[cache_idx]);
+        end;
+
         for idx := start_idx to start_idx + syllable_count - 1 do
         begin
-            Result := Result + normalize_pinyin_text(syllables[idx].text);
+            if display_normalized_syllable_cache[idx] = '' then
+            begin
+                display_normalized_syllable_cache[idx] :=
+                    normalize_pinyin_text(syllables[idx].text);
+            end;
+            Result := Result + display_normalized_syllable_cache[idx];
         end;
+        display_query_key_cache[cache_idx] := Result;
     end;
 
     function display_last_syllable_is_short_particle_tail: Boolean;
@@ -135750,7 +136258,7 @@ var
             Exit(False);
         end;
 
-        cache_key := '#displayexact#' + query_key;
+        cache_key := '#exact#' + query_key;
         if (m_build_lookup_cache <> nil) and
             m_build_lookup_cache.TryGetValue(cache_key, out_results) then
         begin
@@ -135785,7 +136293,7 @@ var
             Exit(False);
         end;
 
-        cache_key := '#displaylookup#' + query_key;
+        cache_key := '#lookup#' + query_key;
         if (m_build_lookup_cache <> nil) and
             m_build_lookup_cache.TryGetValue(cache_key, out_results) then
         begin
@@ -136484,8 +136992,7 @@ var
             Exit;
         end;
 
-        latest_text_local := Trim(
-            m_dictionary.get_query_latest_choice_text(query_key));
+        latest_text_local := get_cached_query_latest_choice_text(query_key);
         Result := (latest_text_local <> '') and
             SameText(latest_text_local, candidate_text_value);
     end;
@@ -137696,9 +138203,9 @@ var
                 begin
                     Exit;
                 end;
-                if (not m_dictionary.get_char_lm_continuation_scores(
-                    context_value_local, candidate_texts_local,
-                    candidate_lm_scores_local)) or
+                if (not get_cached_char_lm_scores(candidate_texts_local,
+                    candidate_lm_scores_local, clsm_context,
+                    context_value_local)) or
                     (Length(candidate_lm_scores_local) <>
                     Length(candidate_texts_local)) then
                 begin
@@ -141957,6 +142464,7 @@ var
         c_max_span_units = 5;
         c_min_span_weight = 120;
     var
+        cache_key_local: string;
         units_local: TArray<string>;
         occupied_local: TArray<Boolean>;
         span_len_local: Integer;
@@ -141975,6 +142483,14 @@ var
 
         units_local := split_text_units(Trim(candidate_value.text));
         if Length(units_local) <> expected_units then
+        begin
+            Exit;
+        end;
+        cache_key_local := 'span' + #1 + normalized_pinyin + #1 +
+            Trim(candidate_value.text);
+        if (m_lookup_display_feature_cache <> nil) and
+            m_lookup_display_feature_cache.TryGetValue(cache_key_local,
+            Result) then
         begin
             Exit;
         end;
@@ -142022,6 +142538,11 @@ var
                     end;
                 end;
             end;
+        end;
+        if m_lookup_display_feature_cache <> nil then
+        begin
+            m_lookup_display_feature_cache.AddOrSetValue(cache_key_local,
+                Result);
         end;
     end;
 
@@ -143632,15 +144153,58 @@ var
         ranked_results_local: TncCandidateList;
         ranked_idx_local: Integer;
         ranked_text_local: string;
+        cache_key_local: string;
+        lookup_cache_key_local: string;
+        cached_state_local: Integer;
+        build_hit_local: Boolean;
+
+        procedure cache_result_local;
+        begin
+            if (m_lookup_display_feature_cache <> nil) and
+                (cache_key_local <> '') then
+            begin
+                if Result then
+                begin
+                    cached_state_local := 1;
+                end
+                else
+                begin
+                    cached_state_local := 0;
+                end;
+                m_lookup_display_feature_cache.AddOrSetValue(cache_key_local,
+                    cached_state_local);
+            end;
+        end;
     begin
         Result := True;
+        cache_key_local := '';
         if (m_dictionary = nil) or (query_key = '') or (text_value = '') or
-            (text_units <= 1) or
-            (not m_dictionary.lookup(query_key, ranked_results_local)) then
+            (text_units <= 1) then
         begin
             Exit;
         end;
 
+        cache_key_local := 'primary' + #1 + LowerCase(Trim(query_key)) + #1 +
+            Trim(text_value) + #1 + IntToStr(text_units);
+        if (m_lookup_display_feature_cache <> nil) and
+            m_lookup_display_feature_cache.TryGetValue(cache_key_local,
+            cached_state_local) then
+        begin
+            Exit(cached_state_local > 0);
+        end;
+
+        lookup_cache_key_local := '#lookup#' + query_key;
+        build_hit_local := (m_build_lookup_cache <> nil) and
+            (m_build_lookup_cache.TryGetValue(lookup_cache_key_local,
+            ranked_results_local) or
+            m_build_lookup_cache.TryGetValue(query_key,
+            ranked_results_local));
+        if (not build_hit_local) and
+            (not m_dictionary.lookup(query_key, ranked_results_local)) then
+        begin
+            cache_result_local;
+            Exit;
+        end;
         for ranked_idx_local := 0 to
             Min(High(ranked_results_local), c_probe_limit - 1) do
         begin
@@ -143654,30 +144218,67 @@ var
                 Continue;
             end;
 
-            Exit(SameText(ranked_text_local, text_value));
+            Result := SameText(ranked_text_local, text_value);
+            cache_result_local;
+            Exit;
         end;
+        cache_result_local;
     end;
 
     function display_path_has_nonprimary_multi_char_segment_outer(
         const path_value: string): Boolean;
     var
+        cache_key_local: string;
+        cache_value_local: TncLongPathStructureCacheValue;
         path_parts_local: TArray<string>;
         part_idx_local: Integer;
         segment_text_local: string;
         segment_units_local: Integer;
         segment_start_local: Integer;
         segment_key_local: string;
+
+        procedure cache_result_local;
+        begin
+            if (m_lookup_long_path_structure_cache = nil) or
+                (cache_key_local = '') then
+            begin
+                Exit;
+            end;
+            if not m_lookup_long_path_structure_cache.TryGetValue(
+                cache_key_local, cache_value_local) then
+            begin
+                FillChar(cache_value_local, SizeOf(cache_value_local), 0);
+            end;
+            if Result then
+            begin
+                cache_value_local.nonprimary_multi_char_state := 2;
+            end
+            else
+            begin
+                cache_value_local.nonprimary_multi_char_state := 1;
+            end;
+            m_lookup_long_path_structure_cache.AddOrSetValue(cache_key_local,
+                cache_value_local);
+        end;
     begin
         Result := False;
+        cache_key_local := Trim(path_value);
         if (m_dictionary = nil) or (path_value = '') or
             (Length(syllables) <> expected_units) then
         begin
             Exit;
         end;
-
+        if (m_lookup_long_path_structure_cache <> nil) and
+            m_lookup_long_path_structure_cache.TryGetValue(cache_key_local,
+            cache_value_local) and
+            (cache_value_local.nonprimary_multi_char_state <> 0) then
+        begin
+            Exit(cache_value_local.nonprimary_multi_char_state = 2);
+        end;
         path_parts_local := path_value.Split([c_segment_path_separator]);
         if Length(path_parts_local) <= 1 then
         begin
+            cache_result_local;
             Exit;
         end;
 
@@ -143700,12 +144301,15 @@ var
                     segment_key_local, segment_text_local,
                     segment_units_local) then
                 begin
-                    Exit(True);
+                    Result := True;
+                    cache_result_local;
+                    Exit;
                 end;
             end;
 
             Inc(segment_start_local, segment_units_local);
         end;
+        cache_result_local;
     end;
 
     function display_path_multi_char_segment_count_outer(
@@ -143733,14 +144337,34 @@ var
     function get_display_fixed_tail_alignment_score_outer(
         const candidate_value: TncCandidate): Integer;
     var
+        cache_key_local: string;
         candidate_units: TArray<string>;
         expected_tail_text: string;
+
+        procedure store_result_local;
+        begin
+            if (m_lookup_display_feature_cache <> nil) and
+                (cache_key_local <> '') then
+            begin
+                m_lookup_display_feature_cache.AddOrSetValue(cache_key_local,
+                    Result);
+            end;
+        end;
     begin
         Result := 0;
+        cache_key_local := '';
         if (expected_units < 3) or (Length(syllables) <> expected_units) or
             (Trim(candidate_value.comment) <> '') or
             (get_candidate_text_unit_count(Trim(candidate_value.text)) <>
             expected_units) then
+        begin
+            Exit;
+        end;
+        cache_key_local := 'tail' + #1 + normalized_pinyin + #1 +
+            Trim(candidate_value.text);
+        if (m_lookup_display_feature_cache <> nil) and
+            m_lookup_display_feature_cache.TryGetValue(cache_key_local,
+            Result) then
         begin
             Exit;
         end;
@@ -143749,12 +144373,14 @@ var
             syllables[expected_units - 1].text);
         if expected_tail_text = '' then
         begin
+            store_result_local;
             Exit;
         end;
 
         candidate_units := split_text_units(Trim(candidate_value.text));
         if Length(candidate_units) <> expected_units then
         begin
+            store_result_local;
             Exit;
         end;
 
@@ -143762,11 +144388,13 @@ var
             Trim(candidate_value.text), 2, 4) then
         begin
             Dec(Result, 16000);
+            store_result_local;
             Exit;
         end;
         if display_candidate_has_exact_suffix_phrase_outer(Trim(candidate_value.text),
             2, 4) then
         begin
+            store_result_local;
             Exit;
         end;
 
@@ -143779,6 +144407,7 @@ var
         begin
             Dec(Result, 16000);
         end;
+        store_result_local;
     end;
 
     function get_display_fixed_quantity_alignment_score_outer(
@@ -146176,15 +146805,20 @@ var
             Result := False;
             normalized_head_key := normalize_pinyin_text(head_key_value);
             normalized_tail_key := normalize_pinyin_text(tail_key_value);
+            if (normalized_head_key = '') or (normalized_tail_key = '') or
+                (not is_relaxed_no_initial_syllable_text(
+                normalized_tail_key)) then
+            begin
+                Exit;
+            end;
             calculated_head_units :=
                 get_effective_compact_pinyin_unit_count(normalized_head_key);
             calculated_tail_units :=
                 get_effective_compact_pinyin_unit_count(normalized_tail_key);
-            if (normalized_head_key = '') or (normalized_tail_key = '') or
-                (calculated_head_units <= 0) or (calculated_tail_units <= 0) or
+            if (calculated_head_units <= 0) or
+                (calculated_tail_units <= 0) or
                 (calculated_head_units + calculated_tail_units <>
-                expected_units) or
-                (not is_relaxed_no_initial_syllable_text(normalized_tail_key)) then
+                expected_units) then
             begin
                 Exit;
             end;
@@ -146567,11 +147201,32 @@ var
             Exit;
         end;
 
-        if (not load_explicit_apostrophe_boundary_local) and
-            (not load_longest_supported_boundary_local) and
-            (not load_relaxed_parts_boundary_local) then
+        if relaxed_boundary_cache_ready then
         begin
-            Exit;
+            if not relaxed_boundary_cache_found then
+            begin
+                Exit;
+            end;
+            head_key := relaxed_boundary_cache_head_key;
+            tail_key := relaxed_boundary_cache_tail_key;
+            head_units := relaxed_boundary_cache_head_units;
+            tail_units := relaxed_boundary_cache_tail_units;
+        end
+        else
+        begin
+            relaxed_boundary_cache_ready := True;
+            relaxed_boundary_cache_found :=
+                load_explicit_apostrophe_boundary_local or
+                load_longest_supported_boundary_local or
+                load_relaxed_parts_boundary_local;
+            if not relaxed_boundary_cache_found then
+            begin
+                Exit;
+            end;
+            relaxed_boundary_cache_head_key := head_key;
+            relaxed_boundary_cache_tail_key := tail_key;
+            relaxed_boundary_cache_head_units := head_units;
+            relaxed_boundary_cache_tail_units := tail_units;
         end;
 
         if normalized_query_has_strong_base_complete_local then
@@ -148416,8 +149071,8 @@ var
             latest_text_local := '';
             if m_dictionary <> nil then
             begin
-                latest_text_local := Trim(
-                    m_dictionary.get_query_latest_choice_text(normalized_pinyin));
+                latest_text_local := get_cached_query_latest_choice_text(
+                    normalized_pinyin);
             end;
             if (latest_text_local <> '') and
                 SameText(latest_text_local, candidate_text_value) then
@@ -148552,8 +149207,8 @@ var
             if is_latest_session_query_choice(candidate_text_local) or
                 (get_context_query_latest_bonus(candidate_text_local) > 0) or
                 ((m_dictionary <> nil) and
-                SameText(Trim(m_dictionary.get_query_latest_choice_text(
-                normalized_pinyin)), candidate_text_local)) then
+                SameText(get_cached_query_latest_choice_text(
+                normalized_pinyin), candidate_text_local)) then
             begin
                 Inc(candidate_rank_local, 2000000);
             end;
@@ -162038,8 +162693,8 @@ var
             end;
             SetLength(eligible_indices_local, eligible_count_local);
             SetLength(candidate_texts_local, eligible_count_local);
-            if not m_dictionary.get_char_lm_text_scores(
-                candidate_texts_local, lm_scores_local) or
+            if not get_cached_char_lm_scores(candidate_texts_local,
+                lm_scores_local, clsm_full, '') or
                 (Length(lm_scores_local) <> eligible_count_local) then
             begin
                 Exit;
@@ -162686,8 +163341,8 @@ var
                     candidate_texts_local[pool_idx_local] :=
                         pool_local[pool_idx_local].text;
                 end;
-                if not m_dictionary.get_char_lm_text_scores(
-                    candidate_texts_local, lm_scores_local) or
+                if not get_cached_char_lm_scores(candidate_texts_local,
+                    lm_scores_local, clsm_full, '') or
                     (Length(lm_scores_local) <> Length(pool_local)) then
                 begin
                     Exit;
@@ -163406,6 +164061,12 @@ var
 
 begin
     display_phase_tick := GetTickCount64;
+    relaxed_boundary_cache_ready := False;
+    relaxed_boundary_cache_found := False;
+    relaxed_boundary_cache_head_key := '';
+    relaxed_boundary_cache_tail_key := '';
+    relaxed_boundary_cache_head_units := 0;
+    relaxed_boundary_cache_tail_units := 0;
     long_display_fast_path := False;
     short_exact_query_mode := False;
     short_exact_predictive_prefix_only_mode := False;
@@ -163811,11 +164472,11 @@ begin
         promote_display_nominal_de_particle_candidate;
         promote_display_modal_yu_particle_candidate;
         promote_display_fixed_tail_completion_over_matching_partial;
-    promote_display_pathful_candidate_over_weak_user_top;
-    promote_display_primary_path_complete_candidate;
-    promote_display_richer_pathful_dict_complete_candidate;
-    promote_higher_scored_pathful_dict_complete_candidate;
-    promote_display_longer_prefix_completion_candidate;
+        promote_display_pathful_candidate_over_weak_user_top;
+        promote_display_primary_path_complete_candidate;
+        promote_display_richer_pathful_dict_complete_candidate;
+        promote_higher_scored_pathful_dict_complete_candidate;
+        promote_display_longer_prefix_completion_candidate;
         promote_display_structured_quantity_candidate;
         promote_display_pathful_candidate_over_weak_user_top;
         promote_display_full_query_exact_candidate;
