@@ -29,6 +29,14 @@ type
 
     TncCandidateList = array of TncCandidate;
 
+    TncPairPathEvidence = record
+        encoded_path: string;
+        query_path_weight: Integer;
+        lm_transition_weight: Integer;
+    end;
+
+    TncPairPathEvidenceList = array of TncPairPathEvidence;
+
     TncLogConfig = record
         enabled: Boolean;
         level: TncLogLevel;

@@ -40,6 +40,8 @@ type
         function get_query_latest_choice_text(const query_key: string): string; virtual;
         function get_query_segment_path_bonus(const query_key: string; const encoded_path: string): Integer; virtual;
         function get_lm_transition_bonus(const query_key: string; const encoded_path: string): Integer; virtual;
+        function get_exact_pair_path_evidence(const query_key: string;
+            out results: TncPairPathEvidenceList): Boolean; virtual;
         function get_char_lm_text_scores(const texts: TArray<string>;
             out scores: TArray<Integer>): Boolean; virtual;
         function get_char_lm_suffix_scores(const texts: TArray<string>;
@@ -201,6 +203,13 @@ function TncDictionaryProvider.get_lm_transition_bonus(const query_key: string;
     const encoded_path: string): Integer;
 begin
     Result := 0;
+end;
+
+function TncDictionaryProvider.get_exact_pair_path_evidence(
+    const query_key: string; out results: TncPairPathEvidenceList): Boolean;
+begin
+    SetLength(results, 0);
+    Result := False;
 end;
 
 function TncDictionaryProvider.get_char_lm_text_scores(const texts: TArray<string>;

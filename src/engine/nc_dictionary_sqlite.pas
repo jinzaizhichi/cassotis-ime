@@ -49,6 +49,8 @@ type
         m_query_latest_choice_text_cache: TDictionary<string, string>;
         m_query_path_bonus_cache: TDictionary<string, Integer>;
         m_lm_transition_bonus_cache: TDictionary<string, Integer>;
+        m_exact_pair_path_evidence_cache:
+            TDictionary<string, TncPairPathEvidenceList>;
         m_lm_transition_cache_loaded: Boolean;
         m_char_lm_entry_cache: TDictionary<string, TncCharLmCacheEntry>;
         m_char_lm_cache_order: TQueue<string>;
@@ -67,6 +69,7 @@ type
         m_stmt_context_bonus: Psqlite3_stmt;
         m_stmt_context_trigram_bonus: Psqlite3_stmt;
         m_stmt_base_query_path_bonus: Psqlite3_stmt;
+        m_stmt_exact_pair_path_evidence: Psqlite3_stmt;
         m_stmt_compound_tail_support: Psqlite3_stmt;
         m_stmt_compound_tail_prefix_support: Psqlite3_stmt;
         m_stmt_prefix_popularity: Psqlite3_stmt;
@@ -232,6 +235,8 @@ type
         function get_query_latest_choice_text(const query_key: string): string; override;
         function get_query_segment_path_bonus(const query_key: string; const encoded_path: string): Integer; override;
         function get_lm_transition_bonus(const query_key: string; const encoded_path: string): Integer; override;
+        function get_exact_pair_path_evidence(const query_key: string;
+            out results: TncPairPathEvidenceList): Boolean; override;
         function get_char_lm_text_scores(const texts: TArray<string>;
             out scores: TArray<Integer>): Boolean; override;
         function get_char_lm_suffix_scores(const texts: TArray<string>;
@@ -2097,6 +2102,7 @@ begin
     m_stmt_context_bonus := nil;
     m_stmt_context_trigram_bonus := nil;
     m_stmt_base_query_path_bonus := nil;
+    m_stmt_exact_pair_path_evidence := nil;
     m_stmt_compound_tail_support := nil;
     m_stmt_compound_tail_prefix_support := nil;
     m_stmt_prefix_popularity := nil;
@@ -2133,6 +2139,8 @@ begin
     m_query_latest_choice_text_cache := TDictionary<string, string>.Create;
     m_query_path_bonus_cache := TDictionary<string, Integer>.Create;
     m_lm_transition_bonus_cache := TDictionary<string, Integer>.Create;
+    m_exact_pair_path_evidence_cache :=
+        TDictionary<string, TncPairPathEvidenceList>.Create;
     m_lm_transition_cache_loaded := False;
     m_char_lm_entry_cache := TDictionary<string, TncCharLmCacheEntry>.Create;
     m_char_lm_cache_order := TQueue<string>.Create;
@@ -2235,6 +2243,11 @@ begin
     begin
         m_lm_transition_bonus_cache.Free;
         m_lm_transition_bonus_cache := nil;
+    end;
+    if m_exact_pair_path_evidence_cache <> nil then
+    begin
+        m_exact_pair_path_evidence_cache.Free;
+        m_exact_pair_path_evidence_cache := nil;
     end;
     if m_char_lm_entry_cache <> nil then
     begin
@@ -6402,6 +6415,12 @@ begin
         m_base_connection.finalize(m_stmt_base_query_path_bonus);
         m_stmt_base_query_path_bonus := nil;
     end;
+    if (m_stmt_exact_pair_path_evidence <> nil) and
+        (m_base_connection <> nil) then
+    begin
+        m_base_connection.finalize(m_stmt_exact_pair_path_evidence);
+        m_stmt_exact_pair_path_evidence := nil;
+    end;
     if (m_stmt_compound_tail_support <> nil) and (m_base_connection <> nil) then
     begin
         m_base_connection.finalize(m_stmt_compound_tail_support);
@@ -6560,6 +6579,10 @@ begin
     if m_lm_transition_bonus_cache <> nil then
     begin
         m_lm_transition_bonus_cache.Clear;
+    end;
+    if m_exact_pair_path_evidence_cache <> nil then
+    begin
+        m_exact_pair_path_evidence_cache.Clear;
     end;
     m_lm_transition_cache_loaded := False;
     if m_char_lm_entry_cache <> nil then
@@ -11382,6 +11405,130 @@ begin
     begin
         m_lm_transition_bonus_cache.TryGetValue(cache_key, Result);
     end;
+end;
+
+function TncSqliteDictionary.get_exact_pair_path_evidence(
+    const query_key: string; out results: TncPairPathEvidenceList): Boolean;
+const
+    query_sql =
+        'SELECT path_text, weight, 1 FROM dict_base_lm_transition ' +
+        'WHERE query_pinyin = ?1 ' +
+        'UNION ALL ' +
+        'SELECT path_text, weight, 0 FROM dict_base_query_path ' +
+        'WHERE query_pinyin = ?1';
+var
+    normalized_query: string;
+    cached_results: TncPairPathEvidenceList;
+    step_result: Integer;
+    path_text: string;
+    raw_weight: Integer;
+    source_is_lm: Boolean;
+    result_idx: Integer;
+    scan_idx: Integer;
+    item: TncPairPathEvidence;
+begin
+    SetLength(results, 0);
+    normalized_query := LowerCase(Trim(query_key));
+    if (normalized_query = '') or (not ensure_open) or
+        (not m_base_ready) or (m_base_connection = nil) then
+    begin
+        Exit(False);
+    end;
+
+    if (m_exact_pair_path_evidence_cache <> nil) and
+        m_exact_pair_path_evidence_cache.TryGetValue(normalized_query,
+        cached_results) then
+    begin
+        // Cached evidence arrays are immutable after construction.
+        results := cached_results;
+        Exit(Length(results) > 0);
+    end;
+
+    if m_stmt_exact_pair_path_evidence = nil then
+    begin
+        if not m_base_connection.prepare(query_sql,
+            m_stmt_exact_pair_path_evidence) then
+        begin
+            m_stmt_exact_pair_path_evidence := nil;
+        end;
+    end;
+    try
+        if (m_stmt_exact_pair_path_evidence = nil) or
+            (not m_base_connection.reset(m_stmt_exact_pair_path_evidence)) or
+            (not m_base_connection.clear_bindings(
+            m_stmt_exact_pair_path_evidence)) or
+            (not m_base_connection.bind_text(m_stmt_exact_pair_path_evidence,
+            1, normalized_query)) then
+        begin
+            Exit(False);
+        end;
+
+        while True do
+        begin
+            step_result := m_base_connection.step(
+                m_stmt_exact_pair_path_evidence);
+            if step_result <> SQLITE_ROW then
+            begin
+                Break;
+            end;
+            path_text := Trim(m_base_connection.column_text(
+                m_stmt_exact_pair_path_evidence, 0));
+            raw_weight := Max(0, m_base_connection.column_int(
+                m_stmt_exact_pair_path_evidence, 1));
+            source_is_lm := m_base_connection.column_int(
+                m_stmt_exact_pair_path_evidence, 2) <> 0;
+            if (path_text = '') or (raw_weight <= 0) or
+                (get_encoded_path_segment_count(path_text) <> 2) then
+            begin
+                Continue;
+            end;
+
+            result_idx := -1;
+            for scan_idx := 0 to High(results) do
+            begin
+                if SameText(results[scan_idx].encoded_path, path_text) then
+                begin
+                    result_idx := scan_idx;
+                    Break;
+                end;
+            end;
+            if result_idx < 0 then
+            begin
+                FillChar(item, SizeOf(item), 0);
+                item.encoded_path := path_text;
+                SetLength(results, Length(results) + 1);
+                result_idx := High(results);
+            end
+            else
+            begin
+                item := results[result_idx];
+            end;
+            if source_is_lm then
+            begin
+                item.lm_transition_weight := Max(
+                    item.lm_transition_weight, raw_weight);
+            end
+            else
+            begin
+                item.query_path_weight := Max(item.query_path_weight,
+                    raw_weight);
+            end;
+            results[result_idx] := item;
+        end;
+    finally
+        if m_stmt_exact_pair_path_evidence <> nil then
+        begin
+            m_base_connection.reset(m_stmt_exact_pair_path_evidence);
+            m_base_connection.clear_bindings(m_stmt_exact_pair_path_evidence);
+        end;
+    end;
+
+    if m_exact_pair_path_evidence_cache <> nil then
+    begin
+        m_exact_pair_path_evidence_cache.AddOrSetValue(normalized_query,
+            results);
+    end;
+    Result := Length(results) > 0;
 end;
 
 function TncSqliteDictionary.ensure_char_lm_available: Boolean;
