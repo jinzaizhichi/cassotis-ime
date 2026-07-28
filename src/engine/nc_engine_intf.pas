@@ -79127,12 +79127,17 @@ var
         seen := TDictionary<string, Byte>.Create;
         try
             accepted_total := 0;
-            prefix_key := '';
-            for prefix_count := 1 to Min(c_prefix_max_syllables,
-                Length(syllables_local) - 1) do
+            for prefix_count := Min(c_prefix_max_syllables,
+                Length(syllables_local) - 1) downto 1 do
             begin
-                prefix_key := prefix_key +
-                    normalize_pinyin_text(syllables_local[prefix_count - 1].text);
+                // Reserve the bounded candidate pool for reliable phrase prefixes
+                // before the usually much larger first-syllable character list.
+                prefix_key := '';
+                for tail_idx := 0 to prefix_count - 1 do
+                begin
+                    prefix_key := prefix_key +
+                        normalize_pinyin_text(syllables_local[tail_idx].text);
+                end;
                 if prefix_key = '' then
                 begin
                     Continue;
@@ -79443,6 +79448,220 @@ var
         end;
         sort_candidates_lightweight(out_candidates);
         Result := Length(out_candidates) > 0;
+    end;
+
+    function build_short_particle_prefix_partial_candidates_local(
+        const query_text: string; out out_candidates: TncCandidateList): Boolean;
+    var
+        normalized_query: string;
+        parser: TncPinyinParser;
+        syllables_local: TncPinyinParseResult;
+        prefix_query: string;
+        tail_comment: string;
+        prefix_idx: Integer;
+        candidate_idx: Integer;
+        particle_candidates: TncCandidateList;
+        candidate: TncCandidate;
+    begin
+        SetLength(out_candidates, 0);
+        Result := False;
+        normalized_query := normalize_pinyin_text(query_text);
+        if (normalized_query = '') or (not is_full_pinyin_key(normalized_query)) then
+        begin
+            Exit;
+        end;
+
+        parser := TncPinyinParser.Create;
+        try
+            syllables_local := parser.parse(normalized_query);
+        finally
+            parser.Free;
+        end;
+        if Length(syllables_local) <> 4 then
+        begin
+            Exit;
+        end;
+
+        prefix_query := '';
+        for prefix_idx := 0 to High(syllables_local) - 1 do
+        begin
+            prefix_query := prefix_query + normalize_pinyin_text(
+                syllables_local[prefix_idx].text);
+        end;
+        tail_comment := normalize_pinyin_text(
+            syllables_local[High(syllables_local)].text);
+        if (prefix_query = '') or (tail_comment = '') or
+            (not build_short_particle_tail_dictionary_candidates(prefix_query,
+            particle_candidates)) then
+        begin
+            Exit;
+        end;
+
+        for candidate_idx := 0 to High(particle_candidates) do
+        begin
+            candidate := particle_candidates[candidate_idx];
+            if (Trim(candidate.comment) <> '') or
+                (get_candidate_text_unit_count(Trim(candidate.text)) <> 3) then
+            begin
+                Continue;
+            end;
+            candidate.comment := tail_comment;
+            SetLength(out_candidates, Length(out_candidates) + 1);
+            out_candidates[High(out_candidates)] := candidate;
+        end;
+        sort_candidates_lightweight(out_candidates);
+        Result := Length(out_candidates) > 0;
+    end;
+
+    procedure apply_selected_prefix_single_context_lm_local(
+        var candidates: TncCandidateList);
+    const
+        c_max_context_candidates = 16;
+        c_min_lm_lead = 1800;
+        c_max_lexical_gap = 900;
+        c_promotion_margin = 96;
+        c_max_promotion_bonus = 1200;
+    var
+        context_value: string;
+        normalized_query: string;
+        latest_choice_text: string;
+        candidate_texts: TArray<string>;
+        candidate_indices: TArray<Integer>;
+        lm_scores: TArray<Integer>;
+        seen_texts: TDictionary<string, Byte>;
+        idx: Integer;
+        collected_idx: Integer;
+        baseline_idx: Integer;
+        best_idx: Integer;
+        baseline_candidate_idx: Integer;
+        best_candidate_idx: Integer;
+        baseline_rank: Integer;
+        best_rank: Integer;
+        lexical_gap: Integer;
+        lm_lead: Integer;
+        promotion_bonus: Integer;
+        candidate_text: string;
+
+        function effective_candidate_rank_local(
+            const candidate_value: TncCandidate): Integer;
+        begin
+            Result := candidate_value.score;
+            if candidate_value.has_dict_weight and
+                (candidate_value.dict_weight > Result) then
+            begin
+                Result := candidate_value.dict_weight;
+            end;
+        end;
+    begin
+        // Standalone one-syllable input keeps the established lexical order.
+        // Context is applied only to the remaining syllable after a partial
+        // candidate was confirmed in the same composition.
+        context_value := Trim(m_segment_left_context);
+        normalized_query := normalize_pinyin_text(lookup_text);
+        if (context_value = '') or (normalized_query = '') or
+            (not is_full_pinyin_key(normalized_query)) or
+            (m_dictionary = nil) or (Length(candidates) < 2) then
+        begin
+            Exit;
+        end;
+
+        seen_texts := TDictionary<string, Byte>.Create;
+        try
+            SetLength(candidate_texts, 0);
+            SetLength(candidate_indices, 0);
+            for idx := 0 to High(candidates) do
+            begin
+                if Length(candidate_texts) >= c_max_context_candidates then
+                begin
+                    Break;
+                end;
+                candidate_text := Trim(candidates[idx].text);
+                if (Trim(candidates[idx].comment) <> '') or
+                    (get_candidate_text_unit_count(candidate_text) <> 1) or
+                    (candidate_text = '') or seen_texts.ContainsKey(candidate_text) then
+                begin
+                    Continue;
+                end;
+
+                // Explicit query learning remains stronger than contextual LM.
+                latest_choice_text := get_cached_query_latest_choice_text(
+                    normalized_query);
+                if (candidates[idx].source = cs_user) or
+                    is_latest_session_query_choice(candidate_text) or
+                    ((latest_choice_text <> '') and
+                    SameText(latest_choice_text, candidate_text)) or
+                    (m_dictionary.get_query_choice_bonus(normalized_query,
+                    candidate_text) > 0) then
+                begin
+                    Exit;
+                end;
+
+                seen_texts.Add(candidate_text, 1);
+                collected_idx := Length(candidate_texts);
+                SetLength(candidate_texts, collected_idx + 1);
+                SetLength(candidate_indices, collected_idx + 1);
+                candidate_texts[collected_idx] := candidate_text;
+                candidate_indices[collected_idx] := idx;
+            end;
+        finally
+            seen_texts.Free;
+        end;
+
+        if (Length(candidate_texts) < 2) or
+            (not get_cached_char_lm_scores(candidate_texts, lm_scores,
+            clsm_context, context_value)) or
+            (Length(lm_scores) <> Length(candidate_texts)) then
+        begin
+            Exit;
+        end;
+
+        baseline_idx := 0;
+        best_idx := baseline_idx;
+        for idx := 1 to High(candidate_texts) do
+        begin
+            if lm_scores[idx] > lm_scores[best_idx] then
+            begin
+                best_idx := idx;
+            end;
+        end;
+        if best_idx = baseline_idx then
+        begin
+            Exit;
+        end;
+
+        lm_lead := lm_scores[best_idx] - lm_scores[baseline_idx];
+        baseline_candidate_idx := candidate_indices[baseline_idx];
+        best_candidate_idx := candidate_indices[best_idx];
+        baseline_rank := effective_candidate_rank_local(
+            candidates[baseline_candidate_idx]);
+        best_rank := effective_candidate_rank_local(candidates[best_candidate_idx]);
+        lexical_gap := baseline_rank - best_rank;
+        if lexical_gap < 0 then
+        begin
+            lexical_gap := 0;
+        end;
+        if (lm_lead < c_min_lm_lead) or
+            (lexical_gap > c_max_lexical_gap) then
+        begin
+            Exit;
+        end;
+
+        promotion_bonus := lexical_gap + c_promotion_margin;
+        if promotion_bonus > c_max_promotion_bonus then
+        begin
+            promotion_bonus := c_max_promotion_bonus;
+        end;
+        Inc(candidates[best_candidate_idx].score, promotion_bonus);
+        sort_candidates_lightweight(candidates);
+        if m_config.debug_mode then
+        begin
+            if m_last_lookup_debug_extra <> '' then
+            begin
+                m_last_lookup_debug_extra := m_last_lookup_debug_extra + ' ';
+            end;
+            m_last_lookup_debug_extra := m_last_lookup_debug_extra +
+                Format('singlectx=%s:%d', [candidate_texts[best_idx], lm_lead]);
+        end;
     end;
 
     function build_short_pinyin_prefix_completion_candidates(const query_text: string;
@@ -80389,12 +80608,17 @@ var
         seen := TDictionary<string, Byte>.Create;
         try
             accepted_total := 0;
-            prefix_key := '';
-            for prefix_count := 1 to Min(c_prefix_max_syllables,
-                Length(syllables_local) - 1) do
+            for prefix_count := Min(c_prefix_max_syllables,
+                Length(syllables_local) - 1) downto 1 do
             begin
-                prefix_key := prefix_key +
-                    normalize_pinyin_text(syllables_local[prefix_count - 1].text);
+                // Phrase prefixes must consume the bounded pool before the
+                // much larger first-syllable character set.
+                prefix_key := '';
+                for tail_idx := 0 to prefix_count - 1 do
+                begin
+                    prefix_key := prefix_key +
+                        normalize_pinyin_text(syllables_local[tail_idx].text);
+                end;
                 if prefix_key = '' then
                 begin
                     Continue;
@@ -113801,6 +114025,12 @@ begin
                 m_candidates := merge_candidate_lists(short_particle_tail_candidates,
                     m_candidates, 0);
             end;
+            if build_short_particle_prefix_partial_candidates_local(lookup_text,
+                short_particle_tail_candidates) then
+            begin
+                m_candidates := merge_candidate_lists(short_particle_tail_candidates,
+                    m_candidates, 0);
+            end;
             note_debug_helper_elapsed('s4part', phase_start_tick);
             phase_start_tick := GetTickCount64;
             sort_candidates_lightweight(m_candidates);
@@ -115875,6 +116105,7 @@ begin
             Inc(post_elapsed_ms, Int64(GetTickCount64 - phase_start_tick));
             phase_start_tick := GetTickCount64;
             sort_candidates_lightweight(m_candidates);
+            apply_selected_prefix_single_context_lm_local(m_candidates);
             Inc(sort_elapsed_ms, Int64(GetTickCount64 - phase_start_tick));
             limit := get_total_candidate_limit;
             if limit > c_candidate_total_limit_max then
