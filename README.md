@@ -101,6 +101,8 @@ Cassotis v1.5.0 extends short-word context ranking into a two-stage local neural
 
 Cassotis v1.6.0 advances long-sentence decoding into a corpus-trained multi-stage pipeline. A learned search-state ranker helps retain promising paths before pruning, a separate second-stage model compares surviving complete paths, and a final-candidate ranker with a learned fallback policy changes the original order only when the evidence is sufficiently reliable. These models are trained offline from lexicon-constrained candidate comparisons rather than benchmark-specific sentence rules.
 
+Cassotis v1.7.0 refines short-input phrase composition. Four-syllable inputs can combine two complete dictionary phrases when corpus-trained transition evidence is strong, while unsupported combinations remain excluded. Phrase prefixes and first-syllable character choices stay visible, and after a partial selection the remaining single-character candidates use the already selected text as contextual ranking evidence.
+
 To keep the deeper ranking pipeline responsive, search, second-stage ranking, and final selection reuse character-LM scores, exact dictionary lookups, path features, and context features. Exact and prefix candidate visibility remains protected, while repeated work across ranking stages is avoided.
 
 The statistical model is quantized into the local dictionary database, while the compact rerankers are exported as deterministic native Pascal parameters. Runtime scoring is local and bounded: it starts no PyTorch/ONNX environment or external model service and requires no network connection or GPU. Long-sentence and short-word ranking remain separate paths, so improvements to one do not replace the other's matching rules.
@@ -112,6 +114,7 @@ Corpus: 16,300 eligible Chinese sentences from the developer's own novel [**Eleg
 
 | Version | Top1 | Top2 | Mean (ms) | P50 (ms) | P95 (ms) | Max (ms) |
 |---|---:|---:|---:|---:|---:|---:|
+| `v1.7.0` | 7940/16300 (48.71%) | 8642/16300 (53.02%) | 71.55 | 47 | 235 | 2047 |
 | `v1.6.0` | 7936/16300 (48.69%) | 8637/16300 (52.99%) | 66.99 | 32 | 219 | 1687 |
 | `v1.5.0` | 7459/16300 (45.76%) | 7966/16300 (48.87%) | 63.42 | 46 | 203 | 2140 |
 | `v1.4.0` | 7168/16300 (43.98%) | 7617/16300 (46.73%) | 66.23 | 46 | 218 | 2578 |
@@ -138,6 +141,7 @@ See [BENCHMARK.md](BENCHMARK.md) for the shared corpus source, short-word case c
 
 | Version | Top1 | Top2 | Contested Top1 | Contested Top2 | Mean (ms) | P50 (ms) | P95 (ms) | Max (ms) |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|
+| `v1.7.0` | 61053/65000 (93.93%) | 63424/65000 (97.58%) | 9154/11728 (78.05%) | 10723/11728 (91.43%) | 4.668 | 3.468 | 10.013 | 158.471 |
 | `v1.6.0` | 61043/65000 (93.91%) | 63414/65000 (97.56%) | 9154/11728 (78.05%) | 10723/11728 (91.43%) | 4.455 | 3.295 | 9.580 | 160.817 |
 | `v1.5.0` | 61045/65000 (93.92%) | 63364/65000 (97.48%) | 9159/11728 (78.10%) | 10677/11728 (91.04%) | 5.033 | 4.113 | 9.968 | 142.372 |
 | `v1.4.0` | 60676/65000 (93.35%) | 63251/65000 (97.31%) | 8993/11728 (76.68%) | 10602/11728 (90.40%) | 5.573 | 4.521 | 11.157 | 158.687 |
