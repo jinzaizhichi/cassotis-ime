@@ -5,6 +5,11 @@ interface
 function long_search_ranker_score(const char_lm_score: Integer;
     const original_rank: Integer; const base_score: Integer;
     const word_lm_head_bonus: Integer; const word_lm_full_bonus: Integer;
+    const word_lm_boundary_count: Integer; const word_lm_min_bonus: Integer;
+    const word_lm_max_bonus: Integer; const word_lm_first_bonus: Integer;
+    const word_lm_last_bonus: Integer; const word_lm_supported_count: Integer;
+    const word_lm_strong_count: Integer; const word_lm_trigram_count: Integer;
+    const word_lm_zero_count: Integer;
     const segments: Integer; const single_segments: Integer;
     const first_chunk_units: Integer; const anchor_units: Integer;
     const has_anchor: Boolean): Int64;
@@ -14,6 +19,11 @@ implementation
 function long_search_ranker_score(const char_lm_score: Integer;
     const original_rank: Integer; const base_score: Integer;
     const word_lm_head_bonus: Integer; const word_lm_full_bonus: Integer;
+    const word_lm_boundary_count: Integer; const word_lm_min_bonus: Integer;
+    const word_lm_max_bonus: Integer; const word_lm_first_bonus: Integer;
+    const word_lm_last_bonus: Integer; const word_lm_supported_count: Integer;
+    const word_lm_strong_count: Integer; const word_lm_trigram_count: Integer;
+    const word_lm_zero_count: Integer;
     const segments: Integer; const single_segments: Integer;
     const first_chunk_units: Integer; const anchor_units: Integer;
     const has_anchor: Boolean): Int64;

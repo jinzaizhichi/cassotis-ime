@@ -105,6 +105,15 @@ type
         char_lm_score: Integer;
         word_lm_head_bonus: Integer;
         word_lm_full_bonus: Integer;
+        word_lm_boundary_count: Integer;
+        word_lm_min_bonus: Integer;
+        word_lm_max_bonus: Integer;
+        word_lm_first_bonus: Integer;
+        word_lm_last_bonus: Integer;
+        word_lm_supported_count: Integer;
+        word_lm_strong_count: Integer;
+        word_lm_trigram_count: Integer;
+        word_lm_zero_count: Integer;
         segments: Integer;
         single_segments: Integer;
         first_chunk_units: Integer;
@@ -133,6 +142,15 @@ type
         char_lm_per_unit: Integer;
         word_lm_bonus: Integer;
         word_lm_per_boundary: Integer;
+        word_lm_boundary_count: Integer;
+        word_lm_boundary_min: Integer;
+        word_lm_boundary_max: Integer;
+        word_lm_boundary_first: Integer;
+        word_lm_boundary_last: Integer;
+        word_lm_supported_ratio: Integer;
+        word_lm_strong_ratio: Integer;
+        word_lm_trigram_ratio: Integer;
+        word_lm_zero_count: Integer;
         lexical_weight_sum: Integer;
         lexical_weight_min: Integer;
         lexical_weight_max: Integer;
@@ -206,6 +224,16 @@ type
         latest_query_choice: Boolean;
         query_path_bonus: Integer;
         query_path_penalty: Integer;
+        word_lm_bonus: Integer;
+        word_lm_boundary_count: Integer;
+        word_lm_boundary_min: Integer;
+        word_lm_boundary_max: Integer;
+        word_lm_boundary_first: Integer;
+        word_lm_boundary_last: Integer;
+        word_lm_supported_ratio: Integer;
+        word_lm_strong_ratio: Integer;
+        word_lm_trigram_ratio: Integer;
+        word_lm_zero_count: Integer;
         input_syllable_count: Integer;
         score_per_unit: Integer;
         dict_weight_per_unit: Integer;
@@ -215,6 +243,23 @@ type
         ranker_score: Int64;
         abstain_score: Int64;
         ranker_applied: Boolean;
+        local_difference_score: Int64;
+        local_difference_promoted: Boolean;
+        local_difference_current_rank: Integer;
+        local_different_units: Integer;
+        local_different_runs: Integer;
+        local_max_different_run: Integer;
+        local_same_prefix_units: Integer;
+        local_same_suffix_units: Integer;
+        local_difference_span_units: Integer;
+        local_top_lm_r0: Integer;
+        local_top_lm_r1: Integer;
+        local_top_lm_r2: Integer;
+        local_top_lm_r3: Integer;
+        local_candidate_lm_r0: Integer;
+        local_candidate_lm_r1: Integer;
+        local_candidate_lm_r2: Integer;
+        local_candidate_lm_r3: Integer;
         target: Boolean;
         text: string;
         comment: string;
@@ -241,6 +286,16 @@ type
         path_max_segment_units: Integer;
         query_path_bonus: Integer;
         query_path_penalty: Integer;
+        word_lm_bonus: Integer;
+        word_lm_boundary_count: Integer;
+        word_lm_boundary_min: Integer;
+        word_lm_boundary_max: Integer;
+        word_lm_boundary_first: Integer;
+        word_lm_boundary_last: Integer;
+        word_lm_supported_ratio: Integer;
+        word_lm_strong_ratio: Integer;
+        word_lm_trigram_ratio: Integer;
+        word_lm_zero_count: Integer;
     end;
 
     TncLongChainRuntimeCandidateArray = TArray<TncLongChainRuntimeCandidate>;
@@ -655,12 +710,17 @@ implementation
 uses
     nc_long_search_ranker_model,
     nc_long_second_stage_ranker_model,
+    nc_long_pairwise_residual_model,
     nc_long_final_ranker_model,
     nc_long_final_abstain_model,
+    nc_long_visible_pairwise_residual_model,
+    nc_long_local_difference_residual_model,
     nc_long_local_reranker_model,
     nc_long_local_residual_model,
     nc_short_context_reranker_model,
-    nc_short_context_residual_model;
+    nc_short_context_residual_model,
+    nc_short_context_boundary_residual_model,
+    nc_short_nocontext_residual_model;
 
 const
     c_suppress_nonlexicon_complete_long_candidates = True;
@@ -45014,6 +45074,17 @@ var
             ranker_features: TncLongSecondStageFeatures;
         end;
         TExactChunkChainStateArray = TArray<TExactChunkChainState>;
+        TLongWordLmBoundaryStats = record
+            boundary_count: Integer;
+            min_bonus: Integer;
+            max_bonus: Integer;
+            first_bonus: Integer;
+            last_bonus: Integer;
+            supported_count: Integer;
+            strong_count: Integer;
+            trigram_count: Integer;
+            zero_count: Integer;
+        end;
         TExactChunkChainOption = record
             text: string;
             path: string;
@@ -45145,6 +45216,11 @@ var
             if Result <= 0 then
             begin
                 Result := c_chain_lattice_option_limit;
+                if syllable_count_local >=
+                    c_chain_lattice_long_prebeam_min_syllables then
+                begin
+                    Inc(Result);
+                end;
             end;
         end;
 
@@ -48980,7 +49056,8 @@ var
 
         function get_exact_chunk_chain_state_lm_bonus_local(
             const state_inner: TExactChunkChainState;
-            const state_start_pos: Integer): Integer;
+            const state_start_pos: Integer;
+            out stats_inner: TLongWordLmBoundaryStats): Integer;
         var
             path_segments_inner: TArray<string>;
             segment_idx_inner: Integer;
@@ -48999,6 +49076,8 @@ var
             total_bonus_inner: Integer;
         begin
             Result := 0;
+            stats_inner := Default(TLongWordLmBoundaryStats);
+            stats_inner.min_bonus := MaxInt;
             if (m_dictionary = nil) or (syllable_count_local <= 5) or
                 (state_start_pos < 0) or (state_inner.path = '') then
             begin
@@ -49053,6 +49132,31 @@ var
 
                 boundary_bonus_inner := Max(bigram_bonus_inner,
                     trigram_bonus_inner);
+                if boundary_count_inner = 0 then
+                begin
+                    stats_inner.first_bonus := boundary_bonus_inner;
+                end;
+                stats_inner.last_bonus := boundary_bonus_inner;
+                stats_inner.min_bonus := Min(stats_inner.min_bonus,
+                    boundary_bonus_inner);
+                stats_inner.max_bonus := Max(stats_inner.max_bonus,
+                    boundary_bonus_inner);
+                if boundary_bonus_inner > 0 then
+                begin
+                    Inc(stats_inner.supported_count);
+                end
+                else
+                begin
+                    Inc(stats_inner.zero_count);
+                end;
+                if boundary_bonus_inner >= c_chain_lattice_lm_min_bonus then
+                begin
+                    Inc(stats_inner.strong_count);
+                end;
+                if trigram_bonus_inner > 0 then
+                begin
+                    Inc(stats_inner.trigram_count);
+                end;
                 Inc(total_bonus_inner, boundary_bonus_inner);
                 Inc(boundary_count_inner);
                 previous_text_inner := current_text_inner;
@@ -49062,7 +49166,12 @@ var
 
             if boundary_count_inner > 0 then
             begin
+                stats_inner.boundary_count := boundary_count_inner;
                 Result := total_bonus_inner div boundary_count_inner;
+            end;
+            if stats_inner.min_bonus = MaxInt then
+            begin
+                stats_inner.min_bonus := 0;
             end;
         end;
 
@@ -52323,7 +52432,8 @@ var
 
             function get_fast_state_order_score_local(
                 const state_inner: TExactChunkChainState;
-                out word_lm_bonus_inner: Integer): Integer;
+                out word_lm_bonus_inner: Integer;
+                out word_lm_stats_inner: TLongWordLmBoundaryStats): Integer;
             const
                 c_cross_boundary_exact_head_penalty = 90000;
                 c_single_segment_penalty = 1600;
@@ -52341,6 +52451,7 @@ var
                 current_pair_text_inner: string;
             begin
                 word_lm_bonus_inner := 0;
+                word_lm_stats_inner := Default(TLongWordLmBoundaryStats);
                 Result := state_inner.score;
                 if state_inner.path = '' then
                 begin
@@ -52442,7 +52553,8 @@ var
                 end;
 
                 word_lm_bonus_inner :=
-                    get_exact_chunk_chain_state_lm_bonus_local(state_inner, 0);
+                    get_exact_chunk_chain_state_lm_bonus_local(state_inner, 0,
+                    word_lm_stats_inner);
                 Inc(Result, word_lm_bonus_inner);
             end;
 
@@ -52551,6 +52663,7 @@ var
                 const char_lm_context_score_inner: Integer;
                 const has_left_context_inner: Boolean;
                 const word_lm_bonus_inner: Integer;
+                const word_lm_stats_inner: TLongWordLmBoundaryStats;
                 const single_segments_inner: Integer;
                 const max_segment_units_inner: Integer;
                 out features_inner: TncLongSecondStageFeatures);
@@ -52601,6 +52714,30 @@ var
                 begin
                     features_inner.word_lm_per_boundary :=
                         word_lm_bonus_inner div (state_inner.segments - 1);
+                end;
+                features_inner.word_lm_boundary_count :=
+                    word_lm_stats_inner.boundary_count;
+                features_inner.word_lm_boundary_min :=
+                    word_lm_stats_inner.min_bonus;
+                features_inner.word_lm_boundary_max :=
+                    word_lm_stats_inner.max_bonus;
+                features_inner.word_lm_boundary_first :=
+                    word_lm_stats_inner.first_bonus;
+                features_inner.word_lm_boundary_last :=
+                    word_lm_stats_inner.last_bonus;
+                features_inner.word_lm_zero_count :=
+                    word_lm_stats_inner.zero_count;
+                if word_lm_stats_inner.boundary_count > 0 then
+                begin
+                    features_inner.word_lm_supported_ratio :=
+                        word_lm_stats_inner.supported_count * 1000 div
+                        word_lm_stats_inner.boundary_count;
+                    features_inner.word_lm_strong_ratio :=
+                        word_lm_stats_inner.strong_count * 1000 div
+                        word_lm_stats_inner.boundary_count;
+                    features_inner.word_lm_trigram_ratio :=
+                        word_lm_stats_inner.trigram_count * 1000 div
+                        word_lm_stats_inner.boundary_count;
                 end;
                 features_inner.segments := state_inner.segments;
                 features_inner.single_segments := single_segments_inner;
@@ -52897,6 +53034,7 @@ var
                 first_stage_ranks_inner: TArray<Integer>;
                 second_stage_scores_inner: TArray<Int64>;
                 word_lm_bonuses_inner: TArray<Integer>;
+                word_lm_stats_values_inner: TArray<TLongWordLmBoundaryStats>;
                 single_segment_counts_inner: TArray<Integer>;
                 max_segment_units_values_inner: TArray<Integer>;
                 feature_values_inner: TArray<TncLongSecondStageFeatures>;
@@ -52909,6 +53047,10 @@ var
                 has_left_context_inner: Boolean;
                 left_context_inner: string;
                 compare_idx_inner: Integer;
+                pairwise_features_inner: TncLongPairwiseResidualFeatures;
+                pairwise_score_inner: Int64;
+                best_pairwise_score_inner: Int64;
+                best_pairwise_index_inner: Integer;
 
                 function is_extra_index_better_inner(
                     const left_inner: Integer;
@@ -52954,6 +53096,7 @@ var
                 SetLength(first_stage_ranks_inner, Length(states_inner));
                 SetLength(second_stage_scores_inner, Length(states_inner));
                 SetLength(word_lm_bonuses_inner, Length(states_inner));
+                SetLength(word_lm_stats_values_inner, Length(states_inner));
                 SetLength(single_segment_counts_inner, Length(states_inner));
                 SetLength(max_segment_units_values_inner,
                     Length(states_inner));
@@ -52986,7 +53129,8 @@ var
                         max_segment_units_values_inner[idx_inner]);
                     first_stage_score_inner :=
                         get_fast_state_order_score_local(states_inner[idx_inner],
-                        word_lm_bonuses_inner[idx_inner]);
+                        word_lm_bonuses_inner[idx_inner],
+                        word_lm_stats_values_inner[idx_inner]);
                     if char_scores_ok_inner then
                     begin
                         Inc(first_stage_score_inner,
@@ -53032,6 +53176,7 @@ var
                             char_context_scores_inner[idx_inner],
                             has_left_context_inner,
                             word_lm_bonuses_inner[idx_inner],
+                            word_lm_stats_values_inner[idx_inner],
                             single_segment_counts_inner[idx_inner],
                             max_segment_units_values_inner[idx_inner],
                             feature_values_inner[idx_inner]);
@@ -53077,6 +53222,48 @@ var
                                 swap_state_inner;
                             Dec(current_index_inner);
                         end;
+                    end;
+
+                    { The residual is deliberately restricted to the final
+                      long-chain order. It reuses already computed features
+                      and may promote only one challenger, so it cannot widen
+                      search or affect short/exact input. }
+                    best_pairwise_index_inner := -1;
+                    best_pairwise_score_inner := Low(Int64);
+                    for idx_inner := 1 to High(ordered_states_inner) do
+                    begin
+                        build_long_pairwise_residual_features(
+                            ordered_states_inner[idx_inner].ranker_features,
+                            ordered_states_inner[0].ranker_features,
+                            idx_inner + 1,
+                            ordered_states_inner[idx_inner].
+                                ranker_second_stage_score,
+                            ordered_states_inner[0].
+                                ranker_second_stage_score,
+                            pairwise_features_inner);
+                        pairwise_score_inner :=
+                            long_pairwise_residual_score(
+                            pairwise_features_inner);
+                        if pairwise_score_inner >
+                            best_pairwise_score_inner then
+                        begin
+                            best_pairwise_score_inner :=
+                                pairwise_score_inner;
+                            best_pairwise_index_inner := idx_inner;
+                        end;
+                    end;
+                    if (best_pairwise_index_inner > 0) and
+                        (best_pairwise_score_inner >=
+                        c_long_pairwise_residual_promotion_threshold) then
+                    begin
+                        swap_state_inner :=
+                            ordered_states_inner[best_pairwise_index_inner];
+                        for idx_inner := best_pairwise_index_inner downto 1 do
+                        begin
+                            ordered_states_inner[idx_inner] :=
+                                ordered_states_inner[idx_inner - 1];
+                        end;
+                        ordered_states_inner[0] := swap_state_inner;
                     end;
                     for idx_inner := 0 to High(ordered_states_inner) do
                     begin
@@ -53186,6 +53373,7 @@ var
                 has_left_context_inner: Boolean;
                 left_context_inner: string;
                 word_lm_bonus_inner: Integer;
+                word_lm_stats_inner: TLongWordLmBoundaryStats;
                 baseline_count_inner: Integer;
                 features_inner: TncLongSecondStageFeatures;
             begin
@@ -53229,6 +53417,26 @@ var
                             states_inner[state_idx_inner].ranker_features.query_path_bonus;
                         m_runtime_long_chain_candidates[state_idx_inner].query_path_penalty :=
                             states_inner[state_idx_inner].ranker_features.query_path_penalty;
+                        m_runtime_long_chain_candidates[state_idx_inner].word_lm_bonus :=
+                            states_inner[state_idx_inner].ranker_features.word_lm_bonus;
+                        m_runtime_long_chain_candidates[state_idx_inner].word_lm_boundary_count :=
+                            states_inner[state_idx_inner].ranker_features.word_lm_boundary_count;
+                        m_runtime_long_chain_candidates[state_idx_inner].word_lm_boundary_min :=
+                            states_inner[state_idx_inner].ranker_features.word_lm_boundary_min;
+                        m_runtime_long_chain_candidates[state_idx_inner].word_lm_boundary_max :=
+                            states_inner[state_idx_inner].ranker_features.word_lm_boundary_max;
+                        m_runtime_long_chain_candidates[state_idx_inner].word_lm_boundary_first :=
+                            states_inner[state_idx_inner].ranker_features.word_lm_boundary_first;
+                        m_runtime_long_chain_candidates[state_idx_inner].word_lm_boundary_last :=
+                            states_inner[state_idx_inner].ranker_features.word_lm_boundary_last;
+                        m_runtime_long_chain_candidates[state_idx_inner].word_lm_supported_ratio :=
+                            states_inner[state_idx_inner].ranker_features.word_lm_supported_ratio;
+                        m_runtime_long_chain_candidates[state_idx_inner].word_lm_strong_ratio :=
+                            states_inner[state_idx_inner].ranker_features.word_lm_strong_ratio;
+                        m_runtime_long_chain_candidates[state_idx_inner].word_lm_trigram_ratio :=
+                            states_inner[state_idx_inner].ranker_features.word_lm_trigram_ratio;
+                        m_runtime_long_chain_candidates[state_idx_inner].word_lm_zero_count :=
+                            states_inner[state_idx_inner].ranker_features.word_lm_zero_count;
                     end;
                 end;
 
@@ -53274,7 +53482,8 @@ var
                         captured_inner[state_idx_inner].single_segments,
                         captured_inner[state_idx_inner].max_segment_units);
                     get_fast_state_order_score_local(
-                        states_inner[state_idx_inner], word_lm_bonus_inner);
+                        states_inner[state_idx_inner], word_lm_bonus_inner,
+                        word_lm_stats_inner);
                     build_long_second_stage_features_local(
                         states_inner[state_idx_inner],
                         states_inner[state_idx_inner].ranker_original_rank,
@@ -53283,6 +53492,7 @@ var
                         char_suffix_scores_inner[state_idx_inner],
                         char_context_scores_inner[state_idx_inner],
                         has_left_context_inner, word_lm_bonus_inner,
+                        word_lm_stats_inner,
                         captured_inner[state_idx_inner].single_segments,
                         captured_inner[state_idx_inner].max_segment_units,
                         features_inner);
@@ -53308,6 +53518,24 @@ var
                         features_inner.word_lm_bonus;
                     captured_inner[state_idx_inner].word_lm_per_boundary :=
                         features_inner.word_lm_per_boundary;
+                    captured_inner[state_idx_inner].word_lm_boundary_count :=
+                        features_inner.word_lm_boundary_count;
+                    captured_inner[state_idx_inner].word_lm_boundary_min :=
+                        features_inner.word_lm_boundary_min;
+                    captured_inner[state_idx_inner].word_lm_boundary_max :=
+                        features_inner.word_lm_boundary_max;
+                    captured_inner[state_idx_inner].word_lm_boundary_first :=
+                        features_inner.word_lm_boundary_first;
+                    captured_inner[state_idx_inner].word_lm_boundary_last :=
+                        features_inner.word_lm_boundary_last;
+                    captured_inner[state_idx_inner].word_lm_supported_ratio :=
+                        features_inner.word_lm_supported_ratio;
+                    captured_inner[state_idx_inner].word_lm_strong_ratio :=
+                        features_inner.word_lm_strong_ratio;
+                    captured_inner[state_idx_inner].word_lm_trigram_ratio :=
+                        features_inner.word_lm_trigram_ratio;
+                    captured_inner[state_idx_inner].word_lm_zero_count :=
+                        features_inner.word_lm_zero_count;
                     captured_inner[state_idx_inner].lexical_weight_sum :=
                         features_inner.lexical_weight_sum;
                     captured_inner[state_idx_inner].lexical_weight_min :=
@@ -53685,6 +53913,8 @@ var
                     score_parts_inner: TArray<string>;
                     score_part_inner: string;
                     single_segments_score_inner: Integer;
+                    lm_stats_score_inner: TLongWordLmBoundaryStats;
+                    full_lm_bonus_score_inner: Integer;
                 begin
                     single_segments_score_inner := 0;
                     score_parts_inner := states_inner[
@@ -53698,6 +53928,14 @@ var
                             Inc(single_segments_score_inner);
                         end;
                     end;
+                    full_lm_bonus_score_inner :=
+                        get_exact_chunk_chain_state_lm_bonus_local(
+                        states_inner[state_idx_score_inner],
+                        state_start_pos_inner, lm_stats_score_inner);
+                    if lm_stats_score_inner.min_bonus = MaxInt then
+                    begin
+                        lm_stats_score_inner.min_bonus := 0;
+                    end;
                     Result := long_search_ranker_score(
                         char_scores_inner[state_idx_score_inner],
                         state_idx_score_inner + 1,
@@ -53705,9 +53943,16 @@ var
                         get_exact_chunk_chain_state_head_lm_bonus_local(
                         states_inner[state_idx_score_inner],
                         state_start_pos_inner),
-                        get_exact_chunk_chain_state_lm_bonus_local(
-                        states_inner[state_idx_score_inner],
-                        state_start_pos_inner),
+                        full_lm_bonus_score_inner,
+                        lm_stats_score_inner.boundary_count,
+                        lm_stats_score_inner.min_bonus,
+                        lm_stats_score_inner.max_bonus,
+                        lm_stats_score_inner.first_bonus,
+                        lm_stats_score_inner.last_bonus,
+                        lm_stats_score_inner.supported_count,
+                        lm_stats_score_inner.strong_count,
+                        lm_stats_score_inner.trigram_count,
+                        lm_stats_score_inner.zero_count,
                         states_inner[state_idx_score_inner].segments,
                         single_segments_score_inner,
                         get_candidate_text_unit_count(states_inner[
@@ -53812,6 +54057,7 @@ var
                     capture_target_suffix_inner: string;
                     capture_parts_inner: TArray<string>;
                     capture_part_inner: string;
+                    capture_lm_stats_inner: TLongWordLmBoundaryStats;
                 begin
                     if (not m_debug_capture_long_beam_states) or
                         (m_debug_target_recall_text = '') then
@@ -53842,7 +54088,29 @@ var
                         capture_item_inner.word_lm_full_bonus :=
                             get_exact_chunk_chain_state_lm_bonus_local(
                             states_inner[capture_idx_inner],
-                            state_start_pos_inner);
+                            state_start_pos_inner, capture_lm_stats_inner);
+                        capture_item_inner.word_lm_boundary_count :=
+                            capture_lm_stats_inner.boundary_count;
+                        capture_item_inner.word_lm_min_bonus :=
+                            capture_lm_stats_inner.min_bonus;
+                        if capture_item_inner.word_lm_min_bonus = MaxInt then
+                        begin
+                            capture_item_inner.word_lm_min_bonus := 0;
+                        end;
+                        capture_item_inner.word_lm_max_bonus :=
+                            capture_lm_stats_inner.max_bonus;
+                        capture_item_inner.word_lm_first_bonus :=
+                            capture_lm_stats_inner.first_bonus;
+                        capture_item_inner.word_lm_last_bonus :=
+                            capture_lm_stats_inner.last_bonus;
+                        capture_item_inner.word_lm_supported_count :=
+                            capture_lm_stats_inner.supported_count;
+                        capture_item_inner.word_lm_strong_count :=
+                            capture_lm_stats_inner.strong_count;
+                        capture_item_inner.word_lm_trigram_count :=
+                            capture_lm_stats_inner.trigram_count;
+                        capture_item_inner.word_lm_zero_count :=
+                            capture_lm_stats_inner.zero_count;
                         capture_item_inner.segments :=
                             states_inner[capture_idx_inner].segments;
                         capture_item_inner.single_segments := 0;
@@ -54176,6 +54444,7 @@ var
                 split_score_inner: Integer;
                 split_path_bonus_inner: Integer;
                 split_path_penalty_inner: Integer;
+                split_lm_bonus_inner: Integer;
                 normalized_single_key_inner: string;
 
                 function is_place_noun_unit_for_fast_context_inner(
@@ -55055,11 +55324,21 @@ var
                     end;
                 end;
 
+                // Keep proven exact-word pairs available to the long lattice.
+                // For ultra-long input this is deliberately restricted to 2+2
+                // pairs with strong offline LM evidence, so arbitrary exact
+                // words do not become a general-purpose composition path.
                 if (chunk_len_inner >= 4) and (chunk_len_inner <= 5) and
-                    (syllable_count_local <= 12) and (m_dictionary <> nil) then
+                    ((syllable_count_local <= 12) or
+                    (chunk_len_inner = 4)) and (m_dictionary <> nil) then
                 begin
                     for split_len_inner := 2 to chunk_len_inner - 2 do
                     begin
+                        if (syllable_count_local > 12) and
+                            (split_len_inner <> 2) then
+                        begin
+                            Continue;
+                        end;
                         left_key_inner := build_query_key_local(start_idx_local,
                             split_len_inner);
                         right_key_inner := build_query_key_local(start_idx_local +
@@ -55132,7 +55411,13 @@ var
                                 split_path_penalty_inner := Max(0,
                                     get_cached_query_segment_path_penalty(
                                     query_key_inner, split_path_inner));
-                                if split_path_bonus_inner <= split_path_penalty_inner then
+                                split_lm_bonus_inner := Max(0,
+                                    m_dictionary.get_lm_transition_bonus(
+                                    query_key_inner, split_path_inner));
+                                if (split_path_bonus_inner <=
+                                    split_path_penalty_inner) and
+                                    (split_lm_bonus_inner <
+                                    c_chain_lattice_lm_min_bonus) then
                                 begin
                                     Continue;
                                 end;
@@ -55144,6 +55429,8 @@ var
                                     right_lookup_results_inner[right_idx_inner]);
                                 Inc(split_score_inner,
                                     Min(2600, split_path_bonus_inner * 4));
+                                Inc(split_score_inner,
+                                    Min(2400, split_lm_bonus_inner * 4));
                                 Dec(split_score_inner,
                                     Min(1800, split_path_penalty_inner * 4));
                                 Inc(split_score_inner,
@@ -119844,6 +120131,45 @@ var
     missing_idx: Integer;
     runtime_features_match: Boolean;
     runtime_path_features_match: Boolean;
+    visible_pairwise_features: TncLongVisiblePairwiseResidualFeatures;
+    visible_pairwise_score: Int64;
+    best_visible_pairwise_score: Int64;
+    best_visible_pairwise_position: Integer;
+    visible_challenger_count: Integer;
+    baseline_ranker_applied: Boolean;
+    local_difference_features: TncLongLocalDifferenceResidualFeatures;
+    local_difference_score: Int64;
+    best_local_difference_score: Int64;
+    best_local_difference_position: Integer;
+    local_difference_challenger_count: Integer;
+    local_relation_valid: TArray<Boolean>;
+    local_different_units: TArray<Integer>;
+    local_different_runs: TArray<Integer>;
+    local_max_different_run: TArray<Integer>;
+    local_same_prefix_units: TArray<Integer>;
+    local_same_suffix_units: TArray<Integer>;
+    local_difference_span_units: TArray<Integer>;
+    local_difference_start: TArray<Integer>;
+    local_difference_end: TArray<Integer>;
+    local_window_score_offset: TArray<Integer>;
+    local_window_texts: TArray<string>;
+    local_window_scores: TArray<Integer>;
+    top_local_lm_scores: TArray<Integer>;
+    candidate_local_lm_scores: TArray<Integer>;
+    local_window_count: Integer;
+    local_window_start: Integer;
+    local_window_end: Integer;
+    local_radius: Integer;
+    local_char_idx: Integer;
+    local_current_run: Integer;
+    local_top_text: string;
+    local_candidate_text: string;
+    local_scores_ok: Boolean;
+    local_difference_debug_scores: TArray<Int64>;
+    local_difference_promoted_index: Integer;
+    local_difference_current_rank_debug: TArray<Integer>;
+    local_top_lm_debug: array[0..3] of TArray<Integer>;
+    local_candidate_lm_debug: array[0..3] of TArray<Integer>;
 
     function find_chain_candidate_index(const candidate_text: string): Integer;
     var
@@ -119923,6 +120249,16 @@ var
         debug_item.latest_query_choice := features.latest_query_choice;
         debug_item.query_path_bonus := features.query_path_bonus;
         debug_item.query_path_penalty := features.query_path_penalty;
+        debug_item.word_lm_bonus := features.word_lm_bonus;
+        debug_item.word_lm_boundary_count := features.word_lm_boundary_count;
+        debug_item.word_lm_boundary_min := features.word_lm_boundary_min;
+        debug_item.word_lm_boundary_max := features.word_lm_boundary_max;
+        debug_item.word_lm_boundary_first := features.word_lm_boundary_first;
+        debug_item.word_lm_boundary_last := features.word_lm_boundary_last;
+        debug_item.word_lm_supported_ratio := features.word_lm_supported_ratio;
+        debug_item.word_lm_strong_ratio := features.word_lm_strong_ratio;
+        debug_item.word_lm_trigram_ratio := features.word_lm_trigram_ratio;
+        debug_item.word_lm_zero_count := features.word_lm_zero_count;
         debug_item.input_syllable_count := features.input_syllable_count;
         debug_item.score_per_unit := features.score_per_unit;
         debug_item.dict_weight_per_unit := features.dict_weight_per_unit;
@@ -120195,6 +120531,26 @@ begin
                     m_runtime_long_chain_candidates[chain_idx].query_path_bonus;
                 query_path_penalty :=
                     m_runtime_long_chain_candidates[chain_idx].query_path_penalty;
+                word_lm_bonus :=
+                    m_runtime_long_chain_candidates[chain_idx].word_lm_bonus;
+                word_lm_boundary_count :=
+                    m_runtime_long_chain_candidates[chain_idx].word_lm_boundary_count;
+                word_lm_boundary_min :=
+                    m_runtime_long_chain_candidates[chain_idx].word_lm_boundary_min;
+                word_lm_boundary_max :=
+                    m_runtime_long_chain_candidates[chain_idx].word_lm_boundary_max;
+                word_lm_boundary_first :=
+                    m_runtime_long_chain_candidates[chain_idx].word_lm_boundary_first;
+                word_lm_boundary_last :=
+                    m_runtime_long_chain_candidates[chain_idx].word_lm_boundary_last;
+                word_lm_supported_ratio :=
+                    m_runtime_long_chain_candidates[chain_idx].word_lm_supported_ratio;
+                word_lm_strong_ratio :=
+                    m_runtime_long_chain_candidates[chain_idx].word_lm_strong_ratio;
+                word_lm_trigram_ratio :=
+                    m_runtime_long_chain_candidates[chain_idx].word_lm_trigram_ratio;
+                word_lm_zero_count :=
+                    m_runtime_long_chain_candidates[chain_idx].word_lm_zero_count;
             end
             else if path_available then
             begin
@@ -120321,6 +120677,268 @@ begin
         end;
     end;
 
+    { Compare the current visible Top1 with each challenger only after the
+      existing ranker and abstain decision. This stage reuses all calculated
+      features, does not query the dictionary, and can promote one item at
+      most. }
+    baseline_ranker_applied := apply_ranker;
+    if not apply_ranker then
+    begin
+        for candidate_idx := 0 to candidate_count - 1 do
+        begin
+            ordered_indices[candidate_idx] := candidate_idx;
+        end;
+    end;
+    best_visible_pairwise_position := -1;
+    best_visible_pairwise_score := Low(Int64);
+    top_idx := ordered_indices[0];
+    if c_long_visible_pairwise_residual_max_challenger_rank > 0 then
+    begin
+        visible_challenger_count := Min(candidate_count - 1,
+            c_long_visible_pairwise_residual_max_challenger_rank - 1);
+    end
+    else
+    begin
+        visible_challenger_count := candidate_count - 1;
+    end;
+    for candidate_idx := 1 to visible_challenger_count do
+    begin
+        current_idx := ordered_indices[candidate_idx];
+        build_long_visible_pairwise_residual_features(
+            rank_features[current_idx], rank_features[top_idx],
+            candidate_idx + 1, rank_scores[current_idx],
+            rank_scores[top_idx], baseline_ranker_applied,
+            abstain_score, visible_pairwise_features);
+        visible_pairwise_score := long_visible_pairwise_residual_score(
+            visible_pairwise_features);
+        if visible_pairwise_score > best_visible_pairwise_score then
+        begin
+            best_visible_pairwise_score := visible_pairwise_score;
+            best_visible_pairwise_position := candidate_idx;
+        end;
+    end;
+    if (best_visible_pairwise_position > 0) and
+        (best_visible_pairwise_score >=
+        c_long_visible_pairwise_residual_promotion_threshold) then
+    begin
+        current_idx := ordered_indices[best_visible_pairwise_position];
+        for candidate_idx := best_visible_pairwise_position downto 1 do
+        begin
+            ordered_indices[candidate_idx] :=
+                ordered_indices[candidate_idx - 1];
+        end;
+        ordered_indices[0] := current_idx;
+        apply_ranker := True;
+    end;
+
+    { A whole-sentence average can hide a one- or two-character error in a
+      long candidate. Compare small windows around each differing span only
+      after the established visible order is final. All windows are scored in
+      one cached LM batch; short/exact input never enters this procedure. }
+    best_local_difference_position := -1;
+    best_local_difference_score := Low(Int64);
+    local_difference_promoted_index := -1;
+    SetLength(local_difference_debug_scores, candidate_count);
+    SetLength(local_difference_current_rank_debug, candidate_count);
+    for local_radius := 0 to 3 do
+    begin
+        SetLength(local_top_lm_debug[local_radius], candidate_count);
+        SetLength(local_candidate_lm_debug[local_radius], candidate_count);
+    end;
+    for candidate_idx := 0 to candidate_count - 1 do
+    begin
+        local_difference_debug_scores[candidate_idx] := Low(Int64);
+    end;
+    top_idx := ordered_indices[0];
+    local_top_text := Trim(legacy_candidates[top_idx].text);
+    if c_long_local_difference_residual_max_challenger_rank > 0 then
+    begin
+        local_difference_challenger_count := Min(candidate_count - 1,
+            c_long_local_difference_residual_max_challenger_rank - 1);
+    end
+    else
+    begin
+        local_difference_challenger_count := candidate_count - 1;
+    end;
+    SetLength(local_relation_valid, candidate_count);
+    SetLength(local_different_units, candidate_count);
+    SetLength(local_different_runs, candidate_count);
+    SetLength(local_max_different_run, candidate_count);
+    SetLength(local_same_prefix_units, candidate_count);
+    SetLength(local_same_suffix_units, candidate_count);
+    SetLength(local_difference_span_units, candidate_count);
+    SetLength(local_difference_start, candidate_count);
+    SetLength(local_difference_end, candidate_count);
+    SetLength(local_window_score_offset, candidate_count);
+    for candidate_idx := 0 to candidate_count - 1 do
+    begin
+        local_window_score_offset[candidate_idx] := -1;
+    end;
+    local_window_count := 0;
+    SetLength(local_window_texts,
+        local_difference_challenger_count * 8);
+    if (Trim(legacy_candidates[top_idx].comment) = '') and
+        (get_candidate_text_unit_count(local_top_text) =
+        m_last_lookup_syllable_count) then
+    begin
+        for candidate_idx := 1 to local_difference_challenger_count do
+        begin
+            current_idx := ordered_indices[candidate_idx];
+            local_difference_current_rank_debug[current_idx] :=
+                candidate_idx + 1;
+            local_candidate_text := Trim(legacy_candidates[current_idx].text);
+            if (Trim(legacy_candidates[current_idx].comment) <> '') or
+                (Length(local_candidate_text) <> Length(local_top_text)) or
+                (get_candidate_text_unit_count(local_candidate_text) <>
+                m_last_lookup_syllable_count) then
+            begin
+                Continue;
+            end;
+
+            local_current_run := 0;
+            for local_char_idx := 1 to Length(local_top_text) do
+            begin
+                if local_top_text[local_char_idx] <>
+                    local_candidate_text[local_char_idx] then
+                begin
+                    Inc(local_different_units[current_idx]);
+                    Inc(local_current_run);
+                    if local_current_run = 1 then
+                    begin
+                        Inc(local_different_runs[current_idx]);
+                    end;
+                    local_max_different_run[current_idx] := Max(
+                        local_max_different_run[current_idx],
+                        local_current_run);
+                    if local_difference_start[current_idx] = 0 then
+                    begin
+                        local_difference_start[current_idx] := local_char_idx;
+                    end;
+                    local_difference_end[current_idx] := local_char_idx;
+                end
+                else
+                begin
+                    local_current_run := 0;
+                end;
+            end;
+            if local_different_units[current_idx] <= 0 then
+            begin
+                Continue;
+            end;
+
+            local_same_prefix_units[current_idx] :=
+                local_difference_start[current_idx] - 1;
+            local_same_suffix_units[current_idx] := Length(local_top_text) -
+                local_difference_end[current_idx];
+            local_difference_span_units[current_idx] :=
+                local_difference_end[current_idx] -
+                local_difference_start[current_idx] + 1;
+            local_relation_valid[current_idx] := True;
+            local_window_score_offset[current_idx] := local_window_count;
+            for local_radius := 0 to 3 do
+            begin
+                local_window_start := Max(1,
+                    local_difference_start[current_idx] - local_radius);
+                local_window_end := Min(Length(local_top_text),
+                    local_difference_end[current_idx] + local_radius);
+                local_window_texts[local_window_count] := Copy(
+                    local_top_text, local_window_start,
+                    local_window_end - local_window_start + 1);
+                Inc(local_window_count);
+                local_window_texts[local_window_count] := Copy(
+                    local_candidate_text, local_window_start,
+                    local_window_end - local_window_start + 1);
+                Inc(local_window_count);
+            end;
+        end;
+    end;
+    SetLength(local_window_texts, local_window_count);
+    local_scores_ok := (local_window_count > 0) and
+        get_cached_char_lm_scores(local_window_texts,
+        local_window_scores, clsm_suffix, '') and
+        (Length(local_window_scores) = local_window_count);
+    if local_scores_ok then
+    begin
+        SetLength(top_local_lm_scores, 4);
+        SetLength(candidate_local_lm_scores, 4);
+        for candidate_idx := 1 to local_difference_challenger_count do
+        begin
+            current_idx := ordered_indices[candidate_idx];
+            if (not local_relation_valid[current_idx]) or
+                (local_window_score_offset[current_idx] < 0) then
+            begin
+                Continue;
+            end;
+            for local_radius := 0 to 3 do
+            begin
+                top_local_lm_scores[local_radius] := local_window_scores[
+                    local_window_score_offset[current_idx] +
+                    local_radius * 2];
+                candidate_local_lm_scores[local_radius] :=
+                    local_window_scores[
+                    local_window_score_offset[current_idx] +
+                    local_radius * 2 + 1];
+                local_top_lm_debug[local_radius][current_idx] :=
+                    top_local_lm_scores[local_radius];
+                local_candidate_lm_debug[local_radius][current_idx] :=
+                    candidate_local_lm_scores[local_radius];
+            end;
+            build_long_local_difference_residual_features(
+                rank_features[current_idx], rank_features[top_idx],
+                candidate_idx + 1, rank_scores[current_idx],
+                rank_scores[top_idx], apply_ranker, abstain_score,
+                local_different_units[current_idx],
+                local_different_runs[current_idx],
+                local_max_different_run[current_idx],
+                local_same_prefix_units[current_idx],
+                local_same_suffix_units[current_idx],
+                local_difference_span_units[current_idx],
+                top_local_lm_scores, candidate_local_lm_scores,
+                local_difference_features);
+            { Do not let a local character preference replace a materially
+              cleaner word path. Multi-character replacements also need at
+              least non-decreasing word-transition evidence. }
+            if (local_difference_features.delta_path_segments >= 3.0) or
+                ((local_different_units[current_idx] > 1) and
+                (local_difference_features.delta_word_lm_bonus < 0.0)) then
+            begin
+                Continue;
+            end;
+            local_difference_score :=
+                long_local_difference_residual_score(
+                local_difference_features);
+            local_difference_debug_scores[current_idx] :=
+                local_difference_score;
+            if local_difference_score > best_local_difference_score then
+            begin
+                best_local_difference_score := local_difference_score;
+                best_local_difference_position := candidate_idx;
+            end;
+        end;
+    end;
+    if (best_local_difference_position > 0) and
+        (best_local_difference_score >=
+        c_long_local_difference_residual_promotion_threshold) then
+    begin
+        current_idx := ordered_indices[best_local_difference_position];
+        for candidate_idx := best_local_difference_position downto 1 do
+        begin
+            ordered_indices[candidate_idx] :=
+                ordered_indices[candidate_idx - 1];
+        end;
+        ordered_indices[0] := current_idx;
+        local_difference_promoted_index := current_idx;
+        apply_ranker := True;
+    end;
+
+    if apply_ranker then
+    begin
+        for candidate_idx := 0 to candidate_count - 1 do
+        begin
+            final_ranks[ordered_indices[candidate_idx]] := candidate_idx + 1;
+        end;
+    end;
+
     if apply_ranker then
     begin
         SetLength(ordered_candidates, candidate_count);
@@ -120361,6 +120979,40 @@ begin
             abstain_score;
         m_debug_long_final_candidates[candidate_idx].ranker_applied :=
             apply_ranker;
+        m_debug_long_final_candidates[candidate_idx].local_difference_score :=
+            local_difference_debug_scores[candidate_idx];
+        m_debug_long_final_candidates[candidate_idx].local_difference_promoted :=
+            candidate_idx = local_difference_promoted_index;
+        m_debug_long_final_candidates[candidate_idx].local_difference_current_rank :=
+            local_difference_current_rank_debug[candidate_idx];
+        m_debug_long_final_candidates[candidate_idx].local_different_units :=
+            local_different_units[candidate_idx];
+        m_debug_long_final_candidates[candidate_idx].local_different_runs :=
+            local_different_runs[candidate_idx];
+        m_debug_long_final_candidates[candidate_idx].local_max_different_run :=
+            local_max_different_run[candidate_idx];
+        m_debug_long_final_candidates[candidate_idx].local_same_prefix_units :=
+            local_same_prefix_units[candidate_idx];
+        m_debug_long_final_candidates[candidate_idx].local_same_suffix_units :=
+            local_same_suffix_units[candidate_idx];
+        m_debug_long_final_candidates[candidate_idx].local_difference_span_units :=
+            local_difference_span_units[candidate_idx];
+        m_debug_long_final_candidates[candidate_idx].local_top_lm_r0 :=
+            local_top_lm_debug[0][candidate_idx];
+        m_debug_long_final_candidates[candidate_idx].local_top_lm_r1 :=
+            local_top_lm_debug[1][candidate_idx];
+        m_debug_long_final_candidates[candidate_idx].local_top_lm_r2 :=
+            local_top_lm_debug[2][candidate_idx];
+        m_debug_long_final_candidates[candidate_idx].local_top_lm_r3 :=
+            local_top_lm_debug[3][candidate_idx];
+        m_debug_long_final_candidates[candidate_idx].local_candidate_lm_r0 :=
+            local_candidate_lm_debug[0][candidate_idx];
+        m_debug_long_final_candidates[candidate_idx].local_candidate_lm_r1 :=
+            local_candidate_lm_debug[1][candidate_idx];
+        m_debug_long_final_candidates[candidate_idx].local_candidate_lm_r2 :=
+            local_candidate_lm_debug[2][candidate_idx];
+        m_debug_long_final_candidates[candidate_idx].local_candidate_lm_r3 :=
+            local_candidate_lm_debug[3][candidate_idx];
         m_debug_long_final_candidates[candidate_idx].target :=
             (m_debug_target_recall_text <> '') and
             SameText(Trim(legacy_candidates[candidate_idx].text),
@@ -136357,6 +137009,8 @@ var
     long_display_fast_path: Boolean;
     short_exact_query_mode: Boolean;
     short_exact_predictive_prefix_only_mode: Boolean;
+    short_nocontext_promoted_exact_text: string;
+    short_nocontext_promoted_exact_lead: Integer;
     short_context_promoted_exact_text: string;
     short_context_promoted_exact_lead: Integer;
     promoted_repeated_initial_count: Integer;
@@ -138620,6 +139274,7 @@ var
             text_length: Integer;
             actual_full_exact: Boolean;
             low_frequency_medical_exact: Boolean;
+            nocontext_exact_priority: Integer;
             context_exact_priority: Integer;
         end;
     var
@@ -138972,6 +139627,280 @@ var
                 (candidate_value.dict_weight >= c_min_supported_exact_dict_weight);
         end;
 
+        procedure apply_short_nocontext_reranker_local;
+        var
+            context_value_local: string;
+            candidate_texts_local: TArray<string>;
+            candidate_weights_local: TArray<Integer>;
+            candidate_display_scores_local: TArray<Integer>;
+            candidate_full_lm_scores_local: TArray<Integer>;
+            candidate_suffix_lm_scores_local: TArray<Integer>;
+            candidate_list_indices_local: TArray<Integer>;
+            seen_texts_local: TDictionary<string, Boolean>;
+            list_idx_local: Integer;
+            candidate_idx_local: Integer;
+            best_idx_local: Integer;
+            candidate_text_local: string;
+            candidate_weight_local: Integer;
+            best_full_lm_local: Integer;
+            best_suffix_lm_local: Integer;
+            best_score_local: Int64;
+            candidate_score_local: Int64;
+            features_local: TncShortNoContextFeatures;
+            rank_item_local: TShortExactRankItem;
+
+            function effective_left_context_local: string;
+            begin
+                Result := Trim(m_left_context);
+                if Trim(m_segment_left_context) <> '' then
+                begin
+                    Result := Trim(m_segment_left_context);
+                end;
+                if (Trim(m_segment_left_context) = '') and
+                    (Trim(m_external_left_context) <> '') then
+                begin
+                    Result := Trim(m_external_left_context);
+                end;
+            end;
+
+            procedure build_features_local(const candidate_index_local: Integer;
+                out output_local: TncShortNoContextFeatures);
+            var
+                candidate_units_local: TArray<string>;
+                top_units_local: TArray<string>;
+                compare_idx_local: Integer;
+                compare_limit_local: Integer;
+                different_local: Integer;
+                same_prefix_local: Integer;
+                same_suffix_local: Integer;
+                candidate_log_weight_local: Double;
+                candidate_log_display_local: Double;
+                top_log_weight_local: Double;
+                top_log_display_local: Double;
+            begin
+                FillChar(output_local, SizeOf(output_local), 0);
+                candidate_units_local := split_text_units(
+                    candidate_texts_local[candidate_index_local]);
+                top_units_local := split_text_units(candidate_texts_local[0]);
+                compare_limit_local := Min(Length(candidate_units_local),
+                    Length(top_units_local));
+                different_local := Abs(Length(candidate_units_local) -
+                    Length(top_units_local));
+                for compare_idx_local := 0 to compare_limit_local - 1 do
+                begin
+                    if candidate_units_local[compare_idx_local] <>
+                        top_units_local[compare_idx_local] then
+                    begin
+                        Inc(different_local);
+                    end;
+                end;
+                same_prefix_local := 0;
+                while (same_prefix_local < compare_limit_local) and
+                    (candidate_units_local[same_prefix_local] =
+                    top_units_local[same_prefix_local]) do
+                begin
+                    Inc(same_prefix_local);
+                end;
+                same_suffix_local := 0;
+                while (same_suffix_local <
+                    compare_limit_local - same_prefix_local) and
+                    (candidate_units_local[High(candidate_units_local) -
+                    same_suffix_local] = top_units_local[High(top_units_local) -
+                    same_suffix_local]) do
+                begin
+                    Inc(same_suffix_local);
+                end;
+
+                candidate_log_weight_local := Ln(1.0 + Max(0,
+                    candidate_weights_local[candidate_index_local]));
+                candidate_log_display_local := Ln(1.0 + Max(0,
+                    candidate_display_scores_local[candidate_index_local]));
+                top_log_weight_local := Ln(1.0 + Max(0,
+                    candidate_weights_local[0]));
+                top_log_display_local := Ln(1.0 + Max(0,
+                    candidate_display_scores_local[0]));
+
+                output_local.candidate_rank := candidate_index_local + 1;
+                output_local.candidate_full_lm :=
+                    candidate_full_lm_scores_local[candidate_index_local];
+                output_local.candidate_suffix_lm :=
+                    candidate_suffix_lm_scores_local[candidate_index_local];
+                output_local.candidate_log_dict_weight :=
+                    candidate_log_weight_local;
+                output_local.candidate_log_display_score :=
+                    candidate_log_display_local;
+                output_local.candidate_text_units :=
+                    Length(candidate_units_local);
+                output_local.query_units := expected_units;
+                output_local.candidate_count := Length(candidate_texts_local);
+                output_local.delta_full_lm_from_top :=
+                    candidate_full_lm_scores_local[candidate_index_local] -
+                    candidate_full_lm_scores_local[0];
+                output_local.delta_suffix_lm_from_top :=
+                    candidate_suffix_lm_scores_local[candidate_index_local] -
+                    candidate_suffix_lm_scores_local[0];
+                output_local.delta_dict_weight_from_top :=
+                    candidate_weights_local[candidate_index_local] -
+                    candidate_weights_local[0];
+                output_local.delta_display_score_from_top :=
+                    candidate_display_scores_local[candidate_index_local] -
+                    candidate_display_scores_local[0];
+                output_local.delta_log_dict_weight_from_top :=
+                    candidate_log_weight_local - top_log_weight_local;
+                output_local.delta_log_display_score_from_top :=
+                    candidate_log_display_local - top_log_display_local;
+                output_local.delta_full_lm_from_best :=
+                    candidate_full_lm_scores_local[candidate_index_local] -
+                    best_full_lm_local;
+                output_local.delta_suffix_lm_from_best :=
+                    candidate_suffix_lm_scores_local[candidate_index_local] -
+                    best_suffix_lm_local;
+                output_local.candidate_is_full_lm_best := Ord(
+                    candidate_full_lm_scores_local[candidate_index_local] =
+                    best_full_lm_local);
+                output_local.candidate_is_suffix_lm_best := Ord(
+                    candidate_suffix_lm_scores_local[candidate_index_local] =
+                    best_suffix_lm_local);
+                output_local.different_units_from_top := different_local;
+                output_local.same_prefix_units := same_prefix_local;
+                output_local.same_suffix_units := same_suffix_local;
+                output_local.top_full_lm := candidate_full_lm_scores_local[0];
+                output_local.top_suffix_lm := candidate_suffix_lm_scores_local[0];
+                output_local.top_log_dict_weight := top_log_weight_local;
+                output_local.top_log_display_score := top_log_display_local;
+            end;
+
+        begin
+            short_nocontext_promoted_exact_text := '';
+            short_nocontext_promoted_exact_lead := 0;
+            if (m_dictionary = nil) or has_user_exact or
+                (expected_units < 2) or (expected_units > 4) or
+                (Length(syllables) <> expected_units) or
+                (not is_full_pinyin_key(normalized_pinyin)) then
+            begin
+                Exit;
+            end;
+            context_value_local := effective_left_context_local;
+            if context_value_local <> '' then
+            begin
+                Exit;
+            end;
+
+            seen_texts_local := TDictionary<string, Boolean>.Create;
+            try
+                SetLength(candidate_texts_local, 0);
+                SetLength(candidate_weights_local, 0);
+                SetLength(candidate_display_scores_local, 0);
+                SetLength(candidate_list_indices_local, 0);
+                for list_idx_local := 0 to list.Count - 1 do
+                begin
+                    rank_item_local := list[list_idx_local];
+                    if rank_item_local.category <> 1 then
+                    begin
+                        Continue;
+                    end;
+                    if Length(candidate_texts_local) >=
+                        c_short_nocontext_max_candidate_rank then
+                    begin
+                        Break;
+                    end;
+                    if rank_item_local.low_frequency_medical_exact then
+                    begin
+                        Continue;
+                    end;
+                    candidate_text_local := Trim(rank_item_local.candidate.text);
+                    if (candidate_text_local = '') or
+                        seen_texts_local.ContainsKey(candidate_text_local) or
+                        (not exact_weights.TryGetValue(candidate_text_local,
+                        candidate_weight_local)) then
+                    begin
+                        Continue;
+                    end;
+                    if query_choice_rank_bonus_local(candidate_text_local) > 0 then
+                    begin
+                        Exit;
+                    end;
+
+                    seen_texts_local.Add(candidate_text_local, True);
+                    candidate_idx_local := Length(candidate_texts_local);
+                    SetLength(candidate_texts_local, candidate_idx_local + 1);
+                    SetLength(candidate_weights_local, candidate_idx_local + 1);
+                    SetLength(candidate_display_scores_local,
+                        candidate_idx_local + 1);
+                    SetLength(candidate_list_indices_local,
+                        candidate_idx_local + 1);
+                    candidate_texts_local[candidate_idx_local] :=
+                        candidate_text_local;
+                    candidate_weights_local[candidate_idx_local] :=
+                        candidate_weight_local;
+                    candidate_display_scores_local[candidate_idx_local] :=
+                        rank_item_local.candidate.score;
+                    candidate_list_indices_local[candidate_idx_local] :=
+                        list_idx_local;
+                end;
+                if Length(candidate_texts_local) < 2 then
+                begin
+                    Exit;
+                end;
+                if (not get_cached_char_lm_scores(candidate_texts_local,
+                    candidate_full_lm_scores_local, clsm_full, '')) or
+                    (Length(candidate_full_lm_scores_local) <>
+                    Length(candidate_texts_local)) then
+                begin
+                    Exit;
+                end;
+                if (not get_cached_char_lm_scores(candidate_texts_local,
+                    candidate_suffix_lm_scores_local, clsm_suffix, '')) or
+                    (Length(candidate_suffix_lm_scores_local) <>
+                    Length(candidate_texts_local)) then
+                begin
+                    Exit;
+                end;
+
+                best_full_lm_local := candidate_full_lm_scores_local[0];
+                best_suffix_lm_local := candidate_suffix_lm_scores_local[0];
+                for candidate_idx_local := 1 to High(candidate_texts_local) do
+                begin
+                    best_full_lm_local := Max(best_full_lm_local,
+                        candidate_full_lm_scores_local[candidate_idx_local]);
+                    best_suffix_lm_local := Max(best_suffix_lm_local,
+                        candidate_suffix_lm_scores_local[candidate_idx_local]);
+                end;
+
+                best_idx_local := 0;
+                best_score_local := Low(Int64);
+                for candidate_idx_local := 1 to High(candidate_texts_local) do
+                begin
+                    build_features_local(candidate_idx_local, features_local);
+                    candidate_score_local := short_nocontext_residual_score(
+                        features_local);
+                    if candidate_score_local > best_score_local then
+                    begin
+                        best_score_local := candidate_score_local;
+                        best_idx_local := candidate_idx_local;
+                    end;
+                end;
+                if (best_idx_local <= 0) or (best_score_local <
+                    c_short_nocontext_promotion_threshold) then
+                begin
+                    Exit;
+                end;
+
+                short_nocontext_promoted_exact_text :=
+                    candidate_texts_local[best_idx_local];
+                short_nocontext_promoted_exact_lead := EnsureRange(
+                    (best_score_local - c_short_nocontext_promotion_threshold)
+                    div 100000, Low(Integer), High(Integer));
+                rank_item_local := list[
+                    candidate_list_indices_local[best_idx_local]];
+                rank_item_local.nocontext_exact_priority := 1;
+                list[candidate_list_indices_local[best_idx_local]] :=
+                    rank_item_local;
+            finally
+                seen_texts_local.Free;
+            end;
+        end;
+
         procedure apply_short_context_reranker_local;
         const
             c_max_context_candidates = 9;
@@ -139003,6 +139932,25 @@ var
             residual_lead_local: Double;
             first_stage_promoted_local: Boolean;
             residual_promoted_local: Boolean;
+            boundary_prefix_texts_local: TArray<string>;
+            boundary_prefix_scores_local: TArray<Integer>;
+            boundary_prefix1_scores_local: TArray<Integer>;
+            boundary_prefix2_scores_local: TArray<Integer>;
+            boundary_features_local: TncShortContextBoundaryFeatures;
+            boundary_best_idx_local: Integer;
+            boundary_idx_local: Integer;
+            boundary_rank_local: Integer;
+            boundary_best_score_local: Int64;
+            boundary_score_local: Int64;
+            boundary_lead_local: Int64;
+            boundary_full_best_local: Integer;
+            boundary_prefix1_best_local: Integer;
+            boundary_prefix2_best_local: Integer;
+            boundary_different_local: Integer;
+            boundary_same_prefix_local: Integer;
+            boundary_same_suffix_local: Integer;
+            boundary_compare_limit_local: Integer;
+            boundary_promoted_local: Boolean;
             rank_item_local: TShortExactRankItem;
 
             function effective_left_context_local: string;
@@ -139017,6 +139965,126 @@ var
                 begin
                     Result := Trim(m_external_left_context);
                 end;
+            end;
+
+            function rank_after_context_local(const candidate_index_local,
+                promoted_index_local: Integer): Integer;
+            begin
+                if candidate_index_local = promoted_index_local then
+                begin
+                    Exit(1);
+                end;
+                Result := candidate_index_local + 1;
+                if (promoted_index_local > 0) and
+                    (candidate_index_local < promoted_index_local) then
+                begin
+                    Inc(Result);
+                end;
+            end;
+
+            procedure build_boundary_features_local(
+                const candidate_index_local, top_index_local: Integer;
+                out features_local: TncShortContextBoundaryFeatures);
+            var
+                candidate_text_inner: string;
+                top_text_inner: string;
+                compare_idx_inner: Integer;
+                compare_limit_inner: Integer;
+            begin
+                FillChar(features_local, SizeOf(features_local), 0);
+                candidate_text_inner := candidate_texts_local[
+                    candidate_index_local];
+                top_text_inner := candidate_texts_local[top_index_local];
+                boundary_different_local := Abs(Length(candidate_text_inner) -
+                    Length(top_text_inner));
+                compare_limit_inner := Min(Length(candidate_text_inner),
+                    Length(top_text_inner));
+                for compare_idx_inner := 1 to compare_limit_inner do
+                begin
+                    if candidate_text_inner[compare_idx_inner] <>
+                        top_text_inner[compare_idx_inner] then
+                    begin
+                        Inc(boundary_different_local);
+                    end;
+                end;
+                boundary_same_prefix_local := 0;
+                while (boundary_same_prefix_local < compare_limit_inner) and
+                    (candidate_text_inner[boundary_same_prefix_local + 1] =
+                    top_text_inner[boundary_same_prefix_local + 1]) do
+                begin
+                    Inc(boundary_same_prefix_local);
+                end;
+                boundary_same_suffix_local := 0;
+                while (boundary_same_suffix_local <
+                    compare_limit_inner - boundary_same_prefix_local) and
+                    (candidate_text_inner[Length(candidate_text_inner) -
+                    boundary_same_suffix_local] = top_text_inner[
+                    Length(top_text_inner) - boundary_same_suffix_local]) do
+                begin
+                    Inc(boundary_same_suffix_local);
+                end;
+
+                boundary_rank_local := rank_after_context_local(
+                    candidate_index_local, top_index_local);
+                features_local.candidate_rank_context := boundary_rank_local;
+                features_local.candidate_rank_nocontext :=
+                    candidate_index_local + 1;
+                features_local.candidate_full_lm :=
+                    candidate_lm_scores_local[candidate_index_local];
+                features_local.candidate_prefix1_lm :=
+                    boundary_prefix1_scores_local[candidate_index_local];
+                features_local.candidate_prefix2_lm :=
+                    boundary_prefix2_scores_local[candidate_index_local];
+                features_local.candidate_log_dict_weight := Ln(1.0 + Max(0,
+                    candidate_weights_local[candidate_index_local]));
+                features_local.candidate_log_display_score := Ln(1.0 + Max(0,
+                    candidate_display_scores_local[candidate_index_local]));
+                features_local.candidate_text_units :=
+                    Length(candidate_text_inner);
+                features_local.context_units := Length(context_value_local);
+                features_local.candidate_count := Length(candidate_texts_local);
+                features_local.candidate_is_current_top := 0.0;
+                features_local.delta_full_lm_from_top :=
+                    candidate_lm_scores_local[candidate_index_local] -
+                    candidate_lm_scores_local[top_index_local];
+                features_local.delta_prefix1_lm_from_top :=
+                    boundary_prefix1_scores_local[candidate_index_local] -
+                    boundary_prefix1_scores_local[top_index_local];
+                features_local.delta_prefix2_lm_from_top :=
+                    boundary_prefix2_scores_local[candidate_index_local] -
+                    boundary_prefix2_scores_local[top_index_local];
+                features_local.delta_dict_weight_from_top :=
+                    candidate_weights_local[candidate_index_local] -
+                    candidate_weights_local[top_index_local];
+                features_local.delta_display_score_from_top :=
+                    candidate_display_scores_local[candidate_index_local] -
+                    candidate_display_scores_local[top_index_local];
+                features_local.delta_full_lm_from_best :=
+                    candidate_lm_scores_local[candidate_index_local] -
+                    boundary_full_best_local;
+                features_local.delta_prefix1_lm_from_best :=
+                    boundary_prefix1_scores_local[candidate_index_local] -
+                    boundary_prefix1_best_local;
+                features_local.delta_prefix2_lm_from_best :=
+                    boundary_prefix2_scores_local[candidate_index_local] -
+                    boundary_prefix2_best_local;
+                features_local.candidate_is_full_lm_best := Ord(
+                    candidate_lm_scores_local[candidate_index_local] =
+                    boundary_full_best_local);
+                features_local.candidate_is_prefix1_lm_best := Ord(
+                    boundary_prefix1_scores_local[candidate_index_local] =
+                    boundary_prefix1_best_local);
+                features_local.candidate_is_prefix2_lm_best := Ord(
+                    boundary_prefix2_scores_local[candidate_index_local] =
+                    boundary_prefix2_best_local);
+                features_local.candidate_context_rank_gain :=
+                    candidate_index_local + 1 - boundary_rank_local;
+                features_local.different_units_from_top :=
+                    boundary_different_local;
+                features_local.same_prefix_units :=
+                    boundary_same_prefix_local;
+                features_local.same_suffix_units :=
+                    boundary_same_suffix_local;
             end;
 
         begin
@@ -139210,11 +140278,97 @@ var
                     final_idx_local := residual_best_idx_local;
                 end;
 
+                { The whole-word continuation average can hide a strong
+                  context boundary. A final conservative residual compares
+                  the first character and first two characters of existing
+                  exact candidates; it never creates candidates. }
+                boundary_promoted_local := False;
+                boundary_best_idx_local := final_idx_local;
+                boundary_best_score_local := Low(Int64);
+                boundary_lead_local := 0;
+                SetLength(boundary_prefix_texts_local,
+                    Length(candidate_texts_local) * 2);
+                for candidate_idx_local := 0 to High(candidate_texts_local) do
+                begin
+                    boundary_prefix_texts_local[candidate_idx_local * 2] :=
+                        Copy(candidate_texts_local[candidate_idx_local], 1, 1);
+                    boundary_prefix_texts_local[candidate_idx_local * 2 + 1] :=
+                        Copy(candidate_texts_local[candidate_idx_local], 1, 2);
+                end;
+                if get_cached_char_lm_scores(boundary_prefix_texts_local,
+                    boundary_prefix_scores_local, clsm_context,
+                    context_value_local) and
+                    (Length(boundary_prefix_scores_local) =
+                    Length(boundary_prefix_texts_local)) then
+                begin
+                    SetLength(boundary_prefix1_scores_local,
+                        Length(candidate_texts_local));
+                    SetLength(boundary_prefix2_scores_local,
+                        Length(candidate_texts_local));
+                    boundary_full_best_local := Low(Integer);
+                    boundary_prefix1_best_local := Low(Integer);
+                    boundary_prefix2_best_local := Low(Integer);
+                    for candidate_idx_local := 0 to High(candidate_texts_local) do
+                    begin
+                        boundary_prefix1_scores_local[candidate_idx_local] :=
+                            boundary_prefix_scores_local[
+                            candidate_idx_local * 2];
+                        boundary_prefix2_scores_local[candidate_idx_local] :=
+                            boundary_prefix_scores_local[
+                            candidate_idx_local * 2 + 1];
+                        boundary_full_best_local := Max(
+                            boundary_full_best_local,
+                            candidate_lm_scores_local[candidate_idx_local]);
+                        boundary_prefix1_best_local := Max(
+                            boundary_prefix1_best_local,
+                            boundary_prefix1_scores_local[candidate_idx_local]);
+                        boundary_prefix2_best_local := Max(
+                            boundary_prefix2_best_local,
+                            boundary_prefix2_scores_local[candidate_idx_local]);
+                    end;
+                    boundary_compare_limit_local := Min(
+                        Length(candidate_texts_local),
+                        c_short_context_boundary_max_candidate_rank);
+                    for boundary_idx_local := 0 to
+                        boundary_compare_limit_local - 1 do
+                    begin
+                        if boundary_idx_local = final_idx_local then
+                        begin
+                            Continue;
+                        end;
+                        build_boundary_features_local(boundary_idx_local,
+                            final_idx_local, boundary_features_local);
+                        boundary_score_local :=
+                            short_context_boundary_residual_score(
+                            boundary_features_local);
+                        if boundary_score_local > boundary_best_score_local then
+                        begin
+                            boundary_best_score_local := boundary_score_local;
+                            boundary_best_idx_local := boundary_idx_local;
+                        end;
+                    end;
+                    if (boundary_best_idx_local <> final_idx_local) and
+                        (boundary_best_score_local >=
+                        c_short_context_boundary_promotion_threshold) then
+                    begin
+                        final_idx_local := boundary_best_idx_local;
+                        boundary_promoted_local := True;
+                        boundary_lead_local := boundary_best_score_local -
+                            c_short_context_boundary_promotion_threshold;
+                    end;
+                end;
+
                 if final_idx_local <> baseline_idx_local then
                 begin
                     short_context_promoted_exact_text :=
                         candidate_texts_local[final_idx_local];
-                    if residual_promoted_local then
+                    if boundary_promoted_local then
+                    begin
+                        short_context_promoted_exact_lead := EnsureRange(
+                            boundary_lead_local div 100000, Low(Integer),
+                            High(Integer));
+                    end
+                    else if residual_promoted_local then
                     begin
                         short_context_promoted_exact_lead := Round(
                             residual_lead_local * 1000.0);
@@ -139260,6 +140414,18 @@ var
                             residual_baseline_score_local,
                             candidate_texts_local[residual_best_idx_local],
                             residual_best_score_local]);
+                    end;
+                    if boundary_promoted_local then
+                    begin
+                        if m_last_lookup_debug_extra <> '' then
+                        begin
+                            m_last_lookup_debug_extra :=
+                                m_last_lookup_debug_extra + ' ';
+                        end;
+                        m_last_lookup_debug_extra := m_last_lookup_debug_extra +
+                            Format('shortctxboundary=%s:%d',
+                            [candidate_texts_local[final_idx_local],
+                            short_context_promoted_exact_lead]);
                     end;
                 end;
             finally
@@ -140056,6 +141222,7 @@ var
             item.actual_full_exact := candidate_is_actual_full_exact_local(
                 candidate_value);
             item.low_frequency_medical_exact := False;
+            item.nocontext_exact_priority := 0;
             item.context_exact_priority := 0;
             item.prefix_units := 0;
             item.rank_score := display_candidate_effective_weight(
@@ -140243,6 +141410,13 @@ var
 
                     Result := right.context_exact_priority -
                         left.context_exact_priority;
+                    if Result <> 0 then
+                    begin
+                        Exit;
+                    end;
+
+                    Result := right.nocontext_exact_priority -
+                        left.nocontext_exact_priority;
                     if Result <> 0 then
                     begin
                         Exit;
@@ -140529,6 +141703,12 @@ var
 
             sort_short_exact_rank_items_local;
             note_short_exact_phase_local('sort');
+            apply_short_nocontext_reranker_local;
+            if short_nocontext_promoted_exact_text <> '' then
+            begin
+                sort_short_exact_rank_items_local;
+            end;
+            note_short_exact_phase_local('nocontext');
             apply_short_context_reranker_local;
             if short_context_promoted_exact_text <> '' then
             begin
@@ -140561,6 +141741,13 @@ var
                 end;
                 m_last_lookup_debug_extra := m_last_lookup_debug_extra +
                     'shortexact=1';
+                if short_nocontext_promoted_exact_text <> '' then
+                begin
+                    m_last_lookup_debug_extra := m_last_lookup_debug_extra +
+                        Format(' shortnoctx=%s:%d',
+                        [short_nocontext_promoted_exact_text,
+                        short_nocontext_promoted_exact_lead]);
+                end;
                 if short_context_promoted_exact_text <> '' then
                 begin
                     m_last_lookup_debug_extra := m_last_lookup_debug_extra +
@@ -165056,6 +166243,8 @@ begin
     long_display_fast_path := False;
     short_exact_query_mode := False;
     short_exact_predictive_prefix_only_mode := False;
+    short_nocontext_promoted_exact_text := '';
+    short_nocontext_promoted_exact_lead := 0;
     short_context_promoted_exact_text := '';
     short_context_promoted_exact_lead := 0;
     promoted_repeated_initial_count := 0;

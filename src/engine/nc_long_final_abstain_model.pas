@@ -43,10 +43,10 @@ const
     c_long_final_abstain_feature_count: Integer = 33;
     c_long_final_abstain_tree_count: Integer = 60;
     c_long_final_abstain_score_scale: Double = 100000000.0;
-    c_long_final_abstain_reference_score: Int64 = 1334496;
-    c_long_final_abstain_reference_score_low: Int64 = 48764479;
-    c_long_final_abstain_reference_score_high: Int64 = -96548025;
-    c_long_final_abstain_reference_score_mixed: Int64 = -1169938;
+    c_long_final_abstain_reference_score: Int64 = 65600670;
+    c_long_final_abstain_reference_score_low: Int64 = 100591385;
+    c_long_final_abstain_reference_score_high: Int64 = 44588292;
+    c_long_final_abstain_reference_score_mixed: Int64 = 65980925;
 
 function long_final_abstain_score(
     const features: TncLongFinalAbstainFeatures): Int64;
@@ -55,225 +55,225 @@ function long_final_abstain_self_test: Boolean;
 implementation
 
 { Learned LightGBM final-ranker fallback policy. The generated unit has no LightGBM runtime dependency.
-  Training report SHA-256: 7C4E05C8840E391C5F0FFD3BBD9A3A97FB7857FB500D93B5E505169923DF0639
-  LightGBM model SHA-256: A6CDD0079E3667569C8065F91F2C06705CBA67F1E656AC8F32DD5B920F6BD02F }
+  Training report SHA-256: C1730A95627F4668E03D59FFAAF97573EE8CB082CE5DCC12B5DA3FA9CFB00EC3
+  LightGBM model SHA-256: 0F34525856BFC52CF5FB7DDF5142EA98D808D087C0EA796899266C2D42D8DD2E }
 
 function long_final_abstain_tree_0(
     const features: TncLongFinalAbstainFeatures): Double;
 begin
-    if features.ranker_top_score <= 96084069.500000015 then
+    if features.ranker_top_over_legacy_margin <= 13861866.000000002 then
     begin
-        if features.input_syllable_count <= 11.500000000000002 then
+        if features.ranker_top_char_lm_gain <= -210.99999999999997 then
         begin
-            Result := 1.2066254623870234;
+            Result := 1.1949445000865635;
         end
         else
         begin
-            Result := 1.1143321073790546;
+            Result := 1.1280288978425452;
         end;
     end
     else
     begin
-        Result := 1.2274928291209095;
+        Result := 1.1960173443455313;
     end;
 end;
 
 function long_final_abstain_tree_1(
     const features: TncLongFinalAbstainFeatures): Double;
 begin
-    if features.ranker_top_score <= 108097173.50000001 then
+    if features.ranker_top_char_lm_gain <= -295.49999999999994 then
     begin
-        if features.ranker_second_score <= 77150933.000000015 then
+        if features.chain_count <= 2.5000000000000004 then
         begin
-            Result := -0.013931427600589961;
+            Result := 0.034404778582020679;
         end
         else
         begin
-            Result := -0.11084848641226072;
+            Result := -0.088530626771943233;
         end;
     end
     else
     begin
-        Result := 0.023867604967158149;
+        Result := -0.011873248413585653;
     end;
 end;
 
 function long_final_abstain_tree_2(
     const features: TncLongFinalAbstainFeatures): Double;
 begin
-    if features.ranker_top_score <= 96084069.500000015 then
+    if features.ranker_top_over_legacy_margin <= 13405201.000000002 then
     begin
-        if features.ranker_third_score <= -374271341.99999994 then
-        begin
-            Result := 0.0008593350009152977;
-        end
-        else
-        begin
-            Result := -0.080025685134711061;
-        end;
+        Result := -0.034724555747805516;
     end
     else
     begin
-        Result := 0.011109317404844384;
+        if features.legacy_top_char_lm_score <= -4587.9999999999991 then
+        begin
+            Result := -0.00038140713065365397;
+        end
+        else
+        begin
+            Result := 0.027569245022909816;
+        end;
     end;
 end;
 
 function long_final_abstain_tree_3(
     const features: TncLongFinalAbstainFeatures): Double;
 begin
-    if features.ranker_top_score <= 96084069.500000015 then
+    if features.ranker_top_over_legacy_margin <= 13861866.000000002 then
     begin
-        if features.ranker_third_score <= -374271341.99999994 then
+        if features.ranker_top_char_lm_gain <= -210.99999999999997 then
         begin
-            Result := 0.0073552987766399751;
+            Result := 0.013172258861170672;
         end
         else
         begin
-            Result := -0.080855164740469013;
+            Result := -0.05441485847847545;
         end;
     end
     else
     begin
-        Result := 0.018385316260444186;
+        Result := 0.0072478868728791277;
     end;
 end;
 
 function long_final_abstain_tree_4(
     const features: TncLongFinalAbstainFeatures): Double;
 begin
-    if features.ranker_top_score <= 96084069.500000015 then
+    if features.ranker_top_over_legacy_margin <= 13861866.000000002 then
     begin
-        if features.ranker_third_score <= -374271341.99999994 then
+        if features.ranker_top_char_lm_gain <= -210.99999999999997 then
         begin
-            Result := 0.014329083582577548;
+            Result := 0.012835342494302909;
         end
         else
         begin
-            Result := -0.062014502743893828;
+            Result := -0.046950544795398022;
         end;
     end
     else
     begin
-        Result := 0.019275749799384571;
+        Result := 0.010378833131892692;
     end;
 end;
 
 function long_final_abstain_tree_5(
     const features: TncLongFinalAbstainFeatures): Double;
 begin
-    if features.input_syllable_count <= 15.500000000000002 then
+    if features.ranker_top_char_lm_gain <= -450.49999999999994 then
     begin
-        if features.ranker_top_score <= 108097173.50000001 then
-        begin
-            Result := -0.0092092297160967767;
-        end
-        else
-        begin
-            Result := 0.022377162775551542;
-        end;
+        Result := 0.03495639485490222;
     end
     else
     begin
-        Result := -0.07976019382168395;
+        if features.ranker_top_char_lm_score <= -4598.9999999999991 then
+        begin
+            Result := -0.01751996779511605;
+        end
+        else
+        begin
+            Result := 0.020120340412858852;
+        end;
     end;
 end;
 
 function long_final_abstain_tree_6(
     const features: TncLongFinalAbstainFeatures): Double;
 begin
-    if features.ranker_second_score <= 34345818.000000007 then
+    if features.ranker_top_over_legacy_margin <= 13861866.000000002 then
     begin
-        if features.ranker_third_score <= -374271341.99999994 then
+        if features.ranker_top_char_lm_gain <= -498.49999999999994 then
         begin
-            Result := 0.016101346415374758;
+            Result := 0.047531231343280078;
         end
         else
         begin
-            Result := -0.13203977021560606;
+            Result := -0.034510129718431821;
         end;
     end
     else
     begin
-        Result := 0.0075330393899076331;
+        Result := 0.0071929103130029676;
     end;
 end;
 
 function long_final_abstain_tree_7(
     const features: TncLongFinalAbstainFeatures): Double;
 begin
-    if features.ranker_top_score <= 108097173.50000001 then
+    if features.ranker_top_char_lm_gain <= -450.49999999999994 then
     begin
-        if features.ranker_second_score <= 77150933.000000015 then
-        begin
-            Result := -0.0090142469142726039;
-        end
-        else
-        begin
-            Result := -0.099653995639783791;
-        end;
+        Result := 0.031677337709674049;
     end
     else
     begin
-        Result := 0.016801437848898242;
+        if features.ranker_top_score <= 14817556.000000002 then
+        begin
+            Result := -0.033785155197859774;
+        end
+        else
+        begin
+            Result := 0.0016537224970897724;
+        end;
     end;
 end;
 
 function long_final_abstain_tree_8(
     const features: TncLongFinalAbstainFeatures): Double;
 begin
-    if features.ranker_top_score <= 96084069.500000015 then
+    if features.ranker_top_char_lm_gain <= -450.49999999999994 then
     begin
-        if features.ranker_third_score <= -374271341.99999994 then
-        begin
-            Result := 0.011673505939501788;
-        end
-        else
-        begin
-            Result := -0.063012579054774351;
-        end;
+        Result := 0.037539851866967892;
     end
     else
     begin
-        Result := 0.013824725735309931;
+        if features.ranker_top_margin <= 13479699.000000002 then
+        begin
+            Result := -0.035064479325910336;
+        end
+        else
+        begin
+            Result := 0.0033187333511111262;
+        end;
     end;
 end;
 
 function long_final_abstain_tree_9(
     const features: TncLongFinalAbstainFeatures): Double;
 begin
-    if features.input_syllable_count <= 15.500000000000002 then
+    if features.ranker_top_char_lm_gain <= -329.49999999999994 then
     begin
-        if features.ranker_top_char_lm_score <= -4770.4999999999991 then
-        begin
-            Result := 0.015635017949021883;
-        end
-        else
-        begin
-            Result := -0.031924563036713087;
-        end;
+        Result := 0.02394108006135345;
     end
     else
     begin
-        Result := -0.046392501951700325;
+        if features.ranker_top_score <= 14817556.000000002 then
+        begin
+            Result := -0.047960716090480401;
+        end
+        else
+        begin
+            Result := -0.0044787812385432349;
+        end;
     end;
 end;
 
 function long_final_abstain_tree_10(
     const features: TncLongFinalAbstainFeatures): Double;
 begin
-    if features.ranker_top_score <= 108097173.50000001 then
+    if features.ranker_top_char_lm_gain <= -450.49999999999994 then
     begin
-        Result := -0.02208096094308671;
+        Result := 0.036854357426291007;
     end
     else
     begin
-        if features.ranker_top_char_lm_score <= -6649.9999999999991 then
+        if features.ranker_top_char_lm_score <= -4598.9999999999991 then
         begin
-            Result := 0.044082165240210504;
+            Result := -0.015083903297068942;
         end
         else
         begin
-            Result := -0.0083543032693755275;
+            Result := 0.013530570643799722;
         end;
     end;
 end;
@@ -281,139 +281,139 @@ end;
 function long_final_abstain_tree_11(
     const features: TncLongFinalAbstainFeatures): Double;
 begin
-    if features.input_syllable_count <= 15.500000000000002 then
+    if features.legacy_top_char_lm_score <= -4569.4999999999991 then
     begin
-        if features.ranker_top_char_lm_score <= -4729.9999999999991 then
+        if features.ranker_top_char_lm_score <= -7113.9999999999991 then
         begin
-            Result := 0.0097714164568988102;
+            Result := 0.048922657902594618;
         end
         else
         begin
-            Result := -0.036125209352563123;
+            Result := -0.015624751653527707;
         end;
     end
     else
     begin
-        Result := -0.056636385134367667;
+        Result := 0.015770983955116467;
     end;
 end;
 
 function long_final_abstain_tree_12(
     const features: TncLongFinalAbstainFeatures): Double;
 begin
-    if features.input_syllable_count <= 15.500000000000002 then
+    if features.ranker_top_char_lm_gain <= -445.49999999999994 then
     begin
-        if features.ranker_second_score <= 81017015.000000015 then
-        begin
-            Result := -0.0088875058549220606;
-        end
-        else
-        begin
-            Result := 0.025752936376011348;
-        end;
+        Result := 0.03646121013218865;
     end
     else
     begin
-        Result := -0.063827430275838509;
+        if features.ranker_second_score <= 13386639.500000002 then
+        begin
+            Result := -0.0025976951436116765;
+        end
+        else
+        begin
+            Result := -0.073599533388577429;
+        end;
     end;
 end;
 
 function long_final_abstain_tree_13(
     const features: TncLongFinalAbstainFeatures): Double;
 begin
-    if features.ranker_top_score <= 96084069.500000015 then
+    if features.ranker_top_char_lm_gain <= -329.49999999999994 then
     begin
-        if features.ranker_third_score <= -374271341.99999994 then
+        if features.ranker_third_score <= -25506806.999999996 then
         begin
-            Result := 0.0076724127309658451;
+            Result := 0.037600663566581399;
         end
         else
         begin
-            Result := -0.055485557921358029;
+            Result := -0.071310431246186648;
         end;
     end
     else
     begin
-        Result := 0.01520530068056385;
+        Result := -0.0069728634825036708;
     end;
 end;
 
 function long_final_abstain_tree_14(
     const features: TncLongFinalAbstainFeatures): Double;
 begin
-    if features.ranker_top_score <= 96084069.500000015 then
+    if features.legacy_top_chain_rank <= 3.5000000000000004 then
     begin
-        if features.input_syllable_count <= 14.500000000000002 then
+        if features.ranker_top_char_lm_score <= -6964.9999999999991 then
         begin
-            Result := -0.0081312164559171739;
+            Result := 0.048547179287570234;
         end
         else
         begin
-            Result := -0.099697332483030796;
+            Result := -4.8875963675079116E-05;
         end;
     end
     else
     begin
-        Result := 0.014045803458987108;
+        Result := -0.073406964671553554;
     end;
 end;
 
 function long_final_abstain_tree_15(
     const features: TncLongFinalAbstainFeatures): Double;
 begin
-    if features.ranker_second_score <= 34345818.000000007 then
+    if features.legacy_top_char_lm_score <= -4569.4999999999991 then
     begin
-        if features.input_syllable_count <= 11.500000000000002 then
+        if features.ranker_top_char_lm_score <= -7113.9999999999991 then
         begin
-            Result := 0.0047290588370482098;
+            Result := 0.047801439041017607;
         end
         else
         begin
-            Result := -0.10284275017135386;
+            Result := -0.010157729765279526;
         end;
     end
     else
     begin
-        Result := 0.0060669268815008526;
+        Result := 0.023036114395366573;
     end;
 end;
 
 function long_final_abstain_tree_16(
     const features: TncLongFinalAbstainFeatures): Double;
 begin
-    if features.ranker_top_char_lm_score <= -4729.9999999999991 then
+    if features.ranker_top_margin <= 13479699.000000002 then
     begin
-        if features.ranker_top_char_lm_gain <= -604.49999999999989 then
+        if features.chain_count <= 2.5000000000000004 then
         begin
-            Result := -0.027624610836089487;
+            Result := -0.014105181458353187;
         end
         else
         begin
-            Result := 0.0078056918476153156;
+            Result := -0.08466299335453685;
         end;
     end
     else
     begin
-        Result := -0.058128630296796172;
+        Result := 0.0077716071560961176;
     end;
 end;
 
 function long_final_abstain_tree_17(
     const features: TncLongFinalAbstainFeatures): Double;
 begin
-    if features.ranker_top_score <= 96084069.500000015 then
+    if features.ranker_top_char_lm_gain <= -305.49999999999994 then
     begin
-        Result := -0.021505687178224084;
+        Result := 0.027871913132313186;
     end
     else
     begin
-        if features.ranker_top_margin <= 18254850.000000004 then
+        if features.ranker_top_char_lm_score <= -4598.9999999999991 then
         begin
-            Result := -0.019030338679331637;
+            Result := -0.017729752951905438;
         end
         else
         begin
-            Result := 0.0239274273927561;
+            Result := 0.023897237128000404;
         end;
     end;
 end;
@@ -421,299 +421,299 @@ end;
 function long_final_abstain_tree_18(
     const features: TncLongFinalAbstainFeatures): Double;
 begin
-    if features.ranker_top_score <= 137227616.50000003 then
+    if features.ranker_top_char_lm_score <= -4598.9999999999991 then
     begin
-        if features.ranker_second_score <= 98854870.000000015 then
-        begin
-            Result := 0.00025827834503298696;
-        end
-        else
-        begin
-            Result := -0.058275995206635213;
-        end;
+        Result := -0.0067133029992349491;
     end
     else
     begin
-        Result := 0.029811757686345398;
+        if features.ranker_top_char_lm_score <= -4018.9999999999995 then
+        begin
+            Result := 0.049793198690115767;
+        end
+        else
+        begin
+            Result := -0.0019855424839089341;
+        end;
     end;
 end;
 
 function long_final_abstain_tree_19(
     const features: TncLongFinalAbstainFeatures): Double;
 begin
-    if features.ranker_top_char_lm_score <= -4729.9999999999991 then
+    if features.ranker_second_score <= 13386639.500000002 then
     begin
-        if features.input_syllable_count <= 15.500000000000002 then
+        if features.legacy_top_chain_rank <= 3.5000000000000004 then
         begin
-            Result := 0.014115737451492187;
+            Result := 0.0059176644563312961;
         end
         else
         begin
-            Result := -0.026981891526809271;
+            Result := -0.059332034457252616;
         end;
     end
     else
     begin
-        Result := -0.040535889915180888;
+        Result := -0.050904372886246697;
     end;
 end;
 
 function long_final_abstain_tree_20(
     const features: TncLongFinalAbstainFeatures): Double;
 begin
-    if features.input_syllable_count <= 14.500000000000002 then
+    if features.ranker_third_score <= -17722485.999999996 then
     begin
-        Result := 0.0011499402635581791;
-    end
-    else
-    begin
-        if features.ranker_third_score <= -374091102.99999994 then
+        if features.ranker_top_char_lm_gain <= -445.49999999999994 then
         begin
-            Result := 0.0043839079000195834;
+            Result := 0.035070398176080632;
         end
         else
         begin
-            Result := -0.080694153105389091;
+            Result := -0.0065510802639603292;
         end;
+    end
+    else
+    begin
+        Result := -0.082229704473293919;
     end;
 end;
 
 function long_final_abstain_tree_21(
     const features: TncLongFinalAbstainFeatures): Double;
 begin
-    if features.input_syllable_count <= 16.500000000000004 then
+    if features.ranker_top_char_lm_score <= -4598.9999999999991 then
     begin
-        if features.ranker_second_score <= 81017015.000000015 then
+        if features.ranker_top_char_lm_score <= -7113.9999999999991 then
         begin
-            Result := -0.010408006672098678;
+            Result := 0.046898812755439313;
         end
         else
         begin
-            Result := 0.018334430283990861;
+            Result := -0.011713150473832503;
         end;
     end
     else
     begin
-        Result := -0.050150642690257791;
+        Result := 0.016932721811238539;
     end;
 end;
 
 function long_final_abstain_tree_22(
     const features: TncLongFinalAbstainFeatures): Double;
 begin
-    if features.ranker_top_char_lm_gain <= -304.99999999999994 then
+    if features.ranker_top_margin <= 11824127.500000002 then
     begin
-        if features.ranker_top_char_lm_gain <= -402.49999999999994 then
+        if features.ranker_second_margin <= 32932375.000000004 then
         begin
-            Result := 0.00092928698859196662;
+            Result := -0.067064290033388083;
         end
         else
         begin
-            Result := -0.047482590675626823;
+            Result := -0.0016553385409148452;
         end;
     end
     else
     begin
-        Result := 0.018981189175831494;
+        Result := 0.012109701071390415;
     end;
 end;
 
 function long_final_abstain_tree_23(
     const features: TncLongFinalAbstainFeatures): Double;
 begin
-    if features.input_syllable_count <= 16.500000000000004 then
+    if features.legacy_top_char_lm_score <= -5445.9999999999991 then
     begin
-        if features.ranker_top_char_lm_score <= -4729.9999999999991 then
+        if features.ranker_second_margin <= 19311440.000000004 then
         begin
-            Result := 0.01362671986272513;
+            Result := -0.066586761919933193;
         end
         else
         begin
-            Result := -0.025343470587207949;
+            Result := -0.0038106350597701499;
         end;
     end
     else
     begin
-        Result := -0.033941767798795881;
+        Result := 0.0069705569409770022;
     end;
 end;
 
 function long_final_abstain_tree_24(
     const features: TncLongFinalAbstainFeatures): Double;
 begin
-    if features.ranker_top_score <= 108097173.50000001 then
+    if features.ranker_second_score <= -9697500.9999999981 then
     begin
-        if features.ranker_top_char_lm_score <= -6373.4999999999991 then
-        begin
-            Result := -0.057240477958881708;
-        end
-        else
-        begin
-            Result := 0.0073527192930327116;
-        end;
+        Result := -0.021970869381239079;
     end
     else
     begin
-        Result := 0.018208440462697068;
+        if features.ranker_top_over_legacy_margin <= 19957137.500000004 then
+        begin
+            Result := -0.0084874319424498735;
+        end
+        else
+        begin
+            Result := 0.026707434894095661;
+        end;
     end;
 end;
 
 function long_final_abstain_tree_25(
     const features: TncLongFinalAbstainFeatures): Double;
 begin
-    if features.ranker_top_score <= 108097173.50000001 then
+    if features.legacy_top_char_lm_score <= -6349.4999999999991 then
     begin
-        if features.ranker_second_score <= 77150933.000000015 then
+        if features.ranker_top_char_lm_score <= -7113.9999999999991 then
         begin
-            Result := 5.179835742783587E-06;
+            Result := 0.046064097637102536;
         end
         else
         begin
-            Result := -0.065743493750948345;
+            Result := -0.064259306477524453;
         end;
     end
     else
     begin
-        Result := 0.017535764853641483;
+        Result := 0.0078663685146957638;
     end;
 end;
 
 function long_final_abstain_tree_26(
     const features: TncLongFinalAbstainFeatures): Double;
 begin
-    if features.ranker_top_score <= 108097173.50000001 then
+    if features.ranker_top_char_lm_gain <= -329.49999999999994 then
     begin
-        if features.ranker_third_score <= -374271341.99999994 then
+        if features.ranker_third_score <= -25506806.999999996 then
         begin
-            Result := 0.022056523493881829;
+            Result := 0.029677665574487599;
         end
         else
         begin
-            Result := -0.035187392433115229;
+            Result := -0.088556868142804529;
         end;
     end
     else
     begin
-        Result := 0.016143440746520278;
+        Result := -0.007059624252448285;
     end;
 end;
 
 function long_final_abstain_tree_27(
     const features: TncLongFinalAbstainFeatures): Double;
 begin
-    if features.input_syllable_count <= 16.500000000000004 then
+    if features.ranker_second_margin <= 27925720.000000004 then
     begin
-        if features.ranker_top_char_lm_score <= -4729.9999999999991 then
+        if features.ranker_second_margin <= 23370959.000000004 then
         begin
-            Result := 0.0074070134098219468;
+            Result := -0.00302131734258046;
         end
         else
         begin
-            Result := -0.026001987419517165;
+            Result := 0.036627149051157624;
         end;
     end
     else
     begin
-        Result := -0.046811122750546802;
+        Result := -0.011053347501604622;
     end;
 end;
 
 function long_final_abstain_tree_28(
     const features: TncLongFinalAbstainFeatures): Double;
 begin
-    if features.ranker_top_score <= 137227616.50000003 then
+    if features.legacy_top_char_lm_score <= -5416.4999999999991 then
     begin
-        if features.ranker_top_margin <= 22522965.000000004 then
+        if features.ranker_second_margin <= 19063832.500000004 then
         begin
-            Result := -0.028074682825903627;
+            Result := -0.062529677173525797;
         end
         else
         begin
-            Result := 0.010393672888989902;
+            Result := -0.0057890987693718764;
         end;
     end
     else
     begin
-        Result := 0.02474966907414514;
+        Result := 0.0065241018181491544;
     end;
 end;
 
 function long_final_abstain_tree_29(
     const features: TncLongFinalAbstainFeatures): Double;
 begin
-    if features.input_syllable_count <= 15.500000000000002 then
+    if features.ranker_top_char_lm_gain <= -450.49999999999994 then
     begin
-        if features.ranker_top_char_lm_gain <= -604.49999999999989 then
-        begin
-            Result := -0.021609599078860037;
-        end
-        else
-        begin
-            Result := 0.01032819894529767;
-        end;
+        Result := 0.032279168960140867;
     end
     else
     begin
-        Result := -0.0380762568434658;
+        if features.legacy_top_ranker_score <= 13386639.500000002 then
+        begin
+            Result := -0.0020663117988520981;
+        end
+        else
+        begin
+            Result := -0.064463024548012518;
+        end;
     end;
 end;
 
 function long_final_abstain_tree_30(
     const features: TncLongFinalAbstainFeatures): Double;
 begin
-    if features.input_syllable_count <= 16.500000000000004 then
+    if features.ranker_top_margin <= 18994988.500000004 then
     begin
-        if features.ranker_top_char_lm_score <= -4729.9999999999991 then
+        if features.ranker_top_margin <= 18367540.500000004 then
         begin
-            Result := 0.007891622622916112;
+            Result := -0.0043198932954191171;
         end
         else
         begin
-            Result := -0.025406724089487822;
+            Result := -0.077160896289541162;
         end;
     end
     else
     begin
-        Result := -0.042804064525005521;
+        Result := 0.01205819139226133;
     end;
 end;
 
 function long_final_abstain_tree_31(
     const features: TncLongFinalAbstainFeatures): Double;
 begin
-    if features.ranker_top_score <= 108097173.50000001 then
+    if features.legacy_top_char_lm_score <= -4952.9999999999991 then
     begin
-        if features.ranker_second_score <= 61071288.500000007 then
-        begin
-            Result := -0.0050114637572138141;
-        end
-        else
-        begin
-            Result := -0.06569063388814414;
-        end;
+        Result := -0.010225644016030934;
     end
     else
     begin
-        Result := 0.017581621933444362;
+        if features.ranker_top_char_lm_gain <= -214.49999999999997 then
+        begin
+            Result := 0.036279309548835209;
+        end
+        else
+        begin
+            Result := 0.00010921715668177872;
+        end;
     end;
 end;
 
 function long_final_abstain_tree_32(
     const features: TncLongFinalAbstainFeatures): Double;
 begin
-    if features.ranker_second_score <= 34345818.000000007 then
+    if features.ranker_top_char_lm_gain <= -498.49999999999994 then
     begin
-        Result := -0.024651009210287841;
+        Result := 0.037748459613451052;
     end
     else
     begin
-        if features.ranker_top_margin <= 18254850.000000004 then
+        if features.ranker_top_margin <= 13479699.000000002 then
         begin
-            Result := -0.01021943399416135;
+            Result := -0.021630986030126219;
         end
         else
         begin
-            Result := 0.022372257691589775;
+            Result := 0.0031341689768896674;
         end;
     end;
 end;
@@ -721,99 +721,99 @@ end;
 function long_final_abstain_tree_33(
     const features: TncLongFinalAbstainFeatures): Double;
 begin
-    if features.input_syllable_count <= 16.500000000000004 then
+    if features.ranker_score_range <= 52369635.000000007 then
     begin
-        if features.input_syllable_count <= 11.500000000000002 then
+        if features.input_syllable_count <= 13.500000000000002 then
         begin
-            Result := -0.0057968849919631405;
+            Result := -0.012529845118529536;
         end
         else
         begin
-            Result := 0.01967587600448021;
+            Result := 0.012019980697157866;
         end;
     end
     else
     begin
-        Result := -0.041697871216527904;
+        Result := 0.038197672284646128;
     end;
 end;
 
 function long_final_abstain_tree_34(
     const features: TncLongFinalAbstainFeatures): Double;
 begin
-    if features.input_syllable_count <= 16.500000000000004 then
+    if features.ranker_top_over_legacy_margin <= 13405201.000000002 then
     begin
-        if features.ranker_second_margin <= 339852702.50000006 then
-        begin
-            Result := 0.018840424707709864;
-        end
-        else
-        begin
-            Result := -0.0068676485948231947;
-        end;
+        Result := -0.019249490666993902;
     end
     else
     begin
-        Result := -0.039171602442221426;
+        if features.ranker_second_score <= 2876163.5000000005 then
+        begin
+            Result := 0.0029394973239688432;
+        end
+        else
+        begin
+            Result := 0.05014572966875127;
+        end;
     end;
 end;
 
 function long_final_abstain_tree_35(
     const features: TncLongFinalAbstainFeatures): Double;
 begin
-    if features.ranker_second_score <= 81017015.000000015 then
+    if features.ranker_top_char_lm_gain <= -305.49999999999994 then
     begin
-        Result := -0.012126317685925177;
-    end
-    else
-    begin
-        if features.ranker_top_score <= 108097173.50000001 then
+        if features.legacy_top_char_lm_score <= -5556.4999999999991 then
         begin
-            Result := -0.037969328745511934;
+            Result := -0.0056493906459490085;
         end
         else
         begin
-            Result := 0.029692461072479276;
+            Result := 0.042645568861969296;
         end;
+    end
+    else
+    begin
+        Result := -0.0072611747222548753;
     end;
 end;
 
 function long_final_abstain_tree_36(
     const features: TncLongFinalAbstainFeatures): Double;
 begin
-    if features.input_syllable_count <= 16.500000000000004 then
+    if features.ranker_top_score <= 20729264.000000004 then
     begin
-        if features.ranker_top_char_lm_score <= -4729.9999999999991 then
+        if features.ranker_top_score <= 19739420.500000004 then
         begin
-            Result := 0.0077826592111435566;
+            Result := 0.0;
         end
         else
         begin
-            Result := -0.038384340807282535;
+            Result := -0.033224702751736265;
         end;
     end
     else
     begin
-        Result := -0.038335594434789295;
+        Result := 0.019439105017907608;
     end;
 end;
 
 function long_final_abstain_tree_37(
     const features: TncLongFinalAbstainFeatures): Double;
 begin
-    if features.ranker_top_char_lm_score <= -6861.4999999999991 then
+    if features.ranker_top_char_lm_gain <= -498.49999999999994 then
     begin
-        Result := 0.021531390333787141;
+        Result := 0.036554046680874037;
     end
     else
     begin
-        if features.input_syllable_count <= 15.500000000000002 then
+        if features.legacy_top_char_lm_score <= -6851.9999999999991 then
         begin
-            Result := -0.00064977875578106962;
+            Result := 0.047185865645063892;
         end
         else
         begin
-            Result := -0.054119711015943477;
+            Result := -0.0044153069251322077;
         end;
     end;
 end;
@@ -821,199 +821,199 @@ end;
 function long_final_abstain_tree_38(
     const features: TncLongFinalAbstainFeatures): Double;
 begin
-    if features.ranker_second_score <= 34345818.000000007 then
+    if features.ranker_top_char_lm_gain <= -305.49999999999994 then
     begin
-        Result := -0.028437057521266951;
-    end
-    else
-    begin
-        if features.ranker_top_margin <= 18254850.000000004 then
+        if features.ranker_third_score <= -25506806.999999996 then
         begin
-            Result := -0.011402940536217909;
+            Result := 0.025412382828776822;
         end
         else
         begin
-            Result := 0.019664997819139093;
+            Result := -0.07410784560992241;
         end;
+    end
+    else
+    begin
+        Result := -0.0077435338961038;
     end;
 end;
 
 function long_final_abstain_tree_39(
     const features: TncLongFinalAbstainFeatures): Double;
 begin
-    if features.ranker_top_char_lm_gain <= -604.49999999999989 then
+    if features.ranker_top_char_lm_gain <= -329.49999999999994 then
     begin
-        if features.ranker_top_score <= 72004342.000000015 then
-        begin
-            Result := 0.016470374085641427;
-        end
-        else
-        begin
-            Result := -0.066698948246961431;
-        end;
+        Result := 0.023770779953473632;
     end
     else
     begin
-        Result := 0.0033015323529092576;
+        if features.ranker_second_score <= -9697500.9999999981 then
+        begin
+            Result := -0.036120781281280427;
+        end
+        else
+        begin
+            Result := 0.0013369892686893173;
+        end;
     end;
 end;
 
 function long_final_abstain_tree_40(
     const features: TncLongFinalAbstainFeatures): Double;
 begin
-    if features.ranker_top_margin <= 22522965.000000004 then
+    if features.ranker_second_score <= -9697500.9999999981 then
     begin
-        if features.ranker_top_margin <= 5431110.0000000009 then
-        begin
-            Result := 0.011937099223313697;
-        end
-        else
-        begin
-            Result := -0.049226980036050742;
-        end;
+        Result := -0.02111344361196359;
     end
     else
     begin
-        Result := 0.013560189993100475;
+        if features.ranker_top_over_legacy_margin <= 19038467.000000004 then
+        begin
+            Result := -0.0072206558958481503;
+        end
+        else
+        begin
+            Result := 0.02761819406555158;
+        end;
     end;
 end;
 
 function long_final_abstain_tree_41(
     const features: TncLongFinalAbstainFeatures): Double;
 begin
-    if features.ranker_top_char_lm_score <= -6649.9999999999991 then
+    if features.legacy_top_ranker_score <= -1013069.4999999999 then
     begin
-        if features.ranker_top_score <= 108097173.50000001 then
+        if features.ranker_second_score <= -8021759.9999999991 then
         begin
-            Result := -0.026120026110705893;
+            Result := -0.0029410237033498875;
         end
         else
         begin
-            Result := 0.041446595486552766;
+            Result := 0.038554982049132089;
         end;
     end
     else
     begin
-        Result := -0.0090339618011176966;
+        Result := -0.0069246272608218997;
     end;
 end;
 
 function long_final_abstain_tree_42(
     const features: TncLongFinalAbstainFeatures): Double;
 begin
-    if features.ranker_top_char_lm_gain <= -604.49999999999989 then
+    if features.ranker_score_range <= 45779446.000000007 then
     begin
-        if features.ranker_top_char_lm_score <= -5549.9999999999991 then
-        begin
-            Result := -0.053301888955496056;
-        end
-        else
-        begin
-            Result := 0.007821553276892353;
-        end;
+        Result := -0.025590768368202114;
     end
     else
     begin
-        Result := 0.0075071056860807495;
+        if features.ranker_score_range <= 47957458.500000007 then
+        begin
+            Result := 0.040330978916288868;
+        end
+        else
+        begin
+            Result := -0.0013576136425487461;
+        end;
     end;
 end;
 
 function long_final_abstain_tree_43(
     const features: TncLongFinalAbstainFeatures): Double;
 begin
-    if features.ranker_third_score <= -374271341.99999994 then
+    if features.ranker_third_score <= -17722485.999999996 then
     begin
-        Result := 0.015701266301818124;
-    end
-    else
-    begin
-        if features.input_syllable_count <= 15.500000000000002 then
+        if features.ranker_top_char_lm_gain <= -445.49999999999994 then
         begin
-            Result := 0.0022803570153567439;
+            Result := 0.030391436169691623;
         end
         else
         begin
-            Result := -0.076101797135223984;
+            Result := -0.0042636060359879501;
         end;
+    end
+    else
+    begin
+        Result := -0.05663427063861301;
     end;
 end;
 
 function long_final_abstain_tree_44(
     const features: TncLongFinalAbstainFeatures): Double;
 begin
-    if features.ranker_top_char_lm_gain <= -604.49999999999989 then
+    if features.ranker_top_over_legacy_margin <= 19957137.500000004 then
     begin
-        if features.ranker_top_score <= 72004342.000000015 then
+        if features.chain_count <= 2.5000000000000004 then
         begin
-            Result := 0.01014774218605145;
+            Result := -0.0043289767274384029;
         end
         else
         begin
-            Result := -0.057374341262840994;
+            Result := -0.067062725207656521;
         end;
     end
     else
     begin
-        Result := 0.0084940035091032023;
+        Result := 0.0098428021760176045;
     end;
 end;
 
 function long_final_abstain_tree_45(
     const features: TncLongFinalAbstainFeatures): Double;
 begin
-    if features.ranker_top_char_lm_gain <= -568.99999999999989 then
+    if features.ranker_top_char_lm_score <= -4598.9999999999991 then
     begin
-        Result := -0.021181817509955302;
-    end
-    else
-    begin
-        if features.ranker_second_score <= 34345818.000000007 then
+        if features.legacy_top_chain_rank <= 3.5000000000000004 then
         begin
-            Result := -0.026329146944231444;
+            Result := -0.0043618405275759635;
         end
         else
         begin
-            Result := 0.01502041373913723;
+            Result := -0.081142403564165036;
         end;
+    end
+    else
+    begin
+        Result := 0.021092613839305181;
     end;
 end;
 
 function long_final_abstain_tree_46(
     const features: TncLongFinalAbstainFeatures): Double;
 begin
-    if features.ranker_second_score <= 81017015.000000015 then
+    if features.legacy_top_char_lm_score <= -4938.4999999999991 then
     begin
-        if features.legacy_top_char_lm_score <= -5286.9999999999991 then
+        if features.legacy_top_char_lm_score <= -5097.4999999999991 then
         begin
-            Result := 0.0070420538177353512;
+            Result := 0.00048161788476813283;
         end
         else
         begin
-            Result := -0.042562276303782356;
+            Result := -0.04626885706558273;
         end;
     end
     else
     begin
-        Result := 0.012545551747073938;
+        Result := 0.019522210490807938;
     end;
 end;
 
 function long_final_abstain_tree_47(
     const features: TncLongFinalAbstainFeatures): Double;
 begin
-    if features.input_syllable_count <= 14.500000000000002 then
+    if features.input_syllable_count <= 13.500000000000002 then
     begin
-        Result := 0.0055753828963486501;
+        Result := -0.0072085301113269194;
     end
     else
     begin
-        if features.ranker_second_margin <= 440690692.50000006 then
+        if features.legacy_top_ranker_score <= 2635485.5000000005 then
         begin
-            Result := -0.052900739890080609;
+            Result := 0.030017206987568774;
         end
         else
         begin
-            Result := 0.020437779662530086;
+            Result := -0.015954564170521816;
         end;
     end;
 end;
@@ -1021,240 +1021,240 @@ end;
 function long_final_abstain_tree_48(
     const features: TncLongFinalAbstainFeatures): Double;
 begin
-    if features.ranker_top_margin <= 22522965.000000004 then
+    if features.ranker_top_char_lm_gain <= -329.49999999999994 then
     begin
-        if features.ranker_top_margin <= 5431110.0000000009 then
+        if features.chain_count <= 2.5000000000000004 then
         begin
-            Result := 0.013618400082153537;
+            Result := 0.030063650564917423;
         end
         else
         begin
-            Result := -0.034806755038311252;
+            Result := -0.075167831211110772;
         end;
     end
     else
     begin
-        Result := 0.010244222094824671;
+        Result := -0.0050075132407905601;
     end;
 end;
 
 function long_final_abstain_tree_49(
     const features: TncLongFinalAbstainFeatures): Double;
 begin
-    if features.ranker_top_char_lm_score <= -4729.9999999999991 then
+    if features.ranker_top_char_lm_gain <= -329.49999999999994 then
     begin
-        if features.input_syllable_count <= 14.500000000000002 then
+        if features.ranker_third_score <= -23668188.499999996 then
         begin
-            Result := 0.012715892218419043;
+            Result := 0.025383120488363286;
         end
         else
         begin
-            Result := -0.015436124224261206;
+            Result := -0.10067797567193094;
         end;
     end
     else
     begin
-        Result := -0.024739652690349265;
+        Result := -0.0083192314682903994;
     end;
 end;
 
 function long_final_abstain_tree_50(
     const features: TncLongFinalAbstainFeatures): Double;
 begin
-    if features.ranker_top_char_lm_score <= -4729.9999999999991 then
+    if features.legacy_top_char_lm_score <= -4911.9999999999991 then
     begin
-        if features.ranker_third_score <= -374271341.99999994 then
+        if features.ranker_second_margin <= 19210565.500000004 then
         begin
-            Result := 0.02360905879408581;
+            Result := -0.041407402721517599;
         end
         else
         begin
-            Result := -0.0050087884857630358;
+            Result := -0.0027047736510445765;
         end;
     end
     else
     begin
-        Result := -0.036151485925650741;
+        Result := 0.014557532085775444;
     end;
 end;
 
 function long_final_abstain_tree_51(
     const features: TncLongFinalAbstainFeatures): Double;
 begin
-    if features.ranker_top_char_lm_gain <= -604.49999999999989 then
+    if features.legacy_top_ranker_score <= -14083075.499999998 then
     begin
-        if features.ranker_top_score <= 72004342.000000015 then
-        begin
-            Result := 0.010312720967157126;
-        end
-        else
-        begin
-            Result := -0.05754918159071705;
-        end;
+        Result := 0.047181254659487082;
     end
     else
     begin
-        Result := 0.0056517254228872224;
+        if features.ranker_second_score <= -9697500.9999999981 then
+        begin
+            Result := -0.034941546820662694;
+        end
+        else
+        begin
+            Result := 0.0034995871174234973;
+        end;
     end;
 end;
 
 function long_final_abstain_tree_52(
     const features: TncLongFinalAbstainFeatures): Double;
 begin
-    if features.ranker_second_score <= 34345818.000000007 then
+    if features.ranker_second_margin <= 28092734.500000004 then
     begin
-        Result := -0.032654596665393526;
-    end
-    else
-    begin
-        if features.ranker_top_margin <= 18254850.000000004 then
+        if features.ranker_second_score <= -9697500.9999999981 then
         begin
-            Result := -0.01291801347149882;
+            Result := -0.014658098047051808;
         end
         else
         begin
-            Result := 0.019304986341071018;
+            Result := 0.024480709572280841;
         end;
+    end
+    else
+    begin
+        Result := -0.0102792980971515;
     end;
 end;
 
 function long_final_abstain_tree_53(
     const features: TncLongFinalAbstainFeatures): Double;
 begin
-    if features.ranker_second_score <= 126526156.00000001 then
+    if features.ranker_top_char_lm_score <= -7113.9999999999991 then
     begin
-        if features.ranker_top_margin <= 22522965.000000004 then
-        begin
-            Result := -0.020491509524215617;
-        end
-        else
-        begin
-            Result := 0.0047532695189364382;
-        end;
+        Result := 0.045773356297854263;
     end
     else
     begin
-        Result := 0.043702615010470014;
+        if features.ranker_top_char_lm_score <= -6784.9999999999991 then
+        begin
+            Result := -0.068450280828140628;
+        end
+        else
+        begin
+            Result := -6.5375570683510583E-05;
+        end;
     end;
 end;
 
 function long_final_abstain_tree_54(
     const features: TncLongFinalAbstainFeatures): Double;
 begin
-    if features.ranker_top_char_lm_score <= -5029.9999999999991 then
+    if features.ranker_top_char_lm_gain <= -329.49999999999994 then
     begin
-        if features.input_syllable_count <= 14.500000000000002 then
+        if features.ranker_third_score <= -23668188.499999996 then
         begin
-            Result := 0.014983051944974339;
+            Result := 0.032012734020748911;
         end
         else
         begin
-            Result := -0.02637671084978227;
+            Result := -0.092233999693562455;
         end;
     end
     else
     begin
-        Result := -0.030313928494892967;
+        Result := -0.0040407706615544223;
     end;
 end;
 
 function long_final_abstain_tree_55(
     const features: TncLongFinalAbstainFeatures): Double;
 begin
-    if features.input_syllable_count <= 16.500000000000004 then
+    if features.ranker_top_char_lm_gain <= -498.49999999999994 then
     begin
-        if features.input_syllable_count <= 12.500000000000002 then
-        begin
-            Result := -0.0058778256196200121;
-        end
-        else
-        begin
-            Result := 0.020265899344949566;
-        end;
+        Result := 0.033849673144857546;
     end
     else
     begin
-        Result := -0.031813322970793353;
+        if features.ranker_second_score <= 13386639.500000002 then
+        begin
+            Result := -0.0021513416619084696;
+        end
+        else
+        begin
+            Result := -0.05338436604146389;
+        end;
     end;
 end;
 
 function long_final_abstain_tree_56(
     const features: TncLongFinalAbstainFeatures): Double;
 begin
-    if features.ranker_second_score <= 81017015.000000015 then
+    if features.ranker_top_char_lm_gain <= -450.49999999999994 then
     begin
-        if features.legacy_top_char_lm_score <= -5286.9999999999991 then
-        begin
-            Result := 0.0061389788216653189;
-        end
-        else
-        begin
-            Result := -0.041113201599554429;
-        end;
+        Result := 0.027067350197015255;
     end
     else
     begin
-        Result := 0.013789304134522198;
+        if features.ranker_top_score <= 14466785.500000002 then
+        begin
+            Result := -0.025390218897828727;
+        end
+        else
+        begin
+            Result := -0.00072387065395796031;
+        end;
     end;
 end;
 
 function long_final_abstain_tree_57(
     const features: TncLongFinalAbstainFeatures): Double;
 begin
-    if features.ranker_top_char_lm_score <= -6649.9999999999991 then
+    if features.ranker_top_char_lm_gain <= -305.49999999999994 then
     begin
-        Result := 0.024802678821365741;
-    end
-    else
-    begin
-        if features.ranker_top_char_lm_score <= -6373.4999999999991 then
+        if features.ranker_third_score <= -23668188.499999996 then
         begin
-            Result := -0.055029417286192234;
+            Result := 0.025136945196787872;
         end
         else
         begin
-            Result := 0.0034681465611152112;
+            Result := -0.088263406431772995;
         end;
+    end
+    else
+    begin
+        Result := -0.0043785900706745165;
     end;
 end;
 
 function long_final_abstain_tree_58(
     const features: TncLongFinalAbstainFeatures): Double;
 begin
-    if features.ranker_second_score <= 81017015.000000015 then
+    if features.legacy_top_char_lm_score <= -4569.4999999999991 then
     begin
-        if features.legacy_top_char_lm_score <= -5286.9999999999991 then
-        begin
-            Result := 0.0055772965401517816;
-        end
-        else
-        begin
-            Result := -0.051845760146035438;
-        end;
+        Result := -0.0064056382096254957;
     end
     else
     begin
-        Result := 0.011134541803838088;
+        if features.ranker_second_score <= 8063557.5000000009 then
+        begin
+            Result := 0.025472840968377448;
+        end
+        else
+        begin
+            Result := -0.02988399864182615;
+        end;
     end;
 end;
 
 function long_final_abstain_tree_59(
     const features: TncLongFinalAbstainFeatures): Double;
 begin
-    if features.ranker_top_score <= 108097173.50000001 then
+    if features.ranker_second_score <= -9697500.9999999981 then
     begin
-        if features.ranker_second_score <= 77150933.000000015 then
+        if features.legacy_top_char_lm_score <= -5393.4999999999991 then
         begin
-            Result := 0.0027410493498755528;
+            Result := -0.052042756171719731;
         end
         else
         begin
-            Result := -0.075487311540765475;
+            Result := 0.0046691071915477512;
         end;
     end
     else
     begin
-        Result := 0.012551996560214183;
+        Result := 0.0066730754913277368;
     end;
 end;
 function long_final_abstain_score(
