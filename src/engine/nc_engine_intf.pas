@@ -385,6 +385,7 @@ type
         m_lookup_long_path_structure_cache: TDictionary<string, TncLongPathStructureCacheValue>;
         m_lookup_exact_lexical_feature_cache: TDictionary<string, TncExactLexicalFeatureCacheValue>;
         m_lookup_display_feature_cache: TDictionary<string, Integer>;
+        m_lookup_admin_place_alias_cache: TDictionary<string, Boolean>;
         m_full_pinyin_key_cache: TDictionary<string, Boolean>;
         m_effective_pinyin_parse_cache: TDictionary<string, TncPinyinParseResult>;
         m_build_lookup_cache: TDictionary<string, TncCandidateList>;
@@ -558,6 +559,8 @@ type
         function get_rank_score(const candidate: TncCandidate): Integer;
         procedure sort_candidates(var candidates: TncCandidateList);
         procedure clear_lookup_bonus_caches;
+        function is_low_evidence_admin_place_alias_cached(
+            const pinyin: string; const text: string): Boolean;
         function get_cached_char_lm_scores(const texts: TArray<string>;
             out scores: TArray<Integer>; const score_mode: TncCharLmScoreMode;
             const left_context: string): Boolean;
@@ -1004,6 +1007,7 @@ begin
     m_lookup_exact_lexical_feature_cache :=
         TDictionary<string, TncExactLexicalFeatureCacheValue>.Create;
     m_lookup_display_feature_cache := TDictionary<string, Integer>.Create;
+    m_lookup_admin_place_alias_cache := TDictionary<string, Boolean>.Create;
     m_full_pinyin_key_cache := TDictionary<string, Boolean>.Create;
     m_effective_pinyin_parse_cache :=
         TDictionary<string, TncPinyinParseResult>.Create;
@@ -1261,6 +1265,11 @@ begin
         m_lookup_display_feature_cache.Free;
         m_lookup_display_feature_cache := nil;
     end;
+    if m_lookup_admin_place_alias_cache <> nil then
+    begin
+        m_lookup_admin_place_alias_cache.Free;
+        m_lookup_admin_place_alias_cache := nil;
+    end;
     if m_full_pinyin_key_cache <> nil then
     begin
         m_full_pinyin_key_cache.Free;
@@ -1424,6 +1433,36 @@ begin
     if m_lookup_display_feature_cache <> nil then
     begin
         m_lookup_display_feature_cache.Clear;
+    end;
+    if m_lookup_admin_place_alias_cache <> nil then
+    begin
+        m_lookup_admin_place_alias_cache.Clear;
+    end;
+end;
+
+function TncEngine.is_low_evidence_admin_place_alias_cached(
+    const pinyin: string; const text: string): Boolean;
+var
+    cache_key: string;
+begin
+    Result := False;
+    if (m_dictionary = nil) or (pinyin = '') or (text = '') then
+    begin
+        Exit;
+    end;
+
+    cache_key := normalize_pinyin_text(pinyin) + #1 + Trim(text);
+    if (m_lookup_admin_place_alias_cache <> nil) and
+        m_lookup_admin_place_alias_cache.TryGetValue(cache_key, Result) then
+    begin
+        Exit;
+    end;
+
+    Result := m_dictionary.is_low_evidence_admin_place_alias_user_entry(
+        pinyin, text, '', 0, 0);
+    if m_lookup_admin_place_alias_cache <> nil then
+    begin
+        m_lookup_admin_place_alias_cache.AddOrSetValue(cache_key, Result);
     end;
 end;
 
@@ -4036,7 +4075,8 @@ var
 
         Inc(lookup_cache_misses);
         phase_tick := GetTickCount64;
-        if not m_dictionary.lookup_exact_full_pinyin(pinyin_key, out_results) then
+        if not m_dictionary.lookup_exact_full_pinyin(pinyin_key,
+            out_results) then
         begin
             SetLength(out_results, 0);
         end;
@@ -7621,8 +7661,8 @@ var
 
             if latest_from_dictionary_local and (not latest_from_session_local) and
                 (m_dictionary <> nil) and
-                m_dictionary.is_low_evidence_admin_place_alias_user_entry(
-                normalized_query_local, learned_text_local, '', 0, 0) then
+                is_low_evidence_admin_place_alias_cached(
+                normalized_query_local, learned_text_local) then
             begin
                 Exit;
             end;
@@ -15655,8 +15695,8 @@ var
             Exit;
         end;
         if (m_dictionary <> nil) and
-            m_dictionary.is_low_evidence_admin_place_alias_user_entry(
-            lookup_text, Trim(resolved_text_local), '', 0, 0) then
+            is_low_evidence_admin_place_alias_cached(
+            lookup_text, Trim(resolved_text_local)) then
         begin
             Exit;
         end;
@@ -18114,8 +18154,8 @@ var
             (get_candidate_text_unit_count(out_text) = input_syllable_count) and
             (get_candidate_text_unit_count(out_text) <= 4);
         if Result and (not latest_from_session_local) and (m_dictionary <> nil) and
-            m_dictionary.is_low_evidence_admin_place_alias_user_entry(
-            normalized_query_local, out_text, '', 0, 0) then
+            is_low_evidence_admin_place_alias_cached(
+            normalized_query_local, out_text) then
         begin
             Result := False;
         end;
@@ -83140,10 +83180,18 @@ var
     procedure sort_candidates_timed(var candidates: TncCandidateList);
     var
         phase_start_tick: UInt64;
+        elapsed_ms_local: UInt64;
     begin
         phase_start_tick := GetTickCount64;
         sort_candidates(candidates);
-        Inc(sort_elapsed_ms, Int64(GetTickCount64 - phase_start_tick));
+        elapsed_ms_local := GetTickCount64 - phase_start_tick;
+        Inc(sort_elapsed_ms, Int64(elapsed_ms_local));
+        if m_config.debug_mode then
+        begin
+            m_last_full_path_debug_info := m_last_full_path_debug_info +
+                Format(' sort=[n=%d ms=%d]',
+                [Length(candidates), elapsed_ms_local]);
+        end;
     end;
 
     procedure note_post_phase_elapsed(const phase_start_tick: UInt64);
@@ -102666,8 +102714,11 @@ var
                 Exit(True);
             end;
 
+            // Broad lookup only adds prefix/prediction candidates here. For
+            // longer path spans an exact miss cannot produce a usable phrase.
             if dictionary_exact_lookup_cached(local_key, local_results) or
-                dictionary_lookup_cached(local_key, local_results) then
+                ((local_len <= 2) and
+                dictionary_lookup_cached(local_key, local_results)) then
             begin
                 for local_idx := 0 to High(local_results) do
                 begin
@@ -102936,11 +102987,14 @@ var
                 Result := False;
                 out_span_text := '';
                 out_span_score := 0;
+                // Keep the broad fallback for one/two-syllable spans only;
+                // longer full-pinyin spans must be backed by an exact entry.
                 if (local_query_key = '') or
                     ((not dictionary_exact_lookup_cached(local_query_key,
                     local_results)) and
+                    ((local_unit_count >= 3) or
                     (not dictionary_lookup_cached(local_query_key,
-                    local_results))) then
+                    local_results)))) then
                 begin
                     Exit;
                 end;
@@ -103353,8 +103407,14 @@ var
                 consider_prefix_candidate_local(out_candidate, 1600);
             end;
 
-            if not dictionary_lookup_cached(prefix_key_local,
-                prefix_results_local) then
+            // Long prefix phrases are exact-only. Running the generic lookup
+            // after an exact miss repeats expensive prediction work.
+            if ((prefix_count_local >= 3) and
+                (not dictionary_exact_lookup_cached(prefix_key_local,
+                prefix_results_local))) or
+                ((prefix_count_local <= 2) and
+                (not dictionary_lookup_cached(prefix_key_local,
+                prefix_results_local))) then
             begin
                 Continue;
             end;
@@ -103531,10 +103591,17 @@ var
 
             SetLength(local_results, 0);
             local_lookup_top_text := '';
-            if dictionary_exact_lookup_cached(local_key, local_lookup_results) then
+            if dictionary_exact_lookup_cached(local_key,
+                local_lookup_results) then
             begin
                 local_results := merge_candidate_lists(local_results,
                     local_lookup_results, 0);
+            end;
+            // A broad lookup remains useful for short spans, but not for a
+            // three-or-more-syllable exact miss in a dictionary-only path.
+            if (Length(local_results) = 0) and (local_len >= 3) then
+            begin
+                Exit;
             end;
             if dictionary_lookup_cached(local_key, local_lookup_results) then
             begin
@@ -103917,8 +103984,9 @@ var
         end;
 
         if not (dictionary_exact_lookup_cached(prefix_key_local,
-            prefix_candidates_local) or dictionary_lookup_cached(
-            prefix_key_local, prefix_candidates_local)) then
+            prefix_candidates_local) or
+            dictionary_lookup_cached(prefix_key_local,
+            prefix_candidates_local)) then
         begin
             Exit;
         end;
@@ -112343,8 +112411,8 @@ var
         begin
             Result := (m_dictionary <> nil) and (lookup_text <> '') and
                 (Trim(candidate.comment) = '') and
-                m_dictionary.is_low_evidence_admin_place_alias_user_entry(
-                lookup_text, Trim(candidate.text), '', 0, 0);
+                is_low_evidence_admin_place_alias_cached(
+                lookup_text, Trim(candidate.text));
         end;
     begin
         if (Length(candidates) <= 1) or
@@ -121397,15 +121465,37 @@ var
         exact_weight_local: Integer;
         candidate_weight_local: Integer;
         competing_weight_local: Integer;
+        exact_cache_key_local: string;
+        exact_lookup_ok_local: Boolean;
     begin
         Result := False;
         candidate_weight_local := -1;
         competing_weight_local := -1;
         if (m_dictionary = nil) or (m_last_lookup_key = '') or
             (not is_full_pinyin_key(m_last_lookup_key)) or
-            (Trim(candidate_text) = '') or
-            (not m_dictionary.lookup_exact_full_pinyin(m_last_lookup_key,
-            exact_results_local)) then
+            (Trim(candidate_text) = '') then
+        begin
+            Exit;
+        end;
+
+        exact_cache_key_local := '#exact#' + m_last_lookup_key;
+        exact_lookup_ok_local := (m_build_lookup_cache <> nil) and
+            m_build_lookup_cache.TryGetValue(exact_cache_key_local,
+            exact_results_local);
+        if not exact_lookup_ok_local then
+        begin
+            if not m_dictionary.lookup_exact_full_pinyin(m_last_lookup_key,
+                exact_results_local) then
+            begin
+                SetLength(exact_results_local, 0);
+            end;
+            if m_build_lookup_cache <> nil then
+            begin
+                m_build_lookup_cache.AddOrSetValue(exact_cache_key_local,
+                    Copy(exact_results_local, 0, Length(exact_results_local)));
+            end;
+        end;
+        if Length(exact_results_local) = 0 then
         begin
             Exit;
         end;
@@ -121454,9 +121544,14 @@ var
     end;
 begin
     key := build_session_query_choice_key(m_last_lookup_key, candidate_text);
+    if (key <> '') and (m_lookup_query_bonus_cache <> nil) and
+        m_lookup_query_bonus_cache.TryGetValue(key, Result) then
+    begin
+        Exit;
+    end;
     if (m_dictionary <> nil) and (m_last_lookup_key <> '') and
-        m_dictionary.is_low_evidence_admin_place_alias_user_entry(
-        m_last_lookup_key, candidate_text, '', 0, 0) then
+        is_low_evidence_admin_place_alias_cached(
+        m_last_lookup_key, candidate_text) then
     begin
         Result := 0;
         if (key <> '') and (m_lookup_query_bonus_cache <> nil) then
@@ -121476,18 +121571,13 @@ begin
         end;
         Exit;
     end;
-    if (key <> '') and (m_lookup_query_bonus_cache <> nil) and
-        m_lookup_query_bonus_cache.TryGetValue(key, Result) then
-    begin
-        Exit;
-    end;
-
     Result := 0;
     if (key = '') or (m_session_query_choice_counts = nil) then
     begin
         if (m_dictionary <> nil) and (m_last_lookup_key <> '') then
         begin
-            Result := m_dictionary.get_query_choice_bonus(m_last_lookup_key, candidate_text);
+            Result := m_dictionary.get_query_choice_bonus(m_last_lookup_key,
+                candidate_text);
             if (key <> '') and (m_lookup_query_bonus_cache <> nil) then
             begin
                 m_lookup_query_bonus_cache.AddOrSetValue(key, Result);
@@ -121499,7 +121589,8 @@ begin
     begin
         if m_dictionary <> nil then
         begin
-            Result := m_dictionary.get_query_choice_bonus(m_last_lookup_key, candidate_text);
+            Result := m_dictionary.get_query_choice_bonus(m_last_lookup_key,
+                candidate_text);
             if (key <> '') and (m_lookup_query_bonus_cache <> nil) then
             begin
                 m_lookup_query_bonus_cache.AddOrSetValue(key, Result);
@@ -124762,8 +124853,8 @@ begin
     Result := candidate.score;
     if (m_dictionary <> nil) and (m_last_lookup_key <> '') and
         (candidate.comment = '') and
-        m_dictionary.is_low_evidence_admin_place_alias_user_entry(
-        m_last_lookup_key, candidate.text, '', 0, 0) then
+        is_low_evidence_admin_place_alias_cached(
+        m_last_lookup_key, candidate.text) then
     begin
         Dec(Result, 3000);
     end;
@@ -125883,6 +125974,53 @@ const
             Result := string(Char($554A));
         end;
     end;
+    function dictionary_lookup_cached_for_sort(const pinyin_key: string;
+        const exact_only: Boolean; out out_results: TncCandidateList): Boolean;
+    var
+        cache_key: string;
+        cached_results: TncCandidateList;
+    begin
+        SetLength(out_results, 0);
+        if (m_dictionary = nil) or (pinyin_key = '') then
+        begin
+            Exit(False);
+        end;
+
+        if exact_only then
+        begin
+            cache_key := '#exact#' + pinyin_key;
+        end
+        else
+        begin
+            cache_key := '#lookup#' + pinyin_key;
+        end;
+        if (m_build_lookup_cache <> nil) and
+            m_build_lookup_cache.TryGetValue(cache_key, cached_results) then
+        begin
+            out_results := cached_results;
+            Exit(Length(out_results) > 0);
+        end;
+
+        if exact_only then
+        begin
+            Result := m_dictionary.lookup_exact_full_pinyin(pinyin_key,
+                out_results);
+        end
+        else
+        begin
+            Result := m_dictionary.lookup(pinyin_key, out_results);
+        end;
+        if not Result then
+        begin
+            SetLength(out_results, 0);
+        end;
+        if m_build_lookup_cache <> nil then
+        begin
+            m_build_lookup_cache.AddOrSetValue(cache_key,
+                Copy(out_results, 0, Length(out_results)));
+        end;
+        Result := Length(out_results) > 0;
+    end;
     procedure prepare_full_query_exact_text_weights;
     var
         exact_results: TncCandidateList;
@@ -125901,7 +126039,7 @@ const
         begin
             Exit;
         end;
-        if not m_dictionary.lookup_exact_full_pinyin(m_last_lookup_key,
+        if not dictionary_lookup_cached_for_sort(m_last_lookup_key, True,
             exact_results) then
         begin
             Exit;
@@ -126140,7 +126278,9 @@ const
         begin
             cache_map := TDictionary<string, Byte>.Create;
             weak_chain_preference_maps[syllable_index] := cache_map;
-            if (m_dictionary <> nil) and m_dictionary.lookup(Trim(weak_chain_query_syllables[syllable_index].text), results) then
+            if (m_dictionary <> nil) and dictionary_lookup_cached_for_sort(
+                Trim(weak_chain_query_syllables[syllable_index].text), False,
+                results) then
             begin
                 top_weight_value := 0;
                 single_char_rank := 0;
@@ -126364,7 +126504,8 @@ const
         end;
 
         if (m_dictionary = nil) or
-            (not m_dictionary.lookup(Trim(weak_chain_query_syllables[syllable_index].text),
+            (not dictionary_lookup_cached_for_sort(
+            Trim(weak_chain_query_syllables[syllable_index].text), False,
             local_results)) then
         begin
             Exit;
@@ -126458,7 +126599,8 @@ const
         known_cache[start_idx] := True;
         query_key := build_sort_query_key(start_idx, syllable_count_local);
         if (query_key = '') or (m_dictionary = nil) or
-            (not m_dictionary.lookup_exact_full_pinyin(query_key, local_results)) then
+            (not dictionary_lookup_cached_for_sort(query_key, True,
+            local_results)) then
         begin
             Exit;
         end;
@@ -126572,6 +126714,8 @@ const
         best_exact_two_weight: Integer;
         best_exact_three_text: string;
         best_exact_three_weight: Integer;
+        bridge_cache_key: string;
+        cached_bridge_adjustment: Integer;
         function try_get_best_exact_phrase_for_span_local(const start_idx: Integer;
             const span_len: Integer; out out_text: string;
             out out_weight: Integer): Boolean;
@@ -126607,6 +126751,14 @@ const
         if get_encoded_path_segment_count_local(encoded_path) <= 1 then
         begin
             Exit;
+        end;
+        bridge_cache_key := 'sortbridge' + #1 + m_last_lookup_key + #1 +
+            Trim(candidate.text) + #1 + encoded_path;
+        if (m_lookup_display_feature_cache <> nil) and
+            m_lookup_display_feature_cache.TryGetValue(bridge_cache_key,
+            cached_bridge_adjustment) then
+        begin
+            Exit(cached_bridge_adjustment);
         end;
 
         segment_parts := encoded_path.Split([c_segment_path_separator]);
@@ -126746,6 +126898,11 @@ const
                     end;
                 end;
             end;
+        end;
+        if m_lookup_display_feature_cache <> nil then
+        begin
+            m_lookup_display_feature_cache.AddOrSetValue(bridge_cache_key,
+                Result);
         end;
     end;
     function is_weighted_complete_phrase_candidate(const candidate: TncCandidate): Boolean;
@@ -127335,7 +127492,8 @@ begin
             begin
                 Inc(item.rank_score, c_demonstrative_head_friendly_partial_rank_bonus);
             end;
-            Inc(item.rank_score, get_sentence_path_bridge_adjustment(candidates[i]));
+            Inc(item.rank_score,
+                get_sentence_path_bridge_adjustment(candidates[i]));
             item.is_fixed_top_single_char := (fixed_top_single_char_text <> '') and
                 (item.candidate.comment = '') and (item.text_units = 1) and
                 (Trim(item.candidate.text) = fixed_top_single_char_text);
@@ -141281,8 +141439,8 @@ var
 
                 if local_direct_exact and (not local_exact_user) and
                     (m_dictionary <> nil) and
-                    m_dictionary.is_low_evidence_admin_place_alias_user_entry(
-                    normalized_pinyin, local_text, '', 0, 0) then
+                    is_low_evidence_admin_place_alias_cached(
+                    normalized_pinyin, local_text) then
                 begin
                     item.category := 4;
                     item.prefix_units := local_units;

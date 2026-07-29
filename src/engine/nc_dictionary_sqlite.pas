@@ -108,6 +108,8 @@ type
         m_normalized_base_entry_cache: TDictionary<string, Boolean>;
         m_explicit_user_entry_cache: TDictionary<string, Boolean>;
         m_literal_user_entry_cache: TDictionary<string, Boolean>;
+        m_admin_place_longer_prefix_cache: TDictionary<string, TArray<string>>;
+        m_admin_place_query_syllable_count_cache: TDictionary<string, Integer>;
         m_debug_mode: Boolean;
         m_last_lookup_debug_hint: string;
         m_short_lookup_cache_prewarmed: Boolean;
@@ -2170,6 +2172,10 @@ begin
     m_normalized_base_entry_cache := TDictionary<string, Boolean>.Create;
     m_explicit_user_entry_cache := TDictionary<string, Boolean>.Create;
     m_literal_user_entry_cache := TDictionary<string, Boolean>.Create;
+    m_admin_place_longer_prefix_cache :=
+        TDictionary<string, TArray<string>>.Create;
+    m_admin_place_query_syllable_count_cache :=
+        TDictionary<string, Integer>.Create;
     m_debug_mode := False;
     m_last_lookup_debug_hint := '';
     m_short_lookup_cache_prewarmed := False;
@@ -2338,6 +2344,16 @@ begin
     begin
         m_literal_user_entry_cache.Free;
         m_literal_user_entry_cache := nil;
+    end;
+    if m_admin_place_longer_prefix_cache <> nil then
+    begin
+        m_admin_place_longer_prefix_cache.Free;
+        m_admin_place_longer_prefix_cache := nil;
+    end;
+    if m_admin_place_query_syllable_count_cache <> nil then
+    begin
+        m_admin_place_query_syllable_count_cache.Free;
+        m_admin_place_query_syllable_count_cache := nil;
     end;
 
     inherited Destroy;
@@ -5158,6 +5174,7 @@ const
     user_stats_sql =
         'SELECT COALESCE(MAX(commit_count), 0) FROM dict_user_stats WHERE pinyin = ?1 AND text = ?2';
     c_probe_limit = 64;
+    c_prefix_cache_limit = 256;
 
     function is_administrative_place_suffix(const suffix_text: string): Boolean;
     begin
@@ -5206,8 +5223,14 @@ var
     candidate_prefix: string;
     candidate_suffix: string;
     query_syllable_count: Integer;
+    text_key_unit_count: Integer;
     effective_user_weight: Integer;
     effective_commit_count: Integer;
+    cached_prefix_rows: TArray<string>;
+    cached_prefix_row: string;
+    cached_prefix_row_count: Integer;
+    separator_pos: Integer;
+    potential_admin_alias: Boolean;
 
     function read_max_int_value(const sql_text: string): Integer;
     var
@@ -5265,64 +5288,125 @@ begin
     begin
         Exit;
     end;
-    if (not is_full_pinyin_key(pinyin_key)) or
-        normalized_base_entry_exists(pinyin_key, text_key) then
+    query_syllable_count := 0;
+    if (m_admin_place_query_syllable_count_cache = nil) or
+        (not m_admin_place_query_syllable_count_cache.TryGetValue(pinyin_key,
+        query_syllable_count)) then
     begin
-        Exit;
+        if is_full_pinyin_key(pinyin_key) then
+        begin
+            query_syllable_count :=
+                Length(split_full_pinyin_syllables(pinyin_key));
+        end;
+        if m_admin_place_query_syllable_count_cache <> nil then
+        begin
+            if m_admin_place_query_syllable_count_cache.Count >=
+                c_prefix_cache_limit then
+            begin
+                m_admin_place_query_syllable_count_cache.Clear;
+            end;
+            m_admin_place_query_syllable_count_cache.AddOrSetValue(pinyin_key,
+                query_syllable_count);
+        end;
     end;
-
-    query_syllable_count := Length(split_full_pinyin_syllables(pinyin_key));
     if query_syllable_count <= 0 then
     begin
         Exit;
     end;
+    text_key_unit_count := get_text_unit_count_local(text_key);
 
-    stmt := nil;
-    try
-        if not m_base_connection.prepare(base_longer_prefix_sql, stmt) then
-        begin
-            Exit;
-        end;
-        if (not m_base_connection.bind_text(stmt, 1, pinyin_key)) or
-            (not m_base_connection.bind_text(stmt, 2, build_prefix_upper_bound(pinyin_key))) or
-            (not m_base_connection.bind_int(stmt, 3, c_probe_limit)) then
-        begin
-            Exit;
-        end;
-
-        step_result := m_base_connection.step(stmt);
-        while step_result = SQLITE_ROW do
-        begin
-            candidate_pinyin := normalize_compact_pinyin_key(
-                m_base_connection.column_text(stmt, 0));
-            candidate_text := Trim(m_base_connection.column_text(stmt, 1));
-            if (candidate_pinyin <> pinyin_key) and
-                (Copy(candidate_pinyin, 1, Length(pinyin_key)) = pinyin_key) and
-                (Length(split_full_pinyin_syllables(candidate_pinyin)) >
-                query_syllable_count) and
-                (get_text_unit_count_local(candidate_text) >
-                get_text_unit_count_local(text_key)) then
+    if (m_admin_place_longer_prefix_cache = nil) or
+        (not m_admin_place_longer_prefix_cache.TryGetValue(pinyin_key,
+        cached_prefix_rows)) then
+    begin
+        SetLength(cached_prefix_rows, 0);
+        stmt := nil;
+        try
+            if not m_base_connection.prepare(base_longer_prefix_sql, stmt) then
             begin
-                candidate_prefix := copy_first_text_units(candidate_text,
-                    get_text_unit_count_local(text_key));
-                if candidate_prefix = text_key then
-                begin
-                    candidate_suffix := Copy(candidate_text,
-                        Length(candidate_prefix) + 1, MaxInt);
-                    if is_administrative_place_suffix(candidate_suffix) then
-                    begin
-                        Exit(True);
-                    end;
-                end;
+                Exit;
             end;
+            if (not m_base_connection.bind_text(stmt, 1, pinyin_key)) or
+                (not m_base_connection.bind_text(stmt, 2,
+                build_prefix_upper_bound(pinyin_key))) or
+                (not m_base_connection.bind_int(stmt, 3, c_probe_limit)) then
+            begin
+                Exit;
+            end;
+
             step_result := m_base_connection.step(stmt);
+            while step_result = SQLITE_ROW do
+            begin
+                candidate_pinyin := normalize_compact_pinyin_key(
+                    m_base_connection.column_text(stmt, 0));
+                candidate_text := Trim(m_base_connection.column_text(stmt, 1));
+                cached_prefix_row_count := Length(cached_prefix_rows);
+                SetLength(cached_prefix_rows, cached_prefix_row_count + 1);
+                cached_prefix_rows[cached_prefix_row_count] :=
+                    candidate_pinyin + #1 + candidate_text;
+                step_result := m_base_connection.step(stmt);
+            end;
+        finally
+            if stmt <> nil then
+            begin
+                m_base_connection.finalize(stmt);
+            end;
         end;
-    finally
-        if stmt <> nil then
+
+        if m_admin_place_longer_prefix_cache <> nil then
         begin
-            m_base_connection.finalize(stmt);
+            if m_admin_place_longer_prefix_cache.Count >= c_prefix_cache_limit then
+            begin
+                m_admin_place_longer_prefix_cache.Clear;
+            end;
+            m_admin_place_longer_prefix_cache.AddOrSetValue(pinyin_key,
+                cached_prefix_rows);
         end;
     end;
+
+    if Length(cached_prefix_rows) = 0 then
+    begin
+        Exit;
+    end;
+
+    potential_admin_alias := False;
+    for cached_prefix_row in cached_prefix_rows do
+    begin
+        separator_pos := Pos(#1, cached_prefix_row);
+        if separator_pos <= 0 then
+        begin
+            Continue;
+        end;
+        candidate_pinyin := Copy(cached_prefix_row, 1, separator_pos - 1);
+        candidate_text := Copy(cached_prefix_row, separator_pos + 1, MaxInt);
+        if (candidate_pinyin <> pinyin_key) and
+            (Copy(candidate_pinyin, 1, Length(pinyin_key)) = pinyin_key) and
+            (Copy(candidate_text, 1, Length(text_key)) = text_key) and
+            (get_text_unit_count_local(candidate_text) >
+            text_key_unit_count) and
+            (Length(split_full_pinyin_syllables(candidate_pinyin)) >
+            query_syllable_count) then
+        begin
+            candidate_prefix := copy_first_text_units(candidate_text,
+                text_key_unit_count);
+            if candidate_prefix = text_key then
+            begin
+                candidate_suffix := Copy(candidate_text,
+                    Length(candidate_prefix) + 1, MaxInt);
+                if is_administrative_place_suffix(candidate_suffix) then
+                begin
+                    potential_admin_alias := True;
+                    Break;
+                end;
+            end;
+        end;
+    end;
+    if (not potential_admin_alias) or
+        normalized_base_entry_exists(pinyin_key, text_key) then
+    begin
+        Exit;
+    end;
+    Result := True;
 end;
 
 function TncSqliteDictionary.get_contains_popularity_score(const token: string): Integer;
@@ -6770,6 +6854,14 @@ begin
     if m_literal_user_entry_cache <> nil then
     begin
         m_literal_user_entry_cache.Clear;
+    end;
+    if m_admin_place_longer_prefix_cache <> nil then
+    begin
+        m_admin_place_longer_prefix_cache.Clear;
+    end;
+    if m_admin_place_query_syllable_count_cache <> nil then
+    begin
+        m_admin_place_query_syllable_count_cache.Clear;
     end;
 end;
 
