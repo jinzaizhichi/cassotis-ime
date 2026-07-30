@@ -708,6 +708,10 @@ type
         property config: TncEngineConfig read m_config write update_config;
     end;
 
+function short_nocontext_large_weight_gap_blocks_promotion(
+    const baseline_weight: Integer; const challenger_weight: Integer;
+    const baseline_has_protected_name_shape: Boolean): Boolean;
+
 implementation
 
 uses
@@ -730,6 +734,19 @@ const
     c_long_sentence_exact_min_syllables = 3;
     c_long_sentence_complete_candidate_display_limit = 2;
     c_fast_repair_promote_margin = 6000;
+    c_short_nocontext_protected_baseline_min_weight = 1000;
+
+function short_nocontext_large_weight_gap_blocks_promotion(
+    const baseline_weight: Integer; const challenger_weight: Integer;
+    const baseline_has_protected_name_shape: Boolean): Boolean;
+begin
+    Result := baseline_has_protected_name_shape and
+        (baseline_weight >=
+        c_short_nocontext_protected_baseline_min_weight) and
+        (challenger_weight >= 0) and
+        (challenger_weight < baseline_weight) and
+        (Int64(challenger_weight) * 2 < Int64(baseline_weight));
+end;
 
 type
     TncSegmentPathState = record
@@ -9955,6 +9972,7 @@ var
             filter_explicit_apostrophe_output_complete_local(m_candidates);
             filter_user_completes_misaligned_with_relaxed_no_initial_tail_local(
                 m_candidates, filtered_misaligned_complete_count_local);
+            ensure_short_full_query_exact_cluster_visible(m_candidates);
             refresh_candidate_segment_paths;
             note_ranked_top_candidate;
             note_finalize_debug_elapsed_local('s2final', phase_start_tick);
@@ -10063,6 +10081,7 @@ var
         filter_explicit_apostrophe_output_complete_local(m_candidates);
         filter_user_completes_misaligned_with_relaxed_no_initial_tail_local(
             m_candidates, filtered_misaligned_complete_count_local);
+        ensure_short_full_query_exact_cluster_visible(m_candidates);
         if (Length(m_candidates) = 0) and has_multi_syllable_input and
             is_full_pinyin_key(lookup_text) and (input_syllable_count <= 6) then
         begin
@@ -32342,9 +32361,17 @@ var
     begin
         if (m_dictionary = nil) or (input_syllable_count < 2) or
             (input_syllable_count > 4) or
-            (not is_full_pinyin_key(lookup_text)) or
-            (not lookup_exact_full_pinyin_cached_local(lookup_text,
-            exact_results)) then
+            ((not has_explicit_apostrophe_input) and
+            (not is_full_pinyin_key(lookup_text))) then
+        begin
+            Exit;
+        end;
+        if has_explicit_apostrophe_input then
+        begin
+            exact_results := Copy(candidates, 0, Length(candidates));
+        end
+        else if not lookup_exact_full_pinyin_cached_local(lookup_text,
+            exact_results) then
         begin
             Exit;
         end;
@@ -139880,7 +139907,6 @@ var
 
         procedure apply_short_nocontext_reranker_local;
         const
-            c_protected_baseline_min_weight = 1000;
             c_weak_residual_score_margin = 20000000;
             c_weak_residual_min_full_lm_gain = 600;
         var
@@ -140025,6 +140051,27 @@ var
                 output_local.top_log_display_score := top_log_display_local;
             end;
 
+            function baseline_has_protected_name_shape_local(
+                const challenger_index_local: Integer): Boolean;
+            var
+                baseline_units_local: TArray<string>;
+                challenger_units_local: TArray<string>;
+            begin
+                Result := False;
+                if (challenger_index_local <= 0) or
+                    (challenger_index_local > High(candidate_texts_local)) then
+                begin
+                    Exit;
+                end;
+                baseline_units_local := split_text_units(candidate_texts_local[0]);
+                challenger_units_local := split_text_units(
+                    candidate_texts_local[challenger_index_local]);
+                Result := (Length(baseline_units_local) = 2) and
+                    (Length(challenger_units_local) = 2) and
+                    (baseline_units_local[0] = challenger_units_local[0]) and
+                    is_common_surname_text(baseline_units_local[0]);
+            end;
+
         begin
             short_nocontext_promoted_exact_text := '';
             short_nocontext_promoted_exact_lead := 0;
@@ -140140,11 +140187,22 @@ var
                 begin
                     Exit;
                 end;
+                { Without user or context evidence, preserve a decisive
+                  dictionary gap only when the baseline also has a same-surname
+                  two-character name shape. Raw weights alone remain too noisy
+                  to veto the residual model. }
+                if short_nocontext_large_weight_gap_blocks_promotion(
+                    candidate_weights_local[0],
+                    candidate_weights_local[best_idx_local],
+                    baseline_has_protected_name_shape_local(best_idx_local)) then
+                begin
+                    Exit;
+                end;
                 { A weak residual alone must not displace a high-confidence
                   base exact with a lower-weight candidate. Require an
                   independent full-text LM gain for that override. }
                 if (candidate_weights_local[0] >=
-                    c_protected_baseline_min_weight) and
+                    c_short_nocontext_protected_baseline_min_weight) and
                     (candidate_weights_local[best_idx_local] <
                     candidate_weights_local[0]) and
                     (best_score_local - c_short_nocontext_promotion_threshold <
@@ -147018,9 +147076,11 @@ var
 
     procedure insert_fixed_leading_tail_exact_completion_from_partial;
     const
-        c_probe_limit = 8;
+        c_default_probe_limit = 8;
+        c_long_probe_limit = 24;
     var
         idx: Integer;
+        probe_limit: Integer;
         duplicate_idx: Integer;
         result_idx: Integer;
         head_text: string;
@@ -147039,13 +147099,31 @@ var
         syllable_idx: Integer;
         expected_remaining_units: Integer;
         found_duplicate: Boolean;
+        inferred_path: string;
+        inferred_score: Integer;
+        inferred_segments: Integer;
+        best_repaired_text: string;
+        best_repaired_path: string;
+        best_repaired_candidate: TncCandidate;
+        best_inferred_score: Integer;
+        best_inferred_segments: Integer;
+        has_best_repair: Boolean;
     begin
         if (expected_units < 4) or (Length(syllables) <> expected_units) then
         begin
             Exit;
         end;
 
-        for idx := 0 to Min(c_probe_limit, High(m_candidates)) do
+        probe_limit := c_default_probe_limit;
+        if expected_units >= 5 then
+        begin
+            probe_limit := c_long_probe_limit;
+        end;
+        has_best_repair := False;
+        best_inferred_score := Low(Integer);
+        best_inferred_segments := MaxInt;
+
+        for idx := 0 to Min(probe_limit, High(m_candidates)) do
         begin
             head_text := Trim(m_candidates[idx].text);
             comment_key := normalize_pinyin_text(Trim(m_candidates[idx].comment));
@@ -147111,6 +147189,35 @@ var
 
                 repaired_text := head_text + first_tail_text +
                     remaining_tail_text;
+                if expected_units >= 5 then
+                begin
+                    inferred_path :=
+                        infer_segment_path_for_query_text_with_score(
+                        normalized_pinyin, repaired_text,
+                        inferred_score, inferred_segments, False);
+                    if inferred_path = '' then
+                    begin
+                        Continue;
+                    end;
+                    if (not has_best_repair) or
+                        (inferred_score > best_inferred_score) or
+                        ((inferred_score = best_inferred_score) and
+                        (inferred_segments < best_inferred_segments)) or
+                        ((inferred_score = best_inferred_score) and
+                        (inferred_segments = best_inferred_segments) and
+                        (m_candidates[idx].score >
+                        best_repaired_candidate.score)) then
+                    begin
+                        has_best_repair := True;
+                        best_inferred_score := inferred_score;
+                        best_inferred_segments := inferred_segments;
+                        best_repaired_text := repaired_text;
+                        best_repaired_path := inferred_path;
+                        best_repaired_candidate := m_candidates[idx];
+                    end;
+                    Continue;
+                end;
+
                 found_duplicate := False;
                 for duplicate_idx := 0 to High(m_candidates) do
                 begin
@@ -147142,6 +147249,30 @@ var
                 Exit;
             end;
         end;
+
+        if not has_best_repair then
+        begin
+            Exit;
+        end;
+        for duplicate_idx := 0 to High(m_candidates) do
+        begin
+            if SameText(Trim(m_candidates[duplicate_idx].text),
+                best_repaired_text) and
+                (Trim(m_candidates[duplicate_idx].comment) = '') then
+            begin
+                move_display_candidate_to_index(duplicate_idx, 0);
+                Exit;
+            end;
+        end;
+
+        repaired_candidate := best_repaired_candidate;
+        repaired_candidate.text := best_repaired_text;
+        repaired_candidate.comment := '';
+        repaired_candidate.source := cs_rule;
+        repaired_candidate.has_dict_weight := False;
+        repaired_candidate.dict_weight := 0;
+        Inc(repaired_candidate.score, 22000);
+        insert_display_candidate(repaired_candidate, best_repaired_path, 0);
     end;
 
     procedure insert_fixed_quantity_tail_candidate_from_partial;
