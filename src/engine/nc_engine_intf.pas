@@ -139879,6 +139879,10 @@ var
         end;
 
         procedure apply_short_nocontext_reranker_local;
+        const
+            c_protected_baseline_min_weight = 1000;
+            c_weak_residual_score_margin = 20000000;
+            c_weak_residual_min_full_lm_gain = 600;
         var
             context_value_local: string;
             candidate_texts_local: TArray<string>;
@@ -140133,6 +140137,21 @@ var
                 end;
                 if (best_idx_local <= 0) or (best_score_local <
                     c_short_nocontext_promotion_threshold) then
+                begin
+                    Exit;
+                end;
+                { A weak residual alone must not displace a high-confidence
+                  base exact with a lower-weight candidate. Require an
+                  independent full-text LM gain for that override. }
+                if (candidate_weights_local[0] >=
+                    c_protected_baseline_min_weight) and
+                    (candidate_weights_local[best_idx_local] <
+                    candidate_weights_local[0]) and
+                    (best_score_local - c_short_nocontext_promotion_threshold <
+                    c_weak_residual_score_margin) and
+                    (Int64(candidate_full_lm_scores_local[best_idx_local]) -
+                    candidate_full_lm_scores_local[0] <
+                    c_weak_residual_min_full_lm_gain) then
                 begin
                     Exit;
                 end;
