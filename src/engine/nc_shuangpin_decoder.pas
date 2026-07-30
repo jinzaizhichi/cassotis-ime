@@ -65,7 +65,7 @@ const
         'o ou pa pai pan pang pao pei pen peng pi pian piao pie pin ping po pou pu ' +
         'qi qia qian qiang qiao qie qin qing qiong qiu qu quan que qun ' +
         'r ran rang rao re ren reng ri rong rou ru rua ruan rui run ruo ' +
-        'sa sai san sang sao se sen seng sha shai shan shang shao she shen sheng shi shou ' +
+        'sa sai san sang sao se sen seng sha shai shan shang shao she shei shen sheng shi shou ' +
         'shu shua shuai shuan shuang shui shun shuo si song sou su suan sui sun suo ' +
         'ta tai tan tang tao te teng ti tian tiao tie ting tong tou tu tuan tui tun tuo ' +
         'wa wai wan wang wei wen weng wo wu ' +
