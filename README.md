@@ -103,7 +103,9 @@ Cassotis v1.6.0 advances long-sentence decoding into a corpus-trained multi-stag
 
 Cassotis v1.7.0 refines short-input phrase composition. Four-syllable inputs can combine two complete dictionary phrases when corpus-trained transition evidence is strong, while unsupported combinations remain excluded. Phrase prefixes and first-syllable character choices stay visible, and after a partial selection the remaining single-character candidates use the already selected text as contextual ranking evidence.
 
-To keep the deeper ranking pipeline responsive, search, second-stage ranking, and final selection reuse character-LM scores, exact dictionary lookups, path features, and context features. Exact and prefix candidate visibility remains protected, while repeated work across ranking stages is avoided.
+Cassotis v1.8.0 strengthens learned ranking on both paths. Long-sentence decoding adds pairwise, local-difference, and visible-candidate residual checks around the existing multi-stage ranker, improving choices among complete candidates without changing lexicon-constrained generation. Short-word input adds a separately trained no-context residual ranker; conservative confidence calibration preserves strong exact candidates when model evidence is weak.
+
+To keep the deeper ranking pipeline responsive, search, second-stage ranking, residual comparison, and final selection reuse character-LM scores, exact dictionary lookups, path features, and context features. Expensive consensus and lookup work uses shared caches and explicit time budgets to limit long-tail latency. Exact and prefix candidate visibility remains protected, while repeated work across ranking stages is avoided.
 
 The statistical model is quantized into the local dictionary database, while the compact rerankers are exported as deterministic native Pascal parameters. Runtime scoring is local and bounded: it starts no PyTorch/ONNX environment or external model service and requires no network connection or GPU. Long-sentence and short-word ranking remain separate paths, so improvements to one do not replace the other's matching rules.
 
@@ -114,6 +116,7 @@ Corpus: 16,300 eligible Chinese sentences from the developer's own novel [**Eleg
 
 | Version | Top1 | Top2 | Mean (ms) | P50 (ms) | P95 (ms) | Max (ms) |
 |---|---:|---:|---:|---:|---:|---:|
+| `v1.8.0` | 8280/16300 (50.80%) | 9062/16300 (55.60%) | 71.28 | 46 | 266 | 1718 |
 | `v1.7.0` | 7940/16300 (48.71%) | 8642/16300 (53.02%) | 71.55 | 47 | 235 | 2047 |
 | `v1.6.0` | 7936/16300 (48.69%) | 8637/16300 (52.99%) | 66.99 | 32 | 219 | 1687 |
 | `v1.5.0` | 7459/16300 (45.76%) | 7966/16300 (48.87%) | 63.42 | 46 | 203 | 2140 |
@@ -141,6 +144,7 @@ See [BENCHMARK.md](BENCHMARK.md) for the shared corpus source, short-word case c
 
 | Version | Top1 | Top2 | Contested Top1 | Contested Top2 | Mean (ms) | P50 (ms) | P95 (ms) | Max (ms) |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|
+| `v1.8.0` | 61206/65000 (94.16%) | 63429/65000 (97.58%) | 9182/11728 (78.29%) | 10725/11728 (91.45%) | 4.688 | 3.618 | 10.147 | 115.175 |
 | `v1.7.0` | 61053/65000 (93.93%) | 63424/65000 (97.58%) | 9154/11728 (78.05%) | 10723/11728 (91.43%) | 4.668 | 3.468 | 10.013 | 158.471 |
 | `v1.6.0` | 61043/65000 (93.91%) | 63414/65000 (97.56%) | 9154/11728 (78.05%) | 10723/11728 (91.43%) | 4.455 | 3.295 | 9.580 | 160.817 |
 | `v1.5.0` | 61045/65000 (93.92%) | 63364/65000 (97.48%) | 9159/11728 (78.10%) | 10677/11728 (91.04%) | 5.033 | 4.113 | 9.968 | 142.372 |
