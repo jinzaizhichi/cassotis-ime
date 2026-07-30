@@ -50486,6 +50486,13 @@ var
             alternative_adjust_local: Integer;
             alternative_score_local: Integer;
             alternative_state_local: TExactChunkChainState;
+            greedy_state_local: TExactChunkChainState;
+            greedy_state_found_local: Boolean;
+            greedy_state_present_local: Boolean;
+            prefix_state_local: TExactChunkChainState;
+            prefix_state_found_local: Boolean;
+            prefix_state_present_local: Boolean;
+            fast_seed_requires_dp_local: Boolean;
             minimum_score_local: Integer;
             baseline_acceptance_score_local: Integer;
             baseline_acceptance_found_local: Boolean;
@@ -50988,6 +50995,7 @@ var
                 out out_state_local: TExactChunkChainState): Boolean;
             const
                 c_min_chunk_raw_weight = 500;
+                c_min_unambiguous_chunk_raw_weight = 180;
                 c_strong_chunk_raw_weight = 50000;
                 c_clear_short_chunk_raw_floor = 700;
                 c_clear_short_chunk_raw_gap = 96;
@@ -51347,6 +51355,11 @@ var
                             if local_chunk_len >= 4 then
                             begin
                                 local_min_raw_weight := 220;
+                            end;
+                            if Length(local_results) = 1 then
+                            begin
+                                local_min_raw_weight := Min(local_min_raw_weight,
+                                    c_min_unambiguous_chunk_raw_weight);
                             end;
                             if (local_raw_weight < local_min_raw_weight) and
                                 (tail_support_bonus <= 0) then
@@ -52171,6 +52184,27 @@ var
                 end;
 
                 Result := query_offset_inner = syllable_count_local;
+            end;
+
+            function fast_seed_lacks_lm_support_local(
+                const state_inner: TExactChunkChainState): Boolean;
+            var
+                lm_stats_inner: TLongWordLmBoundaryStats;
+                lm_bonus_inner: Integer;
+            begin
+                Result := False;
+                if (input_syllable_count < 7) or
+                    (input_syllable_count > 8) or
+                    (state_inner.segments < 2) then
+                begin
+                    Exit;
+                end;
+
+                lm_bonus_inner := get_exact_chunk_chain_state_lm_bonus_local(
+                    state_inner, 0, lm_stats_inner);
+                Result := (lm_bonus_inner = 0) and
+                    (lm_stats_inner.boundary_count > 0) and
+                    (lm_stats_inner.supported_count = 0);
             end;
 
             function get_competing_boundary_penalty_fast_local(
@@ -55628,32 +55662,52 @@ var
                 m_debug_target_chain_build_attempted := True;
             end;
 
-            if ((input_syllable_count >= 6) and
-                try_build_unambiguous_multi_exact_chain_local(base_state_local) and
-                should_accept_greedy_exact_chain_state_local(base_state_local)) then
+            greedy_state_found_local := (input_syllable_count >= 6) and
+                try_build_unambiguous_multi_exact_chain_local(greedy_state_local) and
+                should_accept_greedy_exact_chain_state_local(greedy_state_local);
+            if greedy_state_found_local then
             begin
-                out_text := base_state_local.text;
-                out_path := base_state_local.path;
-                out_score := base_state_local.score;
-                out_segments := base_state_local.segments;
-                SetLength(out_states, 1);
-                out_states[0] := base_state_local;
-                Result := True;
-                Exit;
+                greedy_state_local.baseline_lineage := True;
             end;
 
-            if (input_syllable_count <= 9) and
-                try_build_prefix_exact_plus_short_tail_local(base_state_local) and
-                should_accept_greedy_exact_chain_state_local(base_state_local) then
+            prefix_state_found_local := (input_syllable_count <= 9) and
+                try_build_prefix_exact_plus_short_tail_local(prefix_state_local) and
+                should_accept_greedy_exact_chain_state_local(prefix_state_local);
+            if prefix_state_found_local then
             begin
-                out_text := base_state_local.text;
-                out_path := base_state_local.path;
-                out_score := base_state_local.score;
-                out_segments := base_state_local.segments;
-                SetLength(out_states, 1);
-                out_states[0] := base_state_local;
-                Result := True;
-                Exit;
+                prefix_state_local.baseline_lineage := True;
+            end;
+
+            fast_seed_requires_dp_local :=
+                (greedy_state_found_local and
+                fast_seed_lacks_lm_support_local(greedy_state_local)) or
+                (prefix_state_found_local and
+                fast_seed_lacks_lm_support_local(prefix_state_local));
+            if (not fast_seed_requires_dp_local) and
+                (not (greedy_state_found_local and prefix_state_found_local and
+                (not SameText(Trim(greedy_state_local.text),
+                Trim(prefix_state_local.text))))) then
+            begin
+                if greedy_state_found_local then
+                begin
+                    out_text := greedy_state_local.text;
+                    out_path := greedy_state_local.path;
+                    out_score := greedy_state_local.score;
+                    out_segments := greedy_state_local.segments;
+                    SetLength(out_states, 1);
+                    out_states[0] := greedy_state_local;
+                    Exit(True);
+                end;
+                if prefix_state_found_local then
+                begin
+                    out_text := prefix_state_local.text;
+                    out_path := prefix_state_local.path;
+                    out_score := prefix_state_local.score;
+                    out_segments := prefix_state_local.segments;
+                    SetLength(out_states, 1);
+                    out_states[0] := prefix_state_local;
+                    Exit(True);
+                end;
             end;
 
             SetLength(state_map_local, syllable_count_local + 1);
@@ -55973,6 +56027,45 @@ var
                     baseline_candidates_local);
                 merge_baseline_and_expanded_fast_states_local(
                     state_map_local[pos_local], baseline_candidates_local);
+            end;
+
+            if greedy_state_found_local then
+            begin
+                greedy_state_present_local := False;
+                for debug_state_idx_local := 0 to High(state_map_local[0]) do
+                begin
+                    if SameText(Trim(state_map_local[0][debug_state_idx_local].text),
+                        Trim(greedy_state_local.text)) then
+                    begin
+                        greedy_state_present_local := True;
+                        Break;
+                    end;
+                end;
+                if not greedy_state_present_local then
+                begin
+                    SetLength(state_map_local[0], Length(state_map_local[0]) + 1);
+                    state_map_local[0][High(state_map_local[0])] :=
+                        greedy_state_local;
+                end;
+            end;
+            if prefix_state_found_local then
+            begin
+                prefix_state_present_local := False;
+                for debug_state_idx_local := 0 to High(state_map_local[0]) do
+                begin
+                    if SameText(Trim(state_map_local[0][debug_state_idx_local].text),
+                        Trim(prefix_state_local.text)) then
+                    begin
+                        prefix_state_present_local := True;
+                        Break;
+                    end;
+                end;
+                if not prefix_state_present_local then
+                begin
+                    SetLength(state_map_local[0], Length(state_map_local[0]) + 1);
+                    state_map_local[0][High(state_map_local[0])] :=
+                        prefix_state_local;
+                end;
             end;
 
             sort_fast_states_by_order_score_local(state_map_local[0]);
