@@ -139560,7 +139560,6 @@ var
     const
         c_max_base_exact_units = 5;
         c_max_user_exact_units = 6;
-        c_direct_exact_rank_bonus = 900;
         c_low_frequency_medical_exact_weight = 520;
     type
         TShortExactRankItem = record
@@ -139693,6 +139692,13 @@ var
                     Inc(Result, 50000000 + (query_bonus_local * 1000));
                 end;
             end;
+        end;
+
+        function has_effective_short_context_local: Boolean;
+        begin
+            Result := (Trim(m_segment_left_context) <> '') or
+                (Trim(m_external_left_context) <> '') or
+                (Trim(m_left_context) <> '');
         end;
 
         function short_exact_effective_weight_local(
@@ -141641,16 +141647,20 @@ var
                     Exit;
                 end;
 
-                if local_direct_exact and (not local_exact_user) and
-                    (m_dictionary <> nil) and
-                    is_low_evidence_admin_place_alias_cached(
-                    normalized_pinyin, local_text) then
+                if local_direct_exact then
                 begin
-                    item.category := 4;
-                    item.prefix_units := local_units;
-                    item.rank_score := short_exact_effective_weight_local(
-                        candidate_value);
-                    local_direct_exact := False;
+                    if (not local_exact_user) and
+                        has_effective_short_context_local and
+                        (m_dictionary <> nil) and
+                        is_low_evidence_admin_place_alias_cached(
+                        normalized_pinyin, local_text) then
+                    begin
+                        item.category := 4;
+                        item.prefix_units := local_units;
+                        item.rank_score := short_exact_effective_weight_local(
+                            candidate_value);
+                        local_direct_exact := False;
+                    end;
                 end;
 
                 if local_direct_exact then
@@ -141660,15 +141670,16 @@ var
                     if exact_weights.TryGetValue(local_text, local_exact_weight) then
                     begin
                         item.low_frequency_medical_exact :=
+                            has_effective_short_context_local and
                             (not local_exact_user) and
                             (local_exact_weight <=
                             c_low_frequency_medical_exact_weight) and
                             text_has_low_frequency_medical_unit_local(
                             local_text);
-                        local_direct_exact_rank := local_exact_weight +
-                            short_base_exact_choice_rank_bonus_local(local_text,
-                            local_exact_weight, local_units) +
-                            c_direct_exact_rank_bonus;
+                        { Without context, base exact candidates must retain the
+                          raw dictionary-weight order. User exact candidates are
+                          the only exception in this layer. }
+                        local_direct_exact_rank := local_exact_weight;
                         if local_exact_user then
                         begin
                             Inc(local_direct_exact_rank,
@@ -142065,11 +142076,8 @@ var
 
             sort_short_exact_rank_items_local;
             note_short_exact_phase_local('sort');
-            apply_short_nocontext_reranker_local;
-            if short_nocontext_promoted_exact_text <> '' then
-            begin
-                sort_short_exact_rank_items_local;
-            end;
+            { No-context base exact order is final here. Only the dedicated
+              context stage below may rerank exact dictionary candidates. }
             note_short_exact_phase_local('nocontext');
             apply_short_context_reranker_local;
             if short_context_promoted_exact_text <> '' then
