@@ -895,6 +895,7 @@ begin
     Result.candidate_font_name := c_default_candidate_font_name;
     Result.candidate_font_size := c_default_candidate_font_size;
     Result.candidate_page_size := c_default_candidate_page_size;
+    Result.candidate_page_key_scheme := cpks_minus_plus;
     Result.candidate_color_scheme := c_default_candidate_color_scheme;
     Result.debug_mode := False;
     Result.dictionary_variant := dv_simplified;
@@ -994,6 +995,9 @@ begin
         read_shortcut_value('dictionary_variant_toggle', sa_dictionary_variant_toggle);
         read_shortcut_value('full_width_toggle', sa_full_width_toggle);
         read_shortcut_value('open_settings', sa_open_settings);
+        Result.candidate_page_key_scheme := nc_parse_candidate_page_key_scheme(
+            safe_ini_read_string(ini, 'shortcuts', 'candidate_page_keys',
+            nc_candidate_page_key_scheme_to_text(cpks_minus_plus)));
         shortcut_values_valid := shortcut_values_valid and
             (not nc_shortcut_config_has_duplicates(Result.shortcuts));
         nc_normalize_shortcut_config(Result.shortcuts);
@@ -1036,6 +1040,7 @@ begin
             not safe_ini_value_exists(ini, 'shortcuts', 'dictionary_variant_toggle') or
             not safe_ini_value_exists(ini, 'shortcuts', 'full_width_toggle') or
             not safe_ini_value_exists(ini, 'shortcuts', 'open_settings') or
+            not safe_ini_value_exists(ini, 'shortcuts', 'candidate_page_keys') or
             (not shortcut_values_valid) or
             safe_ini_value_exists(ini, 'dictionary', 'db_path') or
             safe_ini_value_exists(ini, 'dictionary', 'db_path_sc') or
@@ -1131,6 +1136,9 @@ begin
             nc_shortcut_to_text(shortcut_config.full_width_toggle));
         ini.WriteString('shortcuts', 'open_settings',
             nc_shortcut_to_text(shortcut_config.open_settings));
+        ini.WriteString('shortcuts', 'candidate_page_keys',
+            nc_candidate_page_key_scheme_to_text(
+            config.candidate_page_key_scheme));
         write_config_version(ini, True);
         ini.UpdateFile;
     finally

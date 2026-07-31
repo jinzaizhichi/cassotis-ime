@@ -168,6 +168,9 @@ type
         m_candidate_preview: TPaintBox;
         m_combo_shortcut_modifiers: array[TncShortcutAction] of TComboBox;
         m_combo_shortcut_keys: array[TncShortcutAction] of TComboBox;
+        m_combo_candidate_page_keys: TComboBox;
+        m_panel_candidate_page_previous_key: TPanel;
+        m_panel_candidate_page_next_key: TPanel;
         m_chk_log_enabled: TncModernCheckBox;
         m_combo_log_level: TComboBox;
         m_edit_log_max_size_kb: TEdit;
@@ -209,6 +212,9 @@ type
         procedure populate_candidate_color_scheme_combo;
         procedure populate_shortcut_modifier_combo(const combo: TComboBox);
         procedure populate_shortcut_key_combo(const combo: TComboBox);
+        procedure populate_candidate_page_key_scheme_combo;
+        procedure update_candidate_page_key_scheme_preview;
+        procedure candidate_page_key_scheme_changed(Sender: TObject);
         function shortcut_action_caption(const action: TncShortcutAction): string;
         function shortcut_from_controls(const action: TncShortcutAction): TncShortcut;
         procedure set_shortcut_controls(const action: TncShortcutAction; const shortcut: TncShortcut);
@@ -218,6 +224,9 @@ type
         function get_selected_candidate_font_name: string;
         function get_selected_candidate_page_size: Integer;
         procedure set_candidate_page_size_combo(const page_size: Integer);
+        function get_selected_candidate_page_key_scheme: TncCandidatePageKeyScheme;
+        procedure set_candidate_page_key_scheme_combo(
+            const scheme: TncCandidatePageKeyScheme);
         function get_selected_candidate_color_scheme: Integer;
         procedure set_candidate_color_scheme_combo(const color_scheme: Integer);
         procedure update_candidate_preview;
@@ -339,6 +348,15 @@ resourcestring
     SShortcutOpenSettings = '打开设置';
     SShortcutNoModifier = '无';
     SShortcutHint = '快捷键不可重复。无修饰键时仅支持 Shift 或 F1-F24，以免占用正常输入。';
+    SGroupCandidatePaging = '候选翻页';
+    SLabelCandidatePageKeys = '按键组合';
+    SLabelCandidatePagePrevious = '向上翻';
+    SLabelCandidatePageNext = '向下翻';
+    SPageKeysMinusPlus = '减号等号';
+    SPageKeysBrackets = '左右中括号';
+    SPageKeysCommaPeriod = '逗号句号';
+    SPageKeysShiftTab = 'Shift+Tab / Tab';
+    SCandidatePageKeysHint = '仅在候选窗口打开时生效。';
     SShortcutMissingKey = '“%s”尚未选择按键。';
     SShortcutInvalidModifierKey = '“%s”的快捷键无效：单独的修饰键仅支持 Shift，且不能再叠加其他修饰键。';
     SShortcutNeedsModifier = '“%s”不能使用未带修饰键的 %s，因为这会占用正常输入。请添加 Ctrl、Shift 或 Alt；无修饰键时仅支持 Shift 或 F1-F24。';
@@ -1288,6 +1306,7 @@ begin
     Result.candidate_font_name := c_default_candidate_font_name;
     Result.candidate_font_size := c_default_candidate_font_size;
     Result.candidate_page_size := c_default_candidate_page_size;
+    Result.candidate_page_key_scheme := cpks_minus_plus;
     Result.candidate_color_scheme := c_default_candidate_color_scheme;
     Result.debug_mode := False;
     Result.dictionary_variant := dv_simplified;
@@ -2030,6 +2049,7 @@ var
     top: Integer;
     section_top: Integer;
     shortcut_group: TPanel;
+    paging_group: TPanel;
     header_label: TLabel;
 begin
     section_top := scale_ui(18);
@@ -2084,6 +2104,153 @@ begin
 
     create_hint_label(Self, shortcut_group, SShortcutHint, scale_ui(c_label_left),
         top + scale_ui(2), scale_ui(c_hint_width));
+
+    section_top := shortcut_group.Top + shortcut_group.Height + scale_ui(c_section_gap);
+    paging_group := create_section_group(Self, m_tab_shortcuts,
+        SGroupCandidatePaging, section_top, 90);
+    top := scale_ui(54);
+    create_label(Self, paging_group, SLabelCandidatePageKeys, top);
+
+    header_label := TLabel.Create(Self);
+    header_label.Parent := paging_group;
+    header_label.AutoSize := False;
+    header_label.Left := scale_ui(c_control_left + 172);
+    header_label.Top := scale_ui(31);
+    header_label.Width := scale_ui(76);
+    header_label.Alignment := taCenter;
+    header_label.Caption := SLabelCandidatePagePrevious;
+    header_label.Font.Color := RGB(90, 100, 115);
+
+    header_label := TLabel.Create(Self);
+    header_label.Parent := paging_group;
+    header_label.AutoSize := False;
+    header_label.Left := scale_ui(c_control_left + 260);
+    header_label.Top := scale_ui(31);
+    header_label.Width := scale_ui(76);
+    header_label.Alignment := taCenter;
+    header_label.Caption := SLabelCandidatePageNext;
+    header_label.Font.Color := RGB(90, 100, 115);
+
+    m_combo_candidate_page_keys := TComboBox.Create(Self);
+    m_combo_candidate_page_keys.Parent := paging_group;
+    m_combo_candidate_page_keys.Left := scale_ui(c_control_left);
+    m_combo_candidate_page_keys.Top := top;
+    m_combo_candidate_page_keys.Width := scale_ui(160);
+    m_combo_candidate_page_keys.Style := csDropDownList;
+    m_combo_candidate_page_keys.Hint := SCandidatePageKeysHint;
+    m_combo_candidate_page_keys.ShowHint := True;
+    populate_candidate_page_key_scheme_combo;
+
+    m_panel_candidate_page_previous_key := TPanel.Create(Self);
+    m_panel_candidate_page_previous_key.Parent := paging_group;
+    m_panel_candidate_page_previous_key.Left := scale_ui(c_control_left + 172);
+    m_panel_candidate_page_previous_key.Top := top;
+    m_panel_candidate_page_previous_key.Width := scale_ui(76);
+    m_panel_candidate_page_previous_key.Height := scale_ui(24);
+    m_panel_candidate_page_previous_key.BevelOuter := bvNone;
+    m_panel_candidate_page_previous_key.ParentBackground := False;
+    m_panel_candidate_page_previous_key.Color := RGB(238, 240, 244);
+    m_panel_candidate_page_previous_key.Font.Color := RGB(50, 56, 66);
+
+    m_panel_candidate_page_next_key := TPanel.Create(Self);
+    m_panel_candidate_page_next_key.Parent := paging_group;
+    m_panel_candidate_page_next_key.Left := scale_ui(c_control_left + 260);
+    m_panel_candidate_page_next_key.Top := top;
+    m_panel_candidate_page_next_key.Width := scale_ui(76);
+    m_panel_candidate_page_next_key.Height := scale_ui(24);
+    m_panel_candidate_page_next_key.BevelOuter := bvNone;
+    m_panel_candidate_page_next_key.ParentBackground := False;
+    m_panel_candidate_page_next_key.Color := RGB(238, 240, 244);
+    m_panel_candidate_page_next_key.Font.Color := RGB(50, 56, 66);
+
+    m_combo_candidate_page_keys.OnChange := candidate_page_key_scheme_changed;
+    update_candidate_page_key_scheme_preview;
+end;
+
+procedure TncSettingsForm.populate_candidate_page_key_scheme_combo;
+begin
+    if m_combo_candidate_page_keys = nil then
+    begin
+        Exit;
+    end;
+
+    m_combo_candidate_page_keys.Items.BeginUpdate;
+    try
+        m_combo_candidate_page_keys.Items.Clear;
+        m_combo_candidate_page_keys.Items.Add(SPageKeysMinusPlus);
+        m_combo_candidate_page_keys.Items.Add(SPageKeysBrackets);
+        m_combo_candidate_page_keys.Items.Add(SPageKeysCommaPeriod);
+        m_combo_candidate_page_keys.Items.Add(SPageKeysShiftTab);
+    finally
+        m_combo_candidate_page_keys.Items.EndUpdate;
+    end;
+end;
+
+procedure TncSettingsForm.update_candidate_page_key_scheme_preview;
+var
+    previous_key: string;
+    next_key: string;
+begin
+    if (m_panel_candidate_page_previous_key = nil) or
+        (m_panel_candidate_page_next_key = nil) then
+    begin
+        Exit;
+    end;
+
+    case get_selected_candidate_page_key_scheme of
+        cpks_brackets:
+            begin
+                previous_key := '[';
+                next_key := ']';
+            end;
+        cpks_comma_period:
+            begin
+                previous_key := ',';
+                next_key := '.';
+            end;
+        cpks_shift_tab:
+            begin
+                previous_key := 'Shift+Tab';
+                next_key := 'Tab';
+            end;
+    else
+        previous_key := '-';
+        next_key := '=';
+    end;
+
+    m_panel_candidate_page_previous_key.Caption := previous_key;
+    m_panel_candidate_page_next_key.Caption := next_key;
+end;
+
+procedure TncSettingsForm.candidate_page_key_scheme_changed(Sender: TObject);
+begin
+    update_candidate_page_key_scheme_preview;
+    mark_dirty(Sender);
+end;
+
+function TncSettingsForm.get_selected_candidate_page_key_scheme:
+    TncCandidatePageKeyScheme;
+begin
+    Result := cpks_minus_plus;
+    if (m_combo_candidate_page_keys <> nil) and
+        (m_combo_candidate_page_keys.ItemIndex >= Ord(Low(TncCandidatePageKeyScheme))) and
+        (m_combo_candidate_page_keys.ItemIndex <= Ord(High(TncCandidatePageKeyScheme))) then
+    begin
+        Result := TncCandidatePageKeyScheme(
+            m_combo_candidate_page_keys.ItemIndex);
+    end;
+end;
+
+procedure TncSettingsForm.set_candidate_page_key_scheme_combo(
+    const scheme: TncCandidatePageKeyScheme);
+begin
+    if m_combo_candidate_page_keys = nil then
+    begin
+        Exit;
+    end;
+    m_combo_candidate_page_keys.ItemIndex := Ord(
+        nc_normalize_candidate_page_key_scheme(scheme));
+    update_candidate_page_key_scheme_preview;
 end;
 
 function TncSettingsForm.shortcut_from_controls(const action: TncShortcutAction): TncShortcut;
@@ -2379,6 +2546,8 @@ begin
     else if m_page_control.ActivePage = m_tab_shortcuts then
     begin
         load_shortcut_controls(default_engine_config.shortcuts);
+        set_candidate_page_key_scheme_combo(
+            default_engine_config.candidate_page_key_scheme);
     end
     else if m_page_control.ActivePage = m_tab_logging then
     begin
@@ -3029,6 +3198,8 @@ begin
     set_candidate_page_size_combo(m_engine_config.candidate_page_size);
     set_candidate_color_scheme_combo(m_engine_config.candidate_color_scheme);
     load_shortcut_controls(m_engine_config.shortcuts);
+    set_candidate_page_key_scheme_combo(
+        m_engine_config.candidate_page_key_scheme);
     if m_chk_log_enabled <> nil then
     begin
         m_chk_log_enabled.Checked := m_log_config.enabled;
@@ -3156,6 +3327,8 @@ begin
     next_config.candidate_font_name := get_selected_candidate_font_name;
     next_config.candidate_font_size := get_candidate_font_size_from_slider;
     next_config.candidate_page_size := get_selected_candidate_page_size;
+    next_config.candidate_page_key_scheme :=
+        get_selected_candidate_page_key_scheme;
     next_config.candidate_color_scheme := get_selected_candidate_color_scheme;
     shortcut_config := nc_default_shortcut_config;
     for action_index := Ord(Low(TncShortcutAction)) to Ord(High(TncShortcutAction)) do

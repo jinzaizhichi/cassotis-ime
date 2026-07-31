@@ -40,6 +40,18 @@ function nc_shortcut_to_text(const shortcut: TncShortcut): string;
 function nc_try_parse_shortcut(const value: string; out shortcut: TncShortcut): Boolean;
 function nc_shortcut_key_name(const key_code: Word): string;
 function nc_normalize_shortcut_key_code(const key_code: Word): Word;
+function nc_normalize_candidate_page_key_scheme(
+    const scheme: TncCandidatePageKeyScheme): TncCandidatePageKeyScheme;
+function nc_candidate_page_key_scheme_to_text(
+    const scheme: TncCandidatePageKeyScheme): string;
+function nc_parse_candidate_page_key_scheme(
+    const value: string): TncCandidatePageKeyScheme;
+function nc_candidate_page_key_matches_previous(
+    const scheme: TncCandidatePageKeyScheme; const key_code: Word;
+    const key_state: TncKeyState): Boolean;
+function nc_candidate_page_key_matches_next(
+    const scheme: TncCandidatePageKeyScheme; const key_code: Word;
+    const key_state: TncKeyState): Boolean;
 
 implementation
 
@@ -64,6 +76,102 @@ end;
 function nc_normalize_shortcut_key_code(const key_code: Word): Word;
 begin
     Result := normalize_key_code(key_code);
+end;
+
+function nc_normalize_candidate_page_key_scheme(
+    const scheme: TncCandidatePageKeyScheme): TncCandidatePageKeyScheme;
+begin
+    if (Ord(scheme) < Ord(Low(TncCandidatePageKeyScheme))) or
+        (Ord(scheme) > Ord(High(TncCandidatePageKeyScheme))) then
+    begin
+        Exit(cpks_minus_plus);
+    end;
+    Result := scheme;
+end;
+
+function nc_candidate_page_key_scheme_to_text(
+    const scheme: TncCandidatePageKeyScheme): string;
+begin
+    case nc_normalize_candidate_page_key_scheme(scheme) of
+        cpks_brackets:
+            Result := 'brackets';
+        cpks_comma_period:
+            Result := 'comma-period';
+        cpks_shift_tab:
+            Result := 'shift-tab';
+    else
+        Result := 'minus-plus';
+    end;
+end;
+
+function nc_parse_candidate_page_key_scheme(
+    const value: string): TncCandidatePageKeyScheme;
+var
+    normalized_value: string;
+begin
+    normalized_value := LowerCase(Trim(value));
+    if normalized_value = 'brackets' then
+    begin
+        Exit(cpks_brackets);
+    end;
+    if normalized_value = 'comma-period' then
+    begin
+        Exit(cpks_comma_period);
+    end;
+    if normalized_value = 'shift-tab' then
+    begin
+        Exit(cpks_shift_tab);
+    end;
+    Result := cpks_minus_plus;
+end;
+
+function candidate_page_key_matches(const scheme: TncCandidatePageKeyScheme;
+    const key_code: Word; const key_state: TncKeyState;
+    const next_page: Boolean): Boolean;
+begin
+    Result := False;
+    if key_state.ctrl_down or key_state.alt_down then
+    begin
+        Exit;
+    end;
+
+    case nc_normalize_candidate_page_key_scheme(scheme) of
+        cpks_brackets:
+            begin
+                Result := (not key_state.shift_down) and
+                    (((not next_page) and (key_code = VK_OEM_4)) or
+                    (next_page and (key_code = VK_OEM_6)));
+            end;
+        cpks_comma_period:
+            begin
+                Result := (not key_state.shift_down) and
+                    (((not next_page) and (key_code = VK_OEM_COMMA)) or
+                    (next_page and (key_code = VK_OEM_PERIOD)));
+            end;
+        cpks_shift_tab:
+            begin
+                Result := (key_code = VK_TAB) and
+                    (key_state.shift_down <> next_page);
+            end;
+    else
+        Result := (not key_state.shift_down) and
+            (((not next_page) and (key_code = VK_OEM_MINUS)) or
+            (next_page and (key_code = VK_OEM_PLUS)));
+    end;
+end;
+
+function nc_candidate_page_key_matches_previous(
+    const scheme: TncCandidatePageKeyScheme; const key_code: Word;
+    const key_state: TncKeyState): Boolean;
+begin
+    Result := candidate_page_key_matches(scheme, key_code, key_state, False);
+end;
+
+function nc_candidate_page_key_matches_next(
+    const scheme: TncCandidatePageKeyScheme; const key_code: Word;
+    const key_state: TncKeyState): Boolean;
+begin
+    Result := candidate_page_key_matches(scheme, key_code, key_state, True);
 end;
 
 function nc_make_shortcut(const key_code: Word; const shift_down: Boolean;

@@ -62,6 +62,12 @@ type
         pis_pinyinjiajia_shuangpin
     );
     TncDictionaryVariant = (dv_simplified, dv_traditional);
+    TncCandidatePageKeyScheme = (
+        cpks_minus_plus,
+        cpks_brackets,
+        cpks_comma_period,
+        cpks_shift_tab
+    );
 
     TncShortcutAction = (
         sa_input_mode_toggle,
@@ -101,6 +107,7 @@ type
         candidate_font_name: string;
         candidate_font_size: Integer;
         candidate_page_size: Integer;
+        candidate_page_key_scheme: TncCandidatePageKeyScheme;
         candidate_color_scheme: Integer;
         debug_mode: Boolean;
         dictionary_variant: TncDictionaryVariant;

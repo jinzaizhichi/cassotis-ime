@@ -895,6 +895,9 @@ begin
     inherited create;
     m_config := config;
     nc_normalize_shortcut_config(m_config.shortcuts);
+    m_config.candidate_page_key_scheme :=
+        nc_normalize_candidate_page_key_scheme(
+        m_config.candidate_page_key_scheme);
     m_composition_text := '';
     m_composition_display_text := '';
     m_pending_commit_text := '';
@@ -3172,6 +3175,9 @@ begin
     input_scheme_changed := m_config.pinyin_input_scheme <> config.pinyin_input_scheme;
     m_config := config;
     nc_normalize_shortcut_config(m_config.shortcuts);
+    m_config.candidate_page_key_scheme :=
+        nc_normalize_candidate_page_key_scheme(
+        m_config.candidate_page_key_scheme);
     if input_scheme_changed then
     begin
         reset;
@@ -4074,6 +4080,7 @@ var
         cache_key: string;
         cached_results: TncCandidateList;
         phase_tick: UInt64;
+
     begin
         SetLength(out_results, 0);
         if (m_dictionary = nil) or (pinyin_key = '') then
@@ -136984,14 +136991,16 @@ begin
         (Length(m_candidates) > 0)) and (not key_state.ctrl_down) and
         (not key_state.alt_down) then
     begin
-        if (key_code = VK_OEM_PLUS) and (not key_state.shift_down) then
+        if nc_candidate_page_key_matches_next(
+            m_config.candidate_page_key_scheme, key_code, key_state) then
         begin
             next_page;
             Result := True;
             Exit;
         end;
 
-        if (key_code = VK_OEM_MINUS) and (not key_state.shift_down) then
+        if nc_candidate_page_key_matches_previous(
+            m_config.candidate_page_key_scheme, key_code, key_state) then
         begin
             prev_page;
             Result := True;
@@ -167737,17 +167746,16 @@ begin
         Exit(False);
     end;
 
-    if (not key_state.ctrl_down) and (not key_state.alt_down) then
+    if nc_candidate_page_key_matches_next(
+        m_config.candidate_page_key_scheme, key_code, key_state) or
+        nc_candidate_page_key_matches_previous(
+        m_config.candidate_page_key_scheme, key_code, key_state) then
     begin
-        if ((key_code = VK_OEM_PLUS) and (not key_state.shift_down)) or
-            ((key_code = VK_OEM_MINUS) and (not key_state.shift_down)) then
+        if (m_composition_text <> '') or (m_confirmed_text <> '') or
+            has_candidates then
         begin
-            if (m_composition_text <> '') or (m_confirmed_text <> '') or
-                has_candidates then
-            begin
-                Result := True;
-                Exit;
-            end;
+            Result := True;
+            Exit;
         end;
     end;
 
