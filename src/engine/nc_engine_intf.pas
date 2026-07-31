@@ -711,6 +711,9 @@ type
 function short_nocontext_large_weight_gap_blocks_promotion(
     const baseline_weight: Integer; const challenger_weight: Integer;
     const baseline_has_protected_name_shape: Boolean): Boolean;
+function short_residual_exact_weight_is_eligible(
+    const candidate_weight: Integer;
+    const is_baseline: Boolean): Boolean;
 
 implementation
 
@@ -735,6 +738,15 @@ const
     c_long_sentence_complete_candidate_display_limit = 2;
     c_fast_repair_promote_margin = 6000;
     c_short_nocontext_protected_baseline_min_weight = 1000;
+    c_short_residual_visibility_only_max_weight = 0;
+
+function short_residual_exact_weight_is_eligible(
+    const candidate_weight: Integer;
+    const is_baseline: Boolean): Boolean;
+begin
+    Result := is_baseline or
+        (candidate_weight > c_short_residual_visibility_only_max_weight);
+end;
 
 function short_nocontext_large_weight_gap_blocks_promotion(
     const baseline_weight: Integer; const challenger_weight: Integer;
@@ -140118,6 +140130,12 @@ var
                     begin
                         Continue;
                     end;
+                    if not short_residual_exact_weight_is_eligible(
+                        candidate_weight_local,
+                        Length(candidate_texts_local) = 0) then
+                    begin
+                        Continue;
+                    end;
                     if query_choice_rank_bonus_local(candidate_text_local) > 0 then
                     begin
                         Exit;
@@ -140448,6 +140466,13 @@ var
                         seen_texts_local.ContainsKey(candidate_text_local) or
                         (not exact_weights.TryGetValue(candidate_text_local,
                         candidate_weight_local)) then
+                    begin
+                        Continue;
+                    end;
+
+                    if not short_residual_exact_weight_is_eligible(
+                        candidate_weight_local,
+                        Length(candidate_texts_local) = 0) then
                     begin
                         Continue;
                     end;
