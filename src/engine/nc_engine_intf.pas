@@ -4011,6 +4011,7 @@ var
     compact_runtime_candidates: TncCandidateList;
     relaxed_segment_candidates: TncCandidateList;
     explicit_apostrophe_aligned_candidates: TncCandidateList;
+    explicit_apostrophe_exact_candidates: TncCandidateList;
     lightweight_sentence_candidates: TncCandidateList;
     exact_lattice_backup_candidates: TncCandidateList;
     strict_oracle_sentence_candidates: TncCandidateList;
@@ -4020,6 +4021,7 @@ var
     confirmed_prefix_boundary_partial_preferred: Boolean;
     explicit_apostrophe_query_syllables: TncPinyinParseResult;
     explicit_apostrophe_query_parsed: Boolean;
+    explicit_apostrophe_exact_candidates_loaded: Boolean;
     lightweight_sentence_applied: Boolean;
     delayed_long_decode_mode: Boolean;
     ultra_long_partial_shortfast_applied: Boolean;
@@ -5986,6 +5988,39 @@ var
         end;
     end;
 
+    function explicit_apostrophe_exact_text_matches_local(
+        const text_value: string): Boolean;
+    var
+        idx_local: Integer;
+    begin
+        Result := False;
+        if (not has_explicit_apostrophe_input) or
+            (explicit_apostrophe_lookup_text = '') or (m_dictionary = nil) then
+        begin
+            Exit;
+        end;
+
+        if not explicit_apostrophe_exact_candidates_loaded then
+        begin
+            explicit_apostrophe_exact_candidates_loaded := True;
+            if not m_dictionary.lookup(explicit_apostrophe_lookup_text,
+                explicit_apostrophe_exact_candidates) then
+            begin
+                SetLength(explicit_apostrophe_exact_candidates, 0);
+            end;
+        end;
+
+        for idx_local := 0 to High(explicit_apostrophe_exact_candidates) do
+        begin
+            if (Trim(explicit_apostrophe_exact_candidates[idx_local].comment) = '') and
+                SameText(Trim(explicit_apostrophe_exact_candidates[idx_local].text),
+                Trim(text_value)) then
+            begin
+                Exit(True);
+            end;
+        end;
+    end;
+
     function explicit_apostrophe_complete_text_matches_boundary_local(
         const text_value: string): Boolean;
     var
@@ -5999,6 +6034,15 @@ var
             (m_dictionary = nil) then
         begin
             Exit;
+        end;
+
+        { A strict explicit-boundary dictionary hit is authoritative even when
+          a character has a lexical reading that does not exist in isolation,
+          such as lu'an / 六安.  Constructed candidates still pass through
+          the per-character alignment checks below. }
+        if explicit_apostrophe_exact_text_matches_local(text_value) then
+        begin
+            Exit(True);
         end;
 
         units_local := split_text_units(Trim(text_value));
@@ -29778,6 +29822,11 @@ var
         if (not has_explicit_apostrophe_input) or (input_syllable_count <= 1) then
         begin
             Exit;
+        end;
+
+        if explicit_apostrophe_exact_text_matches_local(candidate_text) then
+        begin
+            Exit(True);
         end;
 
         text_units := split_text_units(Trim(candidate_text));
@@ -112746,6 +112795,8 @@ begin
         skip_three_syllable_contextual_completion := False;
         SetLength(explicit_apostrophe_query_syllables, 0);
         explicit_apostrophe_query_parsed := False;
+        SetLength(explicit_apostrophe_exact_candidates, 0);
+        explicit_apostrophe_exact_candidates_loaded := False;
         previous_lookup_key := m_last_lookup_key;
         if m_last_candidates_incrementally_reusable then
         begin
@@ -113717,6 +113768,16 @@ begin
                 Ord(has_internal_dangling_initial), Ord(head_only_multi_syllable),
                 Ord(runtime_phrase_added), Ord(runtime_redup_added),
                 Ord(all_initial_compact_query)]));
+            if Length(m_candidates) > 0 then
+            begin
+                { The strict explicit-boundary exact hit is the authoritative
+                  first candidate. Keep display-time partial supplementation
+                  from replacing it after the rebuild has finished. }
+                m_has_forced_visible_top_candidate := True;
+                m_forced_visible_top_candidate := m_candidates[0];
+                m_forced_visible_top_composition_text := m_composition_text;
+                m_forced_visible_top_lookup_key := m_last_lookup_key;
+            end;
             Exit;
         end;
         if (m_dictionary <> nil) and (input_syllable_count <= 4) and
@@ -140311,6 +140372,7 @@ var
     procedure filter_explicit_apostrophe_display_candidates;
     var
         explicit_syllables: TncPinyinParseResult;
+        explicit_exact_candidates: TncCandidateList;
         idx: Integer;
         out_idx: Integer;
         text_units: TArray<string>;
@@ -140333,8 +140395,19 @@ var
         function complete_candidate_matches_boundary(const text_value: string): Boolean;
         var
             unit_idx: Integer;
+            exact_idx: Integer;
         begin
             Result := False;
+            for exact_idx := 0 to High(explicit_exact_candidates) do
+            begin
+                if (Trim(explicit_exact_candidates[exact_idx].comment) = '') and
+                    SameText(Trim(explicit_exact_candidates[exact_idx].text),
+                    Trim(text_value)) then
+                begin
+                    Exit(True);
+                end;
+            end;
+
             text_units := split_text_units(Trim(text_value));
             if Length(text_units) <> Length(explicit_syllables) then
             begin
@@ -140446,6 +140519,14 @@ var
         if Length(explicit_syllables) <= 1 then
         begin
             Exit;
+        end;
+
+        { Keep strict explicit-boundary exact words even when a character's
+          contextual pronunciation is absent from the single-character table. }
+        if not m_dictionary.lookup(get_display_raw_query_text_local,
+            explicit_exact_candidates) then
+        begin
+            SetLength(explicit_exact_candidates, 0);
         end;
 
         out_idx := 0;
@@ -142353,18 +142434,16 @@ var
             c_min_repeated_choice_evidence = 320;
         begin
             Result := 0;
-            if (text_value = '') or has_effective_short_context_local or
-                (m_dictionary = nil) or
+            if (text_value = '') or (m_dictionary = nil) or
                 (not is_full_pinyin_key(normalized_pinyin)) then
             begin
                 Exit;
             end;
 
-            { Keep no-context exact ranking deterministic: the only signal
-              allowed above the raw dictionary weight is the persisted choice
-              score for this exact pinyin/text pair. Session recency, language
-              models and scores learned for another candidate are deliberately
-              excluded. }
+            { The persisted score belongs to this exact pinyin/text pair, so it
+              remains valid even when the engine has left context. Session-only
+              recency, language models and scores learned for another candidate
+              remain excluded. }
             Result := m_dictionary.get_query_choice_bonus(normalized_pinyin,
                 text_value);
             if Result < c_min_repeated_choice_evidence then

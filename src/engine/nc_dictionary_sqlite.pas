@@ -204,6 +204,9 @@ type
         procedure refresh_user_data_version_if_changed(const force: Boolean);
         procedure populate_candidate_penalty_cache_for_pinyin(const pinyin_key: string;
             const compact_pinyin_key: string);
+        function lookup_exact_full_pinyin_internal(const pinyin: string;
+            out results: TncCandidateList;
+            const preserve_explicit_boundaries: Boolean): Boolean;
     public
         constructor create(const base_db_path: string; const user_db_path: string;
             const prune_user_entries_on_open: Boolean = True);
@@ -7284,6 +7287,16 @@ end;
 
 function TncSqliteDictionary.lookup_exact_full_pinyin(const pinyin: string;
     out results: TncCandidateList): Boolean;
+begin
+    { Internal path scoring historically treats apostrophes as optional
+      separators. Keep that stable; lookup() selects the strict user-input
+      path when the composition contains an explicit separator. }
+    Result := lookup_exact_full_pinyin_internal(pinyin, results, False);
+end;
+
+function TncSqliteDictionary.lookup_exact_full_pinyin_internal(const pinyin: string;
+    out results: TncCandidateList;
+    const preserve_explicit_boundaries: Boolean): Boolean;
 const
     c_result_cache_limit = 16384;
     base_sql = 'SELECT pinyin, text, comment, weight FROM dict_base WHERE pinyin = ?1 ' +
@@ -7308,6 +7321,8 @@ var
     step_result: Integer;
     item: TncCandidate;
     query_key: string;
+    canonical_query_key: string;
+    cache_query_key: string;
     evicted_cache_key: string;
     idx: Integer;
     key: string;
@@ -7676,7 +7691,17 @@ var
 begin
     SetLength(results, 0);
     Result := False;
-    query_key := normalize_compact_pinyin_key(Trim(pinyin));
+    if preserve_explicit_boundaries then
+    begin
+        canonical_query_key := normalize_canonical_pinyin_key(Trim(pinyin));
+        cache_query_key := #1 + canonical_query_key;
+    end
+    else
+    begin
+        canonical_query_key := normalize_compact_pinyin_key(Trim(pinyin));
+        cache_query_key := canonical_query_key;
+    end;
+    query_key := normalize_compact_pinyin_key(canonical_query_key);
     if query_key = '' then
     begin
         Exit;
@@ -7690,7 +7715,7 @@ begin
     // user database, even when the candidate result itself was cached.
     refresh_user_data_version_if_changed(False);
     if (m_exact_lookup_result_cache <> nil) and
-        m_exact_lookup_result_cache.TryGetValue(query_key, results) then
+        m_exact_lookup_result_cache.TryGetValue(cache_query_key, results) then
     begin
         results := Copy(results, 0, Length(results));
         if m_debug_mode then
@@ -7700,7 +7725,7 @@ begin
         end;
         Exit(Length(results) > 0);
     end;
-    raw_full_pinyin_query := is_full_pinyin_key(query_key);
+    raw_full_pinyin_query := is_full_pinyin_key(canonical_query_key);
     expanded_erhua_query_key := '';
     if (Length(query_key) > 2) and
         (query_key[Length(query_key)] = 'r') and
@@ -7712,7 +7737,7 @@ begin
             expanded_erhua_query_key := '';
         end;
     end;
-    exact_query_key := query_key;
+    exact_query_key := canonical_query_key;
     if expanded_erhua_query_key <> '' then
     begin
         exact_query_key := expanded_erhua_query_key;
@@ -7880,11 +7905,11 @@ begin
             evicted_cache_key := m_exact_lookup_result_cache_order.Dequeue;
             m_exact_lookup_result_cache.Remove(evicted_cache_key);
         end;
-        m_exact_lookup_result_cache.AddOrSetValue(query_key,
+        m_exact_lookup_result_cache.AddOrSetValue(cache_query_key,
             Copy(results, 0, Length(results)));
         if m_exact_lookup_result_cache_order <> nil then
         begin
-            m_exact_lookup_result_cache_order.Enqueue(query_key);
+            m_exact_lookup_result_cache_order.Enqueue(cache_query_key);
         end;
     end;
 end;
@@ -8031,6 +8056,7 @@ var
     skipped_base_dup_user_count: Integer;
     injected_learned_base_count: Integer;
     latest_query_choice_text: string;
+    canonical_query_key: string;
 
     function build_mixed_like_pattern(const token_list: TncMixedQueryTokenList): string; forward;
     function is_compact_ascii_query(const value: string): Boolean; forward;
@@ -8502,6 +8528,18 @@ var
     begin
         if text = '' then
         begin
+            Exit;
+        end;
+        if is_single_syllable_full_pinyin_key(query_key) and
+            (candidate_pinyin_key <> '') and
+            (Pos('''', normalize_canonical_pinyin_key(candidate_pinyin_key)) > 0) and
+            SameText(normalize_compact_pinyin_key(candidate_pinyin_key), query_key) and
+            (not SameText(normalize_canonical_pinyin_key(candidate_pinyin_key),
+            normalize_canonical_pinyin_key(query_key))) then
+        begin
+            { A complete single syllable such as luan must not inherit a
+              separator-form exact word such as lu'an through compact jianpin
+              aliases.  The explicit separator query remains available. }
             Exit;
         end;
         if not is_windows_supported_ime_text(text) then
@@ -9952,6 +9990,11 @@ begin
     begin
         Result := False;
         Exit;
+    end;
+    canonical_query_key := normalize_canonical_pinyin_key(pinyin);
+    if Pos('''', canonical_query_key) > 0 then
+    begin
+        Exit(lookup_exact_full_pinyin_internal(canonical_query_key, results, True));
     end;
     // Same-process writes clear these caches synchronously. Cross-process
     // updates only need the bounded check performed by ensure_open.
