@@ -29,6 +29,7 @@ type
         m_user_db_path: string;
         m_ready: Boolean;
         m_base_ready: Boolean;
+        m_base_connection_read_only: Boolean;
         m_user_ready: Boolean;
         m_prune_user_entries_on_open: Boolean;
         m_limit: Integer;
@@ -101,6 +102,8 @@ type
         m_lookup_result_cache_order: TQueue<string>;
         m_exact_lookup_result_cache: TDictionary<string, TncCandidateList>;
         m_exact_lookup_result_cache_order: TQueue<string>;
+        m_base_exact_pinyin_bloom: TBytes;
+        m_base_exact_pinyin_bloom_ready: Boolean;
         m_prefix_lookup_result_cache: TDictionary<string, TncCandidateList>;
         m_literal_lookup_result_cache: TDictionary<string, TncCandidateList>;
         m_literal_user_words_available: Integer;
@@ -167,6 +170,8 @@ type
             const commit_count: Integer = 0; const user_weight: Integer = 0): Boolean;
         procedure configure_base_connection;
         procedure configure_user_connection;
+        procedure load_base_exact_pinyin_bloom;
+        function base_exact_pinyin_may_exist(const pinyin: string): Boolean;
         procedure load_lm_transition_bonus_cache;
         function ensure_char_lm_available: Boolean;
         procedure cache_char_lm_entry(const ngram: string;
@@ -2093,6 +2098,7 @@ begin
     m_user_db_path := user_db_path;
     m_ready := False;
     m_base_ready := False;
+    m_base_connection_read_only := False;
     m_user_ready := False;
     m_prune_user_entries_on_open := prune_user_entries_on_open;
     m_limit := 256;
@@ -2165,6 +2171,8 @@ begin
     m_lookup_result_cache_order := TQueue<string>.Create;
     m_exact_lookup_result_cache := TDictionary<string, TncCandidateList>.Create;
     m_exact_lookup_result_cache_order := TQueue<string>.Create;
+    SetLength(m_base_exact_pinyin_bloom, 0);
+    m_base_exact_pinyin_bloom_ready := False;
     m_prefix_lookup_result_cache := TDictionary<string, TncCandidateList>.Create;
     m_literal_lookup_result_cache := TDictionary<string, TncCandidateList>.Create;
     m_literal_user_words_available := -1;
@@ -6414,10 +6422,153 @@ begin
     end;
 end;
 
+procedure TncSqliteDictionary.load_base_exact_pinyin_bloom;
+const
+    c_bloom_byte_count = 1 shl 19;
+    c_bloom_bit_mask = (c_bloom_byte_count * 8) - 1;
+    c_bloom_probe_count = 4;
+    base_pinyin_sql = 'SELECT pinyin FROM dict_base';
+    alias_pinyin_sql = 'SELECT compact_pinyin FROM dict_base_pinyin_alias';
+var
+    stmt: Psqlite3_stmt;
+
+    procedure add_key(const raw_key: string);
+    var
+        key_value: string;
+        hash1: Cardinal;
+        hash2: Cardinal;
+        char_idx: Integer;
+        probe_idx: Integer;
+        bit_idx: Cardinal;
+        byte_idx: Cardinal;
+        bit_mask: Byte;
+    begin
+        key_value := normalize_compact_pinyin_key(raw_key);
+        if key_value = '' then
+        begin
+            Exit;
+        end;
+
+        hash1 := 2166136261;
+        hash2 := 5381;
+        for char_idx := 1 to Length(key_value) do
+        begin
+            hash1 := (hash1 xor Ord(key_value[char_idx])) * 16777619;
+            hash2 := ((hash2 shl 5) + hash2) xor Ord(key_value[char_idx]);
+        end;
+        hash2 := hash2 or 1;
+
+        for probe_idx := 0 to c_bloom_probe_count - 1 do
+        begin
+            bit_idx := Cardinal((UInt64(hash1) + UInt64(probe_idx) *
+                UInt64(hash2)) and UInt64(c_bloom_bit_mask));
+            byte_idx := bit_idx shr 3;
+            bit_mask := Byte(1 shl (bit_idx and 7));
+            m_base_exact_pinyin_bloom[byte_idx] :=
+                m_base_exact_pinyin_bloom[byte_idx] or bit_mask;
+        end;
+    end;
+
+    function add_query(const sql: string): Boolean;
+    var
+        step_result: Integer;
+    begin
+        Result := False;
+        stmt := nil;
+        try
+            if not m_base_connection.prepare(sql, stmt) then
+            begin
+                Exit;
+            end;
+            step_result := m_base_connection.step(stmt);
+            while step_result = SQLITE_ROW do
+            begin
+                add_key(m_base_connection.column_text(stmt, 0));
+                step_result := m_base_connection.step(stmt);
+            end;
+            Result := step_result = SQLITE_DONE;
+        finally
+            if stmt <> nil then
+            begin
+                m_base_connection.finalize(stmt);
+            end;
+        end;
+    end;
+
+begin
+    m_base_exact_pinyin_bloom_ready := False;
+    SetLength(m_base_exact_pinyin_bloom, 0);
+    if (not m_base_ready) or (not m_base_connection_read_only) or
+        (m_base_connection = nil) then
+    begin
+        Exit;
+    end;
+
+    SetLength(m_base_exact_pinyin_bloom, c_bloom_byte_count);
+    FillChar(m_base_exact_pinyin_bloom[0], Length(m_base_exact_pinyin_bloom), 0);
+    if (not add_query(base_pinyin_sql)) or (not add_query(alias_pinyin_sql)) then
+    begin
+        SetLength(m_base_exact_pinyin_bloom, 0);
+        Exit;
+    end;
+    m_base_exact_pinyin_bloom_ready := True;
+end;
+
+function TncSqliteDictionary.base_exact_pinyin_may_exist(
+    const pinyin: string): Boolean;
+const
+    c_bloom_bit_mask = ((1 shl 19) * 8) - 1;
+    c_bloom_probe_count = 4;
+var
+    key_value: string;
+    hash1: Cardinal;
+    hash2: Cardinal;
+    char_idx: Integer;
+    probe_idx: Integer;
+    bit_idx: Cardinal;
+    byte_idx: Cardinal;
+    bit_mask: Byte;
+begin
+    if (not m_base_exact_pinyin_bloom_ready) or
+        (Length(m_base_exact_pinyin_bloom) = 0) then
+    begin
+        Exit(True);
+    end;
+
+    key_value := normalize_compact_pinyin_key(pinyin);
+    if key_value = '' then
+    begin
+        Exit(False);
+    end;
+
+    hash1 := 2166136261;
+    hash2 := 5381;
+    for char_idx := 1 to Length(key_value) do
+    begin
+        hash1 := (hash1 xor Ord(key_value[char_idx])) * 16777619;
+        hash2 := ((hash2 shl 5) + hash2) xor Ord(key_value[char_idx]);
+    end;
+    hash2 := hash2 or 1;
+
+    for probe_idx := 0 to c_bloom_probe_count - 1 do
+    begin
+        bit_idx := Cardinal((UInt64(hash1) + UInt64(probe_idx) *
+            UInt64(hash2)) and UInt64(c_bloom_bit_mask));
+        byte_idx := bit_idx shr 3;
+        bit_mask := Byte(1 shl (bit_idx and 7));
+        if (m_base_exact_pinyin_bloom[byte_idx] and bit_mask) = 0 then
+        begin
+            Exit(False);
+        end;
+    end;
+    Result := True;
+end;
+
 function TncSqliteDictionary.open: Boolean;
 begin
     m_ready := False;
     m_base_ready := False;
+    m_base_connection_read_only := False;
     m_user_ready := False;
     m_literal_user_words_available := -1;
     Result := False;
@@ -6435,9 +6586,11 @@ begin
         end;
 
         m_base_ready := m_base_connection.open(SQLITE_OPEN_READONLY);
+        m_base_connection_read_only := m_base_ready;
         if not m_base_ready then
         begin
             m_base_ready := m_base_connection.open(SQLITE_OPEN_READWRITE or SQLITE_OPEN_CREATE);
+            m_base_connection_read_only := False;
             if m_base_ready then
             begin
                 ensure_schema(m_base_connection);
@@ -6446,6 +6599,7 @@ begin
         if m_base_ready then
         begin
             configure_base_connection;
+            load_base_exact_pinyin_bloom;
             load_lm_transition_bonus_cache;
         end;
     end;
@@ -6620,7 +6774,10 @@ begin
 
     m_ready := False;
     m_base_ready := False;
+    m_base_connection_read_only := False;
     m_user_ready := False;
+    m_base_exact_pinyin_bloom_ready := False;
+    SetLength(m_base_exact_pinyin_bloom, 0);
     m_short_lookup_cache_prewarmed := False;
     m_contains_popularity_index_checked := False;
     m_contains_popularity_index_ready := False;
@@ -7539,12 +7696,16 @@ begin
         if m_base_ready then
         begin
             base_candidates_before := list.Count;
-            if full_pinyin_query and (m_stmt_exact_base = nil) then
+            if full_pinyin_query and
+                base_exact_pinyin_may_exist(exact_query_key) and
+                (m_stmt_exact_base = nil) then
             begin
                 m_base_connection.prepare(base_sql, m_stmt_exact_base);
             end;
             stmt := m_stmt_exact_base;
-            if full_pinyin_query and (stmt <> nil) and
+            if full_pinyin_query and
+                base_exact_pinyin_may_exist(exact_query_key) and
+                (stmt <> nil) and
                 m_base_connection.reset(stmt) and
                 m_base_connection.clear_bindings(stmt) and
                 m_base_connection.bind_text(stmt, 1, exact_query_key) then
@@ -7566,7 +7727,8 @@ begin
                     end;
                 until step_result <> SQLITE_ROW;
             end;
-            if list.Count = base_candidates_before then
+            if (list.Count = base_candidates_before) and
+                base_exact_pinyin_may_exist(query_key) then
             begin
                 if m_stmt_exact_base_alias = nil then
                 begin
