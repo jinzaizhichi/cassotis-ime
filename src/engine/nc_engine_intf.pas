@@ -142347,6 +142347,32 @@ var
                 (Trim(m_left_context) <> '');
         end;
 
+        function short_base_exact_dynamic_weight_local(
+            const text_value: string): Integer;
+        const
+            c_min_repeated_choice_evidence = 320;
+        begin
+            Result := 0;
+            if (text_value = '') or has_effective_short_context_local or
+                (m_dictionary = nil) or
+                (not is_full_pinyin_key(normalized_pinyin)) then
+            begin
+                Exit;
+            end;
+
+            { Keep no-context exact ranking deterministic: the only signal
+              allowed above the raw dictionary weight is the persisted choice
+              score for this exact pinyin/text pair. Session recency, language
+              models and scores learned for another candidate are deliberately
+              excluded. }
+            Result := m_dictionary.get_query_choice_bonus(normalized_pinyin,
+                text_value);
+            if Result < c_min_repeated_choice_evidence then
+            begin
+                Result := 0;
+            end;
+        end;
+
         function short_exact_effective_weight_local(
             const candidate_value: TncCandidate): Integer;
         begin
@@ -144322,15 +144348,21 @@ var
                             c_low_frequency_medical_exact_weight) and
                             text_has_low_frequency_medical_unit_local(
                             local_text);
-                        { Without context, base exact candidates must retain the
-                          raw dictionary-weight order. User exact candidates are
-                          the only exception in this layer. }
+                        { Without context, base exact candidates retain raw
+                          dictionary-weight order unless this exact pinyin/text
+                          pair has durable user-choice evidence. }
                         local_direct_exact_rank := local_exact_weight;
                         if local_exact_user then
                         begin
                             Inc(local_direct_exact_rank,
                                 query_choice_rank_bonus_local(local_text));
                             Inc(local_direct_exact_rank, c_user_score_bonus);
+                        end;
+                        if not local_exact_user then
+                        begin
+                            Inc(local_direct_exact_rank,
+                                short_base_exact_dynamic_weight_local(
+                                local_text));
                         end;
                         item.rank_score := local_direct_exact_rank;
                     end;
