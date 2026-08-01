@@ -56,6 +56,27 @@ type
         complete_user: Boolean;
         complete_dictionary: Boolean;
         complete_chain: Boolean;
+        complete_pool_present: Boolean;
+        complete_pool_source_kind: Integer;
+        complete_pool_rank: Integer;
+        complete_pool_seed_rank: Integer;
+        complete_pool_original: Boolean;
+        complete_pool_substitutions: Integer;
+        complete_pool_changed_position: Integer;
+        complete_pool_pair_evidence: Integer;
+        complete_pool_proper_name_confidence: Integer;
+        complete_pool_signature_support: Integer;
+        complete_pool_consensus_support: Integer;
+        complete_pool_consensus_seed_count: Integer;
+        complete_pool_consensus_support_mean: Integer;
+        complete_pool_consensus_support_min: Integer;
+        complete_pool_consensus_majority_units: Integer;
+        complete_pool_consensus_unanimous_units: Integer;
+        complete_pool_consensus_nearest_distance: Integer;
+        complete_pool_consensus_mean_distance: Integer;
+        complete_pool_consensus_changed_support: Integer;
+        complete_pool_consensus_changed_top_match: Boolean;
+        complete_pool_local_pairwise_score: Integer;
     end;
 
 const

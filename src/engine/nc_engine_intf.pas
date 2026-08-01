@@ -240,6 +240,27 @@ type
         complete_user: Boolean;
         complete_dictionary: Boolean;
         complete_chain: Boolean;
+        complete_pool_present: Boolean;
+        complete_pool_source_kind: Integer;
+        complete_pool_rank: Integer;
+        complete_pool_seed_rank: Integer;
+        complete_pool_original: Boolean;
+        complete_pool_substitutions: Integer;
+        complete_pool_changed_position: Integer;
+        complete_pool_pair_evidence: Integer;
+        complete_pool_proper_name_confidence: Integer;
+        complete_pool_signature_support: Integer;
+        complete_pool_consensus_support: Integer;
+        complete_pool_consensus_seed_count: Integer;
+        complete_pool_consensus_support_mean: Integer;
+        complete_pool_consensus_support_min: Integer;
+        complete_pool_consensus_majority_units: Integer;
+        complete_pool_consensus_unanimous_units: Integer;
+        complete_pool_consensus_nearest_distance: Integer;
+        complete_pool_consensus_mean_distance: Integer;
+        complete_pool_consensus_changed_support: Integer;
+        complete_pool_consensus_changed_top_match: Boolean;
+        complete_pool_local_pairwise_score: Integer;
         ranker_score: Int64;
         abstain_score: Int64;
         ranker_applied: Boolean;
@@ -299,6 +320,63 @@ type
     end;
 
     TncLongChainRuntimeCandidateArray = TArray<TncLongChainRuntimeCandidate>;
+
+    TncLongCompletePoolSource = (
+        lcps_visible,
+        lcps_chain,
+        lcps_existing,
+        lcps_local_repair,
+        lcps_exact_pair,
+        lcps_proper_name,
+        lcps_exact_lattice
+    );
+
+    TncLongCompletePoolRuntimeCandidate = record
+        candidate: TncCandidate;
+        source_index: Integer;
+        segment_path: string;
+        segmentation_signature: string;
+        source_kind: TncLongCompletePoolSource;
+        seed_rank: Integer;
+        seed_visible_index: Integer;
+        original: Boolean;
+        substitutions: Integer;
+        changed_position: Integer;
+        source_char_weight: Integer;
+        replacement_char_weight: Integer;
+        char_lm_score: Integer;
+        char_lm_suffix_score: Integer;
+        char_lm_context_score: Integer;
+        word_lm_bonus: Integer;
+        word_lm_boundary_count: Integer;
+        word_lm_boundary_min: Integer;
+        word_lm_boundary_max: Integer;
+        word_lm_boundary_first: Integer;
+        word_lm_boundary_last: Integer;
+        word_lm_supported_ratio: Integer;
+        word_lm_strong_ratio: Integer;
+        word_lm_trigram_ratio: Integer;
+        word_lm_zero_count: Integer;
+        pair_evidence: Integer;
+        proper_name_confidence: Integer;
+        signature_support: Integer;
+        consensus_support: Integer;
+        consensus_seed_count: Integer;
+        consensus_support_mean: Double;
+        consensus_support_min: Double;
+        consensus_majority_units: Integer;
+        consensus_unanimous_units: Integer;
+        consensus_nearest_distance: Integer;
+        consensus_mean_distance: Double;
+        consensus_changed_support: Double;
+        consensus_changed_top_match: Integer;
+        local_pairwise_score: Integer;
+        local_pairwise_insert_rank: Integer;
+        pool_rank: Integer;
+    end;
+
+    TncLongCompletePoolRuntimeCandidateArray =
+        TArray<TncLongCompletePoolRuntimeCandidate>;
 
     TncLongBeamStateDebugArray = TArray<TncLongBeamStateDebug>;
 
@@ -461,6 +539,10 @@ type
         m_debug_long_chain_candidates: TncLongChainCandidateDebugArray;
         m_debug_long_final_candidates: TncLongFinalCandidateDebugArray;
         m_runtime_long_chain_candidates: TncLongChainRuntimeCandidateArray;
+        m_runtime_long_complete_pool_candidates:
+            TncLongCompletePoolRuntimeCandidateArray;
+        m_long_complete_pool_pairwise_text: string;
+        m_long_complete_pool_pairwise_insert_rank: Integer;
         m_debug_long_chain_beam_width: Integer;
         m_debug_long_chain_prebeam_width: Integer;
         m_debug_long_chain_option_limit: Integer;
@@ -613,9 +695,16 @@ type
         function merge_candidate_lists(const primary_candidates: TncCandidateList;
             const secondary_candidates: TncCandidateList; const max_candidates: Integer): TncCandidateList;
         procedure build_candidates;
+        procedure apply_long_complete_candidate_pool(
+            var candidates: TncCandidateList;
+            var source_indices: TArray<Integer>;
+            const normalized_query: string;
+            const query_syllables: TncPinyinParseResult;
+            const expected_units: Integer);
         procedure apply_long_final_visible_candidate_ranking(
             var candidates: TncCandidateList;
-            var source_indices: TArray<Integer>);
+            var source_indices: TArray<Integer>;
+            const unified_pool_final: Boolean = False);
         function build_segment_candidates(out out_candidates: TncCandidateList;
             const include_full_path: Boolean; out out_path_search_elapsed_ms: Int64;
             const allow_relaxed_missing_apostrophe: Boolean = False): Boolean;
@@ -723,6 +812,8 @@ uses
     nc_long_pairwise_residual_model,
     nc_long_final_ranker_model,
     nc_long_final_abstain_model,
+    nc_long_complete_pool_ranker_model,
+    nc_long_complete_pool_abstain_model,
     nc_long_visible_pairwise_residual_model,
     nc_long_local_difference_residual_model,
     nc_long_local_pairwise_pool_model,
@@ -964,6 +1055,9 @@ begin
     SetLength(m_debug_long_chain_candidates, 0);
     SetLength(m_debug_long_final_candidates, 0);
     SetLength(m_runtime_long_chain_candidates, 0);
+    SetLength(m_runtime_long_complete_pool_candidates, 0);
+    m_long_complete_pool_pairwise_text := '';
+    m_long_complete_pool_pairwise_insert_rank := -1;
     m_debug_long_chain_beam_width := 0;
     m_debug_long_chain_prebeam_width := 0;
     m_debug_long_chain_option_limit := 0;
@@ -2977,6 +3071,9 @@ begin
     m_runtime_common_pattern_text := '';
     m_runtime_redup_text := '';
     SetLength(m_runtime_long_chain_candidates, 0);
+    SetLength(m_runtime_long_complete_pool_candidates, 0);
+    m_long_complete_pool_pairwise_text := '';
+    m_long_complete_pool_pairwise_insert_rank := -1;
     m_debug_target_recall_text := '';
     reset_debug_target_recall_metrics;
     m_page_index := 0;
@@ -66456,10 +66553,6 @@ var
             context_bonus_local: Integer;
             option_local: TSubquerySolverBeamOption;
             option_limit_local: Integer;
-            nested_candidate_idx_local: Integer;
-            nested_candidate_local: TncCandidate;
-            nested_candidate_score_local: Integer;
-            nested_candidate_units_local: Integer;
         begin
             Result := False;
             SetLength(out_options, 0);
@@ -66638,83 +66731,6 @@ var
                         option_limit_local);
                 end;
             end;
-            if (syllable_count_part >= 2) and (syllable_count_part <= 3) then
-            begin
-                if query_engine = nil then
-                begin
-                    query_engine_config := m_config;
-                    query_engine_config.debug_mode := False;
-                    query_engine_config.max_candidates := 6;
-                    query_engine := TncEngine.Create(query_engine_config);
-                    query_engine.m_disable_subspan_standalone_oracle :=
-                        m_disable_subspan_standalone_oracle + 1;
-                end;
-
-                query_engine.reset;
-                query_engine.m_disable_subspan_standalone_oracle :=
-                    m_disable_subspan_standalone_oracle + 1;
-                query_engine.m_composition_text := query_key_local;
-                query_engine.build_candidates;
-                for nested_candidate_idx_local := 0 to High(query_engine.m_candidates) do
-                begin
-                    if nested_candidate_idx_local >= 96 then
-                    begin
-                        Break;
-                    end;
-                    nested_candidate_local := query_engine.m_candidates[
-                        nested_candidate_idx_local];
-                    candidate_text_local := Trim(nested_candidate_local.text);
-                    if (Trim(nested_candidate_local.comment) <> '') or
-                        (candidate_text_local = '') then
-                    begin
-                        Continue;
-                    end;
-                    nested_candidate_units_local := get_candidate_text_unit_count(
-                        candidate_text_local);
-                    if (nested_candidate_units_local <> syllable_count_part) or
-                        (not is_valid_solver_cjk_phrase_text_local(candidate_text_local,
-                        syllable_count_part)) or
-                        (not solver_candidate_respects_fixed_boundaries_local(
-                        start_idx, syllable_count_part, candidate_text_local)) then
-                    begin
-                        Continue;
-                    end;
-
-                    nested_candidate_score_local := query_engine.get_rank_score(
-                        nested_candidate_local);
-                    Inc(nested_candidate_score_local,
-                        get_preferred_query_phrase_bonus_local(
-                        query_key_local, candidate_text_local));
-                    Inc(nested_candidate_score_local,
-                        get_preferred_exact_subspan_bonus_local(
-                        query_key_local, candidate_text_local));
-                    Inc(nested_candidate_score_local,
-                        get_exact_query_text_bonus_solver_local(
-                        query_key_local, candidate_text_local));
-                    Dec(nested_candidate_score_local,
-                        get_trailing_context_free_single_char_penalty_solver_local(
-                        query_key_local, candidate_text_local));
-                    inferred_path_local :=
-                        infer_segment_path_for_query_text_with_score(
-                        query_key_local, candidate_text_local,
-                        infer_score_local, infer_segments_local);
-                    if inferred_path_local <> '' then
-                    begin
-                        Inc(nested_candidate_score_local, infer_score_local);
-                        Inc(nested_candidate_score_local,
-                            infer_segments_local * 320);
-                    end;
-                    option_local := Default(TSubquerySolverBeamOption);
-                    option_local.text := candidate_text_local;
-                    option_local.path := candidate_text_local;
-                    option_local.first_chunk := candidate_text_local;
-                    option_local.score := nested_candidate_score_local;
-                    option_local.segments := 1;
-                    add_solver_beam_option_local(out_options, option_local,
-                        option_limit_local);
-                end;
-            end;
-
             if try_get_best_query_key_candidate_local(query_key_local,
                 syllable_count_part, candidate_text_local, candidate_score_local) then
             begin
@@ -112769,6 +112785,9 @@ begin
         m_runtime_common_pattern_text := '';
         m_runtime_redup_text := '';
         SetLength(m_runtime_long_chain_candidates, 0);
+        SetLength(m_runtime_long_complete_pool_candidates, 0);
+        m_long_complete_pool_pairwise_text := '';
+        m_long_complete_pool_pairwise_insert_rank := -1;
         clear_segment_path_tracking;
         clear_lookup_bonus_caches;
         if m_composition_text = '' then
@@ -120296,9 +120315,2354 @@ begin
     end;
 end;
 
+procedure TncEngine.apply_long_complete_candidate_pool(
+    var candidates: TncCandidateList;
+    var source_indices: TArray<Integer>;
+    const normalized_query: string;
+    const query_syllables: TncPinyinParseResult;
+    const expected_units: Integer);
+const
+    c_pool_limit = 32;
+    c_raw_pool_limit = 192;
+    c_existing_probe_limit = 64;
+    c_pair_seed_limit = 6;
+    c_pair_candidate_limit = 24;
+    c_exact_lattice_beam_width = 8;
+    c_exact_lattice_candidate_limit = 8;
+    c_exact_lattice_word_option_limit = 6;
+    c_exact_lattice_single_option_limit = 8;
+    c_exact_lattice_max_segment_units = 5;
+    c_exact_lattice_signature_limit = 3;
+    c_single_option_limit = 6;
+    c_signature_soft_limit = 4;
+    c_chain_reserved = 6;
+    c_pair_reserved = 6;
+    c_local_reserved = 12;
+    c_proper_name_reserved = 2;
+    c_exact_lattice_reserved = 8;
+    c_visible_complete_limit = 2;
+    c_min_lm_pair_weight = 390;
+    c_min_query_pair_weight = 420;
+    c_min_corroborated_pair_weight = 360;
+    c_min_strong_word_lm_bonus = 360;
+    c_query_path_bonus_cap = 420;
+type
+    TncCompletePoolLatticeState = record
+        score: Int64;
+        text: string;
+        path: string;
+        signature: string;
+        previous_previous_text: string;
+        previous_text: string;
+        previous_previous_units: Integer;
+        previous_units: Integer;
+        segment_count: Integer;
+        transition_support: Integer;
+    end;
+    TncCompletePoolLatticeStateArray =
+        TArray<TncCompletePoolLatticeState>;
+var
+    raw_pool: TncLongCompletePoolRuntimeCandidateArray;
+    raw_index_by_text: TDictionary<string, Integer>;
+    selected_indices: TArray<Integer>;
+    selected_texts: TDictionary<string, Boolean>;
+    selected_signature_counts: TDictionary<string, Integer>;
+    signature_totals: TDictionary<string, Integer>;
+    exact_cache: TDictionary<string, TncCandidateList>;
+    word_lm_cache: TDictionary<string, Integer>;
+    span_key_cache: TArray<TArray<string>>;
+    original_candidates: TncCandidateList;
+    original_source_indices: TArray<Integer>;
+    internal_candidates: TncCandidateList;
+    internal_source_indices: TArray<Integer>;
+    original_visible_count: Integer;
+    raw_original_count: Integer;
+    pair_candidate_count: Integer;
+    idx: Integer;
+    raw_idx: Integer;
+    chain_idx: Integer;
+    source_idx: Integer;
+    selected_idx: Integer;
+    sort_pos: Integer;
+    sort_insert_pos: Integer;
+    sort_value: Integer;
+    candidate_value: TncCandidate;
+    path_value: string;
+    char_texts: TArray<string>;
+    char_scores: TArray<Integer>;
+    char_suffix_scores: TArray<Integer>;
+    char_context_scores: TArray<Integer>;
+    missing_char_raw_indices: TArray<Integer>;
+    missing_char_texts: TArray<string>;
+    missing_char_scores: TArray<Integer>;
+    missing_char_suffix_scores: TArray<Integer>;
+    missing_char_context_scores: TArray<Integer>;
+    missing_char_count: Integer;
+    missing_char_idx: Integer;
+    char_scores_ok: Boolean;
+    previous_previous_text: string;
+    previous_text: string;
+    left_context: string;
+    has_left_context: Boolean;
+    sorted_indices: TArray<Integer>;
+    merged_candidates: TncCandidateList;
+    merged_sources: TArray<Integer>;
+    merged_count: Integer;
+    complete_count: Integer;
+    emitted_texts: TDictionary<string, Boolean>;
+    pairwise_best_idx: Integer;
+    pairwise_best_score: Double;
+    pairwise_insert_rank: Integer;
+    pool_phase_tick: UInt64;
+
+    procedure note_pool_phase(const phase_name: string);
+    var
+        elapsed_ms: UInt64;
+    begin
+        if not m_config.debug_mode then
+        begin
+            Exit;
+        end;
+        elapsed_ms := GetTickCount64 - pool_phase_tick;
+        pool_phase_tick := GetTickCount64;
+        if elapsed_ms = 0 then
+        begin
+            Exit;
+        end;
+        if m_last_lookup_debug_extra <> '' then
+        begin
+            m_last_lookup_debug_extra := m_last_lookup_debug_extra + ' ';
+        end;
+        m_last_lookup_debug_extra := m_last_lookup_debug_extra +
+            Format('lcp_%s=%d', [phase_name, elapsed_ms]);
+    end;
+
+    function clamp_int64_to_integer(const value: Int64): Integer;
+    begin
+        if value > High(Integer) then
+        begin
+            Exit(High(Integer));
+        end;
+        if value < Low(Integer) then
+        begin
+            Exit(Low(Integer));
+        end;
+        Result := value;
+    end;
+
+    function candidate_raw_weight(const value: TncCandidate): Integer;
+    begin
+        Result := value.score;
+        if value.has_dict_weight then
+        begin
+            Result := Max(Result, value.dict_weight);
+        end;
+        if value.source = cs_user then
+        begin
+            Result := Max(Result, 4096);
+        end;
+    end;
+
+    function candidate_is_complete(const value: TncCandidate): Boolean;
+    begin
+        Result := (Trim(value.text) <> '') and
+            (Trim(value.comment) = '') and
+            (get_candidate_text_unit_count(Trim(value.text)) = expected_units);
+    end;
+
+    function build_span_key(const start_index: Integer;
+        const span_length: Integer): string;
+    var
+        syllable_idx: Integer;
+    begin
+        Result := '';
+        if (start_index < 0) or (span_length <= 0) or
+            (start_index + span_length > Length(query_syllables)) then
+        begin
+            Exit;
+        end;
+        if Length(span_key_cache) <> Length(query_syllables) then
+        begin
+            SetLength(span_key_cache, Length(query_syllables));
+            for syllable_idx := 0 to High(span_key_cache) do
+            begin
+                SetLength(span_key_cache[syllable_idx],
+                    Length(query_syllables) - syllable_idx + 1);
+            end;
+        end;
+        if span_key_cache[start_index][span_length] <> '' then
+        begin
+            Exit(span_key_cache[start_index][span_length]);
+        end;
+        for syllable_idx := start_index to
+            start_index + span_length - 1 do
+        begin
+            Result := Result + normalize_pinyin_text(
+                query_syllables[syllable_idx].text);
+        end;
+        span_key_cache[start_index][span_length] := Result;
+    end;
+
+    function load_exact_candidates(const query_key: string;
+        out values: TncCandidateList): Boolean;
+    var
+        cache_key: string;
+    begin
+        SetLength(values, 0);
+        cache_key := '#longpool_exact#' + query_key;
+        if exact_cache.TryGetValue(cache_key, values) then
+        begin
+            Exit(Length(values) > 0);
+        end;
+        if not m_dictionary.lookup_exact_full_pinyin(query_key, values) then
+        begin
+            SetLength(values, 0);
+        end;
+        exact_cache.AddOrSetValue(cache_key,
+            Copy(values, 0, Length(values)));
+        Result := Length(values) > 0;
+    end;
+
+    function find_exact_candidate(const query_key: string;
+        const text_value: string; const unit_count: Integer;
+        out exact_candidate: TncCandidate): Boolean;
+    var
+        values: TncCandidateList;
+        value_idx: Integer;
+    begin
+        Result := False;
+        exact_candidate := Default(TncCandidate);
+        if not load_exact_candidates(query_key, values) then
+        begin
+            Exit;
+        end;
+        for value_idx := 0 to High(values) do
+        begin
+            if (Trim(values[value_idx].comment) = '') and
+                (get_candidate_text_unit_count(
+                Trim(values[value_idx].text)) = unit_count) and
+                SameText(Trim(values[value_idx].text), Trim(text_value)) then
+            begin
+                exact_candidate := values[value_idx];
+                Exit(True);
+            end;
+        end;
+    end;
+
+    function infer_complete_pool_exact_path(const candidate_text: string;
+        out encoded_path: string): Boolean;
+    type
+        TncCompletePoolExactPathState = record
+            valid: Boolean;
+            score: Int64;
+            segment_count: Integer;
+            path_text: string;
+        end;
+    const
+        c_max_exact_segment_units = 5;
+    var
+        units: TArray<string>;
+        states: TArray<TncCompletePoolExactPathState>;
+        candidate_state: TncCompletePoolExactPathState;
+        exact_candidate: TncCandidate;
+        segment_text: string;
+        query_key: string;
+        unit_idx: Integer;
+        segment_idx: Integer;
+        segment_units: Integer;
+        next_idx: Integer;
+        exact_weight: Integer;
+    begin
+        Result := False;
+        encoded_path := '';
+        units := split_text_units(Trim(candidate_text));
+        if Length(units) <> expected_units then
+        begin
+            Exit;
+        end;
+
+        SetLength(states, expected_units + 1);
+        states[expected_units].valid := True;
+        states[expected_units].score := 0;
+        states[expected_units].segment_count := 0;
+        states[expected_units].path_text := '';
+        for unit_idx := expected_units - 1 downto 0 do
+        begin
+            states[unit_idx].valid := False;
+            for segment_units := 1 to Min(c_max_exact_segment_units,
+                expected_units - unit_idx) do
+            begin
+                next_idx := unit_idx + segment_units;
+                if not states[next_idx].valid then
+                begin
+                    Continue;
+                end;
+                segment_text := '';
+                for segment_idx := unit_idx to next_idx - 1 do
+                begin
+                    segment_text := segment_text + units[segment_idx];
+                end;
+                query_key := build_span_key(unit_idx, segment_units);
+                if (query_key = '') or (not find_exact_candidate(query_key,
+                    segment_text, segment_units, exact_candidate)) then
+                begin
+                    Continue;
+                end;
+
+                exact_weight := candidate_raw_weight(exact_candidate);
+                candidate_state.valid := True;
+                candidate_state.score := states[next_idx].score +
+                    exact_weight + Int64(segment_units * segment_units) * 1200;
+                candidate_state.segment_count :=
+                    states[next_idx].segment_count + 1;
+                candidate_state.path_text := segment_text;
+                if states[next_idx].path_text <> '' then
+                begin
+                    candidate_state.path_text := candidate_state.path_text +
+                        c_segment_path_separator + states[next_idx].path_text;
+                end;
+                if (not states[unit_idx].valid) or
+                    (candidate_state.score > states[unit_idx].score) or
+                    ((candidate_state.score = states[unit_idx].score) and
+                    (candidate_state.segment_count <
+                    states[unit_idx].segment_count)) then
+                begin
+                    states[unit_idx] := candidate_state;
+                end;
+            end;
+        end;
+        if states[0].valid then
+        begin
+            encoded_path := states[0].path_text;
+            Result := encoded_path <> '';
+        end;
+    end;
+
+    function decode_and_validate_path(const candidate_text: string;
+        const encoded_path: string; out signature: string;
+        out name_confidence: Integer): Boolean;
+    var
+        parts: TArray<string>;
+        part_units: TArray<string>;
+        exact_candidate: TncCandidate;
+        reconstructed: string;
+        query_key: string;
+        part_idx: Integer;
+        unit_cursor: Integer;
+        part_length: Integer;
+        first_unit: string;
+    begin
+        Result := False;
+        signature := '';
+        name_confidence := 0;
+        reconstructed := '';
+        unit_cursor := 0;
+        if Trim(encoded_path) = '' then
+        begin
+            Exit;
+        end;
+        parts := encoded_path.Split([c_segment_path_separator]);
+        if Length(parts) <= 0 then
+        begin
+            Exit;
+        end;
+        for part_idx := 0 to High(parts) do
+        begin
+            parts[part_idx] := Trim(parts[part_idx]);
+            part_units := split_text_units(parts[part_idx]);
+            part_length := Length(part_units);
+            if (part_length <= 0) or
+                (unit_cursor + part_length > expected_units) then
+            begin
+                Exit;
+            end;
+            query_key := build_span_key(unit_cursor, part_length);
+            if (query_key = '') or
+                (not find_exact_candidate(query_key, parts[part_idx],
+                part_length, exact_candidate)) then
+            begin
+                Exit;
+            end;
+            if signature <> '' then
+            begin
+                signature := signature + '-';
+            end;
+            signature := signature + IntToStr(part_length);
+            reconstructed := reconstructed + parts[part_idx];
+            if (part_length in [2, 3]) and
+                (Length(part_units) > 0) then
+            begin
+                first_unit := part_units[0];
+                if is_common_surname_text(first_unit) then
+                begin
+                    name_confidence := Max(name_confidence,
+                        620 + part_length * 80);
+                end;
+            end;
+            Inc(unit_cursor, part_length);
+        end;
+        Result := (unit_cursor = expected_units) and
+            SameText(reconstructed, Trim(candidate_text));
+    end;
+
+    function resolve_candidate_path(const value: TncCandidate;
+        const candidate_source_index: Integer; const preferred_path: string;
+        out resolved_path: string; out signature: string;
+        out name_confidence: Integer): Boolean;
+    var
+        inferred_score: Integer;
+        inferred_segments: Integer;
+    begin
+        resolved_path := Trim(preferred_path);
+        if (resolved_path = '') and (candidate_source_index >= 0) and
+            (candidate_source_index < Length(m_candidates)) then
+        begin
+            resolved_path := Trim(get_segment_path_for_candidate(
+                m_candidates[candidate_source_index], candidate_source_index));
+        end;
+        if resolved_path = '' then
+        begin
+            resolved_path := Trim(get_segment_path_for_candidate(value,
+                candidate_source_index));
+        end;
+        if not decode_and_validate_path(Trim(value.text), resolved_path,
+            signature, name_confidence) then
+        begin
+            resolved_path := Trim(infer_segment_path_for_query_text_with_score(
+                normalized_query, Trim(value.text), inferred_score,
+                inferred_segments, True));
+        end;
+        if not decode_and_validate_path(Trim(value.text), resolved_path,
+            signature, name_confidence) then
+        begin
+            infer_complete_pool_exact_path(Trim(value.text), resolved_path);
+        end;
+        Result := decode_and_validate_path(Trim(value.text), resolved_path,
+            signature, name_confidence);
+    end;
+
+    function source_priority(const value: TncLongCompletePoolSource): Integer;
+    begin
+        case value of
+            lcps_visible: Result := 6;
+            lcps_proper_name: Result := 5;
+            lcps_chain: Result := 4;
+            lcps_exact_lattice: Result := 4;
+            lcps_exact_pair: Result := 3;
+            lcps_existing: Result := 2;
+            lcps_local_repair: Result := 1;
+        else
+            Result := 0;
+        end;
+    end;
+
+    procedure add_candidate(const value: TncCandidate;
+        const candidate_source_index: Integer; const preferred_path: string;
+        const source_kind: TncLongCompletePoolSource;
+        const seed_rank: Integer; const seed_visible_index: Integer;
+        const original: Boolean; const substitutions: Integer;
+        const changed_position: Integer; const source_char_weight: Integer;
+        const replacement_char_weight: Integer;
+        const pair_evidence: Integer); forward;
+
+    function cached_lm_transition_bonus(const query_value: string;
+        const path_value: string): Integer;
+    var
+        cache_key: string;
+    begin
+        Result := 0;
+        if (query_value = '') or (path_value = '') then
+        begin
+            Exit;
+        end;
+        cache_key := '#lm#' + query_value + #1 + path_value;
+        if word_lm_cache.TryGetValue(cache_key, Result) then
+        begin
+            Exit;
+        end;
+        Result := m_dictionary.get_lm_transition_bonus(query_value,
+            path_value);
+        word_lm_cache.Add(cache_key, Result);
+    end;
+
+    function cached_path_transition_bonus(const query_value: string;
+        const path_value: string): Integer;
+    var
+        cache_key: string;
+        query_path_bonus: Integer;
+    begin
+        Result := 0;
+        if (query_value = '') or (path_value = '') then
+        begin
+            Exit;
+        end;
+        cache_key := '#transition#' + query_value + #1 + path_value;
+        if word_lm_cache.TryGetValue(cache_key, Result) then
+        begin
+            Exit;
+        end;
+        Result := cached_lm_transition_bonus(query_value, path_value);
+        if Result < c_query_path_bonus_cap then
+        begin
+            query_path_bonus := m_dictionary.get_long_query_segment_path_bonus(
+                query_value, path_value);
+            Result := Max(Result, query_path_bonus);
+        end;
+        word_lm_cache.Add(cache_key, Result);
+    end;
+
+    procedure generate_exact_lattice_candidates;
+    var
+        states_by_position: TArray<TncCompletePoolLatticeStateArray>;
+        source_states: TncCompletePoolLatticeStateArray;
+        destination_states: TncCompletePoolLatticeStateArray;
+        sorted_states: TncCompletePoolLatticeStateArray;
+        retained_states: TncCompletePoolLatticeStateArray;
+        exact_candidates: TncCandidateList;
+        state_value: TncCompletePoolLatticeState;
+        next_state: TncCompletePoolLatticeState;
+        candidate_value_local: TncCandidate;
+        generated: TncCandidate;
+        position: Integer;
+        span_units: Integer;
+        destination: Integer;
+        state_idx: Integer;
+        candidate_idx: Integer;
+        option_count: Integer;
+        option_limit: Integer;
+        insert_idx: Integer;
+        retained_count: Integer;
+        destination_count: Integer;
+        destination_capacity: Integer;
+        query_key: string;
+        transition_query: string;
+        transition_path: string;
+        transition_bonus: Integer;
+        trigram_bonus: Integer;
+        candidate_text_local: string;
+        candidate_key: string;
+
+        procedure append_state(var values: TncCompletePoolLatticeStateArray;
+            const value: TncCompletePoolLatticeState);
+        var
+            append_index: Integer;
+        begin
+            append_index := Length(values);
+            SetLength(values, append_index + 1);
+            values[append_index] := value;
+        end;
+
+        function state_is_better(const left_value:
+            TncCompletePoolLatticeState; const right_value:
+            TncCompletePoolLatticeState): Boolean;
+        begin
+            if left_value.score <> right_value.score then
+            begin
+                Exit(left_value.score > right_value.score);
+            end;
+            if left_value.segment_count <> right_value.segment_count then
+            begin
+                Exit(left_value.segment_count < right_value.segment_count);
+            end;
+            Result := CompareText(left_value.text, right_value.text) < 0;
+        end;
+
+        procedure prune_position(const position_value: Integer);
+        var
+            sort_idx: Integer;
+            sort_value: TncCompletePoolLatticeState;
+            pass: Integer;
+            retained_idx: Integer;
+            signature_count: Integer;
+            duplicate_text: Boolean;
+        begin
+            destination_states := states_by_position[position_value];
+            if Length(destination_states) <= 1 then
+            begin
+                Exit;
+            end;
+            sorted_states := Copy(destination_states, 0,
+                Length(destination_states));
+            for sort_idx := 1 to High(sorted_states) do
+            begin
+                sort_value := sorted_states[sort_idx];
+                insert_idx := sort_idx - 1;
+                while (insert_idx >= 0) and state_is_better(sort_value,
+                    sorted_states[insert_idx]) do
+                begin
+                    sorted_states[insert_idx + 1] :=
+                        sorted_states[insert_idx];
+                    Dec(insert_idx);
+                end;
+                sorted_states[insert_idx + 1] := sort_value;
+            end;
+
+            SetLength(retained_states, 0);
+            for pass := 0 to 1 do
+            begin
+                for sort_idx := 0 to High(sorted_states) do
+                begin
+                    candidate_key := LowerCase(Trim(
+                        sorted_states[sort_idx].text));
+                    if candidate_key = '' then
+                    begin
+                        Continue;
+                    end;
+                    duplicate_text := False;
+                    signature_count := 0;
+                    for retained_idx := 0 to High(retained_states) do
+                    begin
+                        if SameText(Trim(retained_states[retained_idx].text),
+                            candidate_key) then
+                        begin
+                            duplicate_text := True;
+                            Break;
+                        end;
+                        if SameText(retained_states[retained_idx].signature,
+                            sorted_states[sort_idx].signature) then
+                        begin
+                            Inc(signature_count);
+                        end;
+                    end;
+                    if duplicate_text or ((pass = 0) and
+                        (signature_count >=
+                        c_exact_lattice_signature_limit)) then
+                    begin
+                        Continue;
+                    end;
+                    append_state(retained_states,
+                        sorted_states[sort_idx]);
+                    if Length(retained_states) >=
+                        c_exact_lattice_beam_width then
+                    begin
+                        Break;
+                    end;
+                end;
+                if Length(retained_states) >=
+                    c_exact_lattice_beam_width then
+                begin
+                    Break;
+                end;
+            end;
+            states_by_position[position_value] := retained_states;
+        end;
+    begin
+        SetLength(states_by_position, expected_units + 1);
+        SetLength(states_by_position[0], 1);
+        states_by_position[0][0] := Default(TncCompletePoolLatticeState);
+        for position := 0 to expected_units - 1 do
+        begin
+            source_states := states_by_position[position];
+            if Length(source_states) <= 0 then
+            begin
+                Continue;
+            end;
+            for span_units := 1 to Min(c_exact_lattice_max_segment_units,
+                expected_units - position) do
+            begin
+                query_key := build_span_key(position, span_units);
+                if (query_key = '') or
+                    (not load_exact_candidates(query_key,
+                    exact_candidates)) then
+                begin
+                    Continue;
+                end;
+                if span_units = 1 then
+                begin
+                    option_limit := c_exact_lattice_single_option_limit;
+                end
+                else
+                begin
+                    option_limit := c_exact_lattice_word_option_limit;
+                end;
+                option_count := 0;
+                destination := position + span_units;
+                destination_count := Length(
+                    states_by_position[destination]);
+                destination_capacity := destination_count +
+                    Length(source_states) * Min(option_limit,
+                    Length(exact_candidates));
+                SetLength(states_by_position[destination],
+                    destination_capacity);
+                for candidate_idx := 0 to High(exact_candidates) do
+                begin
+                    candidate_value_local := exact_candidates[candidate_idx];
+                    candidate_text_local := Trim(candidate_value_local.text);
+                    if (Trim(candidate_value_local.comment) <> '') or
+                        (get_candidate_text_unit_count(candidate_text_local) <>
+                        span_units) then
+                    begin
+                        Continue;
+                    end;
+                    Inc(option_count);
+                    if option_count > option_limit then
+                    begin
+                        Break;
+                    end;
+                    for state_idx := 0 to High(source_states) do
+                    begin
+                        state_value := source_states[state_idx];
+                        transition_bonus := 0;
+                        if (state_value.previous_text <> '') and
+                            (state_value.previous_units > 0) then
+                        begin
+                            transition_query := build_span_key(position -
+                                state_value.previous_units,
+                                state_value.previous_units + span_units);
+                            transition_path := state_value.previous_text +
+                                c_segment_path_separator +
+                                candidate_text_local;
+                            transition_bonus := cached_path_transition_bonus(
+                                transition_query, transition_path);
+                        end;
+                        if (state_value.previous_previous_text <> '') and
+                            (state_value.previous_previous_units > 0) and
+                            (state_value.previous_units > 0) then
+                        begin
+                            transition_query := build_span_key(position -
+                                state_value.previous_previous_units -
+                                state_value.previous_units,
+                                state_value.previous_previous_units +
+                                state_value.previous_units + span_units);
+                            transition_path :=
+                                state_value.previous_previous_text +
+                                c_segment_path_separator +
+                                state_value.previous_text +
+                                c_segment_path_separator +
+                                candidate_text_local;
+                            trigram_bonus := cached_path_transition_bonus(
+                                transition_query, transition_path);
+                            transition_bonus := Max(transition_bonus,
+                                trigram_bonus);
+                        end;
+
+                        next_state := state_value;
+                        next_state.score := state_value.score +
+                            candidate_raw_weight(candidate_value_local) +
+                            Int64(span_units * span_units) * 1200 +
+                            Int64(transition_bonus) * 4;
+                        next_state.text := state_value.text +
+                            candidate_text_local;
+                        if state_value.path = '' then
+                        begin
+                            next_state.path := candidate_text_local;
+                            next_state.signature := IntToStr(span_units);
+                        end
+                        else
+                        begin
+                            next_state.path := state_value.path +
+                                c_segment_path_separator +
+                                candidate_text_local;
+                            next_state.signature := state_value.signature +
+                                '-' + IntToStr(span_units);
+                        end;
+                        next_state.previous_previous_text :=
+                            state_value.previous_text;
+                        next_state.previous_previous_units :=
+                            state_value.previous_units;
+                        next_state.previous_text := candidate_text_local;
+                        next_state.previous_units := span_units;
+                        next_state.segment_count :=
+                            state_value.segment_count + 1;
+                        next_state.transition_support :=
+                            state_value.transition_support +
+                            transition_bonus;
+                        states_by_position[destination][destination_count] :=
+                            next_state;
+                        Inc(destination_count);
+                    end;
+                end;
+                SetLength(states_by_position[destination], destination_count);
+                prune_position(destination);
+            end;
+        end;
+
+        source_states := states_by_position[expected_units];
+        retained_count := Min(c_exact_lattice_candidate_limit,
+            Length(source_states));
+        for state_idx := 0 to retained_count - 1 do
+        begin
+            generated := Default(TncCandidate);
+            generated.text := source_states[state_idx].text;
+            generated.comment := '';
+            generated.source := cs_rule;
+            generated.score := clamp_int64_to_integer(
+                source_states[state_idx].score);
+            generated.has_dict_weight := False;
+            generated.dict_weight := 0;
+            add_candidate(generated, -1, source_states[state_idx].path,
+                lcps_exact_lattice, state_idx + 1, -1, False, 0, -1,
+                0, 0, source_states[state_idx].transition_support);
+        end;
+    end;
+
+    function provenance_is_better(
+        const candidate_item: TncLongCompletePoolRuntimeCandidate;
+        const current_item: TncLongCompletePoolRuntimeCandidate): Boolean;
+    begin
+        if source_priority(candidate_item.source_kind) <>
+            source_priority(current_item.source_kind) then
+        begin
+            Exit(source_priority(candidate_item.source_kind) >
+                source_priority(current_item.source_kind));
+        end;
+        if candidate_item.pair_evidence <> current_item.pair_evidence then
+        begin
+            Exit(candidate_item.pair_evidence > current_item.pair_evidence);
+        end;
+        if candidate_item.substitutions <> current_item.substitutions then
+        begin
+            Exit(candidate_item.substitutions < current_item.substitutions);
+        end;
+        Result := candidate_item.seed_rank < current_item.seed_rank;
+    end;
+
+    procedure retain_raw_candidate(
+        const value: TncLongCompletePoolRuntimeCandidate);
+    var
+        key: string;
+        existing_idx: Integer;
+        item: TncLongCompletePoolRuntimeCandidate;
+    begin
+        key := LowerCase(Trim(value.candidate.text));
+        if key = '' then
+        begin
+            Exit;
+        end;
+        if raw_index_by_text.TryGetValue(key, existing_idx) then
+        begin
+            item := raw_pool[existing_idx];
+            item.pair_evidence := Max(item.pair_evidence,
+                value.pair_evidence);
+            item.proper_name_confidence := Max(
+                item.proper_name_confidence,
+                value.proper_name_confidence);
+            if provenance_is_better(value, item) then
+            begin
+                item.candidate := value.candidate;
+                item.source_index := value.source_index;
+                item.segment_path := value.segment_path;
+                item.segmentation_signature :=
+                    value.segmentation_signature;
+                item.source_kind := value.source_kind;
+                item.seed_rank := value.seed_rank;
+                item.seed_visible_index := value.seed_visible_index;
+                item.original := value.original;
+                item.substitutions := value.substitutions;
+                item.changed_position := value.changed_position;
+                item.source_char_weight := value.source_char_weight;
+                item.replacement_char_weight :=
+                    value.replacement_char_weight;
+            end;
+            raw_pool[existing_idx] := item;
+            Exit;
+        end;
+        if Length(raw_pool) >= c_raw_pool_limit then
+        begin
+            Exit;
+        end;
+        existing_idx := Length(raw_pool);
+        SetLength(raw_pool, existing_idx + 1);
+        raw_pool[existing_idx] := value;
+        raw_index_by_text.Add(key, existing_idx);
+    end;
+
+    procedure add_candidate(const value: TncCandidate;
+        const candidate_source_index: Integer; const preferred_path: string;
+        const source_kind: TncLongCompletePoolSource;
+        const seed_rank: Integer; const seed_visible_index: Integer;
+        const original: Boolean; const substitutions: Integer;
+        const changed_position: Integer; const source_char_weight: Integer;
+        const replacement_char_weight: Integer;
+        const pair_evidence: Integer);
+    var
+        item: TncLongCompletePoolRuntimeCandidate;
+        resolved_path: string;
+        signature: string;
+        name_confidence: Integer;
+    begin
+        if not candidate_is_complete(value) then
+        begin
+            Exit;
+        end;
+        if not resolve_candidate_path(value, candidate_source_index,
+            preferred_path, resolved_path, signature, name_confidence) then
+        begin
+            Exit;
+        end;
+        item := Default(TncLongCompletePoolRuntimeCandidate);
+        item.candidate := value;
+        item.candidate.comment := '';
+        item.source_index := candidate_source_index;
+        item.segment_path := resolved_path;
+        item.segmentation_signature := signature;
+        item.source_kind := source_kind;
+        item.seed_rank := Max(1, seed_rank);
+        item.seed_visible_index := seed_visible_index;
+        item.original := original;
+        item.substitutions := substitutions;
+        item.changed_position := changed_position;
+        item.source_char_weight := source_char_weight;
+        item.replacement_char_weight := replacement_char_weight;
+        item.pair_evidence := pair_evidence;
+        item.proper_name_confidence := name_confidence;
+        item.local_pairwise_insert_rank := -1;
+        retain_raw_candidate(item);
+    end;
+
+    function build_text_from_path_parts(const parts: TArray<string>): string;
+    var
+        part_idx: Integer;
+    begin
+        Result := '';
+        for part_idx := 0 to High(parts) do
+        begin
+            Result := Result + Trim(parts[part_idx]);
+        end;
+    end;
+
+    function build_encoded_path(const parts: TArray<string>): string;
+    var
+        part_idx: Integer;
+    begin
+        Result := '';
+        for part_idx := 0 to High(parts) do
+        begin
+            if Result <> '' then
+            begin
+                Result := Result + c_segment_path_separator;
+            end;
+            Result := Result + Trim(parts[part_idx]);
+        end;
+    end;
+
+    function pair_evidence_score(
+        const evidence: TncPairPathEvidence): Integer;
+    var
+        query_value: Integer;
+    begin
+        Result := 0;
+        if (evidence.lm_transition_weight >= c_min_lm_pair_weight) or
+            ((evidence.lm_transition_weight >=
+            c_min_corroborated_pair_weight) and
+            (evidence.query_path_weight >=
+            c_min_corroborated_pair_weight)) then
+        begin
+            Result := Min(1560, evidence.lm_transition_weight * 3);
+        end;
+        if evidence.query_path_weight >= c_min_query_pair_weight then
+        begin
+            query_value := Min(420,
+                (evidence.query_path_weight * 3) div 5 + 28);
+            Result := Max(Result, query_value);
+        end;
+    end;
+
+    procedure generate_exact_pair_candidates;
+    var
+        seed_idx: Integer;
+        seed_item: TncLongCompletePoolRuntimeCandidate;
+        seed_parts: TArray<string>;
+        seed_part_units: TArray<string>;
+        part_starts: TArray<Integer>;
+        part_lengths: TArray<Integer>;
+        part_idx: Integer;
+        cursor: Integer;
+        window_units: Integer;
+        window_start: Integer;
+        window_key: string;
+        evidence_paths: TncPairPathEvidenceList;
+        evidence_idx: Integer;
+        evidence_value: Integer;
+        replacement_parts: TArray<string>;
+        replacement_units: TArray<string>;
+        replacement_head_units: Integer;
+        replacement_tail_units: Integer;
+        head_key: string;
+        tail_key: string;
+        exact_candidate: TncCandidate;
+        new_parts: TArray<string>;
+        new_part_idx: Integer;
+        out_part_idx: Integer;
+        generated: TncCandidate;
+        generated_path: string;
+    begin
+        pair_candidate_count := 0;
+        for seed_idx := 0 to Min(c_pair_seed_limit - 1,
+            raw_original_count - 1) do
+        begin
+            if pair_candidate_count >= c_pair_candidate_limit then
+            begin
+                Break;
+            end;
+            seed_item := raw_pool[seed_idx];
+            seed_parts := seed_item.segment_path.Split(
+                [c_segment_path_separator]);
+            if Length(seed_parts) < 2 then
+            begin
+                Continue;
+            end;
+            SetLength(part_starts, Length(seed_parts));
+            SetLength(part_lengths, Length(seed_parts));
+            cursor := 0;
+            for part_idx := 0 to High(seed_parts) do
+            begin
+                seed_part_units := split_text_units(Trim(seed_parts[part_idx]));
+                part_starts[part_idx] := cursor;
+                part_lengths[part_idx] := Length(seed_part_units);
+                Inc(cursor, part_lengths[part_idx]);
+            end;
+            if cursor <> expected_units then
+            begin
+                Continue;
+            end;
+
+            for part_idx := 0 to High(seed_parts) - 1 do
+            begin
+                if pair_candidate_count >= c_pair_candidate_limit then
+                begin
+                    Break;
+                end;
+                window_units := part_lengths[part_idx] +
+                    part_lengths[part_idx + 1];
+                if not (window_units in [4, 5]) then
+                begin
+                    Continue;
+                end;
+                window_start := part_starts[part_idx];
+                window_key := build_span_key(window_start, window_units);
+                if (window_key = '') or
+                    (not m_dictionary.get_exact_pair_path_evidence(
+                    window_key, evidence_paths)) then
+                begin
+                    Continue;
+                end;
+                for evidence_idx := 0 to High(evidence_paths) do
+                begin
+                    evidence_value := pair_evidence_score(
+                        evidence_paths[evidence_idx]);
+                    if evidence_value <= 0 then
+                    begin
+                        Continue;
+                    end;
+                    replacement_parts := evidence_paths[evidence_idx].encoded_path.Split(
+                        [c_segment_path_separator]);
+                    if Length(replacement_parts) <> 2 then
+                    begin
+                        Continue;
+                    end;
+                    replacement_units := split_text_units(
+                        Trim(replacement_parts[0]));
+                    replacement_head_units := Length(replacement_units);
+                    replacement_units := split_text_units(
+                        Trim(replacement_parts[1]));
+                    replacement_tail_units := Length(replacement_units);
+                    if ((window_units = 4) and
+                        ((replacement_head_units <> 2) or
+                        (replacement_tail_units <> 2))) or
+                        ((window_units = 5) and
+                        ((replacement_head_units <> 2) or
+                        (replacement_tail_units <> 3))) then
+                    begin
+                        Continue;
+                    end;
+                    head_key := build_span_key(window_start,
+                        replacement_head_units);
+                    tail_key := build_span_key(window_start +
+                        replacement_head_units, replacement_tail_units);
+                    if (not find_exact_candidate(head_key,
+                        Trim(replacement_parts[0]),
+                        replacement_head_units, exact_candidate)) or
+                        (not find_exact_candidate(tail_key,
+                        Trim(replacement_parts[1]),
+                        replacement_tail_units, exact_candidate)) then
+                    begin
+                        Continue;
+                    end;
+
+                    SetLength(new_parts, Length(seed_parts));
+                    out_part_idx := 0;
+                    for new_part_idx := 0 to High(seed_parts) do
+                    begin
+                        if new_part_idx = part_idx then
+                        begin
+                            new_parts[out_part_idx] :=
+                                Trim(replacement_parts[0]);
+                            Inc(out_part_idx);
+                            new_parts[out_part_idx] :=
+                                Trim(replacement_parts[1]);
+                            Inc(out_part_idx);
+                        end
+                        else if new_part_idx = part_idx + 1 then
+                        begin
+                            Continue;
+                        end
+                        else
+                        begin
+                            new_parts[out_part_idx] :=
+                                Trim(seed_parts[new_part_idx]);
+                            Inc(out_part_idx);
+                        end;
+                    end;
+                    SetLength(new_parts, out_part_idx);
+                    generated_path := build_encoded_path(new_parts);
+                    generated := seed_item.candidate;
+                    generated.text := build_text_from_path_parts(new_parts);
+                    generated.comment := '';
+                    generated.source := cs_rule;
+                    generated.has_dict_weight := False;
+                    generated.dict_weight := 0;
+                    generated.score := Max(generated.score,
+                        evidence_value);
+                    add_candidate(generated, -1, generated_path,
+                        lcps_exact_pair, seed_item.seed_rank,
+                        seed_item.seed_visible_index, False, 1,
+                        window_start, 0, 0, evidence_value);
+                    Inc(pair_candidate_count);
+                    if pair_candidate_count >= c_pair_candidate_limit then
+                    begin
+                        Break;
+                    end;
+                end;
+            end;
+        end;
+    end;
+
+    procedure generate_local_repair_candidates;
+    var
+        seed_idx: Integer;
+        seed_item: TncLongCompletePoolRuntimeCandidate;
+        seed_units: TArray<string>;
+        path_parts: TArray<string>;
+        path_part_units: TArray<string>;
+        part_starts: TArray<Integer>;
+        part_lengths: TArray<Integer>;
+        part_idx: Integer;
+        unit_idx: Integer;
+        part_unit_idx: Integer;
+        cursor: Integer;
+        source_part_idx: Integer;
+        syllable_key: string;
+        single_options: TncCandidateList;
+        option_idx: Integer;
+        source_weight: Integer;
+        replacement_text: string;
+        repaired_part_text: string;
+        exact_candidate: TncCandidate;
+        repaired_parts: TArray<string>;
+        generated: TncCandidate;
+        generated_path: string;
+    begin
+        if raw_original_count <= 0 then
+        begin
+            Exit;
+        end;
+        seed_idx := 0;
+        seed_item := raw_pool[seed_idx];
+        seed_units := split_text_units(Trim(seed_item.candidate.text));
+        path_parts := seed_item.segment_path.Split(
+            [c_segment_path_separator]);
+        if (Length(seed_units) <> expected_units) or
+            (Length(path_parts) <= 0) then
+        begin
+            Exit;
+        end;
+        SetLength(part_starts, Length(path_parts));
+        SetLength(part_lengths, Length(path_parts));
+        cursor := 0;
+        for part_idx := 0 to High(path_parts) do
+        begin
+            path_part_units := split_text_units(Trim(path_parts[part_idx]));
+            part_starts[part_idx] := cursor;
+            part_lengths[part_idx] := Length(path_part_units);
+            Inc(cursor, part_lengths[part_idx]);
+        end;
+        if cursor <> expected_units then
+        begin
+            Exit;
+        end;
+
+        for unit_idx := 0 to expected_units - 1 do
+        begin
+            source_part_idx := -1;
+            for part_idx := 0 to High(path_parts) do
+            begin
+                if (unit_idx >= part_starts[part_idx]) and
+                    (unit_idx < part_starts[part_idx] +
+                    part_lengths[part_idx]) then
+                begin
+                    source_part_idx := part_idx;
+                    Break;
+                end;
+            end;
+            if source_part_idx < 0 then
+            begin
+                Continue;
+            end;
+            syllable_key := build_span_key(unit_idx, 1);
+            if not load_exact_candidates(syllable_key, single_options) then
+            begin
+                Continue;
+            end;
+            source_weight := 0;
+            for option_idx := 0 to High(single_options) do
+            begin
+                if (Trim(single_options[option_idx].comment) = '') and
+                    SameText(Trim(single_options[option_idx].text),
+                    seed_units[unit_idx]) then
+                begin
+                    source_weight := candidate_raw_weight(
+                        single_options[option_idx]);
+                    Break;
+                end;
+            end;
+            for option_idx := 0 to Min(c_single_option_limit - 1,
+                High(single_options)) do
+            begin
+                replacement_text := Trim(single_options[option_idx].text);
+                if (Trim(single_options[option_idx].comment) <> '') or
+                    (get_candidate_text_unit_count(replacement_text) <> 1) or
+                    SameText(replacement_text, seed_units[unit_idx]) then
+                begin
+                    Continue;
+                end;
+                repaired_parts := Copy(path_parts, 0, Length(path_parts));
+                path_part_units := split_text_units(
+                    Trim(repaired_parts[source_part_idx]));
+                part_unit_idx := unit_idx - part_starts[source_part_idx];
+                if (part_unit_idx < 0) or
+                    (part_unit_idx >= Length(path_part_units)) then
+                begin
+                    Continue;
+                end;
+                path_part_units[part_unit_idx] := replacement_text;
+                repaired_part_text := '';
+                for part_idx := 0 to High(path_part_units) do
+                begin
+                    repaired_part_text := repaired_part_text +
+                        path_part_units[part_idx];
+                end;
+                if (part_lengths[source_part_idx] > 1) and
+                    (not find_exact_candidate(build_span_key(
+                    part_starts[source_part_idx],
+                    part_lengths[source_part_idx]), repaired_part_text,
+                    part_lengths[source_part_idx], exact_candidate)) then
+                begin
+                    Continue;
+                end;
+                repaired_parts[source_part_idx] := repaired_part_text;
+                generated_path := build_encoded_path(repaired_parts);
+                generated := seed_item.candidate;
+                generated.text := build_text_from_path_parts(repaired_parts);
+                generated.comment := '';
+                generated.source := cs_rule;
+                generated.has_dict_weight := False;
+                generated.dict_weight := 0;
+                add_candidate(generated, -1, generated_path,
+                    lcps_local_repair, seed_item.seed_rank,
+                    seed_item.seed_visible_index, False, 1, unit_idx,
+                    source_weight,
+                    candidate_raw_weight(single_options[option_idx]), 0);
+            end;
+        end;
+    end;
+
+    function pool_sort_is_better(const left_idx: Integer;
+        const right_idx: Integer): Boolean;
+    var
+        left_score: Int64;
+        right_score: Int64;
+    begin
+        left_score := Int64(raw_pool[left_idx].char_lm_score) * 8 +
+            Int64(raw_pool[left_idx].word_lm_bonus) * 4 +
+            Int64(raw_pool[left_idx].pair_evidence) * 4 +
+            raw_pool[left_idx].consensus_support +
+            source_priority(raw_pool[left_idx].source_kind) * 40;
+        right_score := Int64(raw_pool[right_idx].char_lm_score) * 8 +
+            Int64(raw_pool[right_idx].word_lm_bonus) * 4 +
+            Int64(raw_pool[right_idx].pair_evidence) * 4 +
+            raw_pool[right_idx].consensus_support +
+            source_priority(raw_pool[right_idx].source_kind) * 40;
+        if left_score <> right_score then
+        begin
+            Exit(left_score > right_score);
+        end;
+        if raw_pool[left_idx].seed_rank <>
+            raw_pool[right_idx].seed_rank then
+        begin
+            Exit(raw_pool[left_idx].seed_rank <
+                raw_pool[right_idx].seed_rank);
+        end;
+        Result := CompareText(raw_pool[left_idx].candidate.text,
+            raw_pool[right_idx].candidate.text) < 0;
+    end;
+
+    procedure select_raw_index(const value: Integer);
+    var
+        key: string;
+        signature_count: Integer;
+        append_idx: Integer;
+    begin
+        if (value < 0) or (value >= Length(raw_pool)) or
+            (Length(selected_indices) >= c_pool_limit) then
+        begin
+            Exit;
+        end;
+        key := LowerCase(Trim(raw_pool[value].candidate.text));
+        if (key = '') or selected_texts.ContainsKey(key) then
+        begin
+            Exit;
+        end;
+        append_idx := Length(selected_indices);
+        SetLength(selected_indices, append_idx + 1);
+        selected_indices[append_idx] := value;
+        selected_texts.Add(key, True);
+        signature_count := 0;
+        selected_signature_counts.TryGetValue(
+            raw_pool[value].segmentation_signature, signature_count);
+        selected_signature_counts.AddOrSetValue(
+            raw_pool[value].segmentation_signature, signature_count + 1);
+    end;
+
+    procedure reserve_source_lane(const source_kind:
+        TncLongCompletePoolSource; const reserve_count: Integer;
+        const require_name_confidence: Boolean = False);
+    var
+        order_idx: Integer;
+        retained: Integer;
+    begin
+        retained := 0;
+        for order_idx := 0 to High(sorted_indices) do
+        begin
+            raw_idx := sorted_indices[order_idx];
+            if ((not require_name_confidence) and
+                (raw_pool[raw_idx].source_kind <> source_kind)) or
+                (require_name_confidence and
+                (raw_pool[raw_idx].proper_name_confidence <= 0)) then
+            begin
+                Continue;
+            end;
+            if not selected_texts.ContainsKey(LowerCase(Trim(
+                raw_pool[raw_idx].candidate.text))) then
+            begin
+                select_raw_index(raw_idx);
+                Inc(retained);
+                if retained >= reserve_count then
+                begin
+                    Break;
+                end;
+            end;
+        end;
+    end;
+
+    procedure populate_consensus_features;
+    var
+        original_units: TArray<TArray<string>>;
+        original_weights: TArray<Double>;
+        candidate_units: TArray<string>;
+        distances: TArray<Integer>;
+        original_idx: Integer;
+        candidate_idx: Integer;
+        unit_idx: Integer;
+        original_count: Integer;
+        total_weight: Double;
+        support: Double;
+        distance_sum: Integer;
+        top_units: TArray<string>;
+        weight: Double;
+    begin
+        original_count := 0;
+        total_weight := 0.0;
+        SetLength(original_units, Min(8, raw_original_count));
+        SetLength(original_weights, Length(original_units));
+        SetLength(top_units, 0);
+        for original_idx := 0 to raw_original_count - 1 do
+        begin
+            if original_count >= Length(original_units) then
+            begin
+                Break;
+            end;
+            candidate_units := split_text_units(
+                raw_pool[original_idx].candidate.text);
+            if Length(candidate_units) <> expected_units then
+            begin
+                Continue;
+            end;
+            original_units[original_count] := candidate_units;
+            weight := 1.0 / Max(1, raw_pool[original_idx].seed_rank);
+            original_weights[original_count] := weight;
+            total_weight := total_weight + weight;
+            if original_count = 0 then
+            begin
+                top_units := Copy(candidate_units, 0,
+                    Length(candidate_units));
+            end;
+            Inc(original_count);
+        end;
+        SetLength(original_units, original_count);
+        SetLength(original_weights, original_count);
+        if (original_count <= 0) or (total_weight <= 0.0) then
+        begin
+            Exit;
+        end;
+
+        for candidate_idx := 0 to High(raw_pool) do
+        begin
+            candidate_units := split_text_units(
+                raw_pool[candidate_idx].candidate.text);
+            if Length(candidate_units) <> expected_units then
+            begin
+                Continue;
+            end;
+            SetLength(distances, original_count);
+            raw_pool[candidate_idx].consensus_seed_count := original_count;
+            raw_pool[candidate_idx].consensus_support_min := 1.0;
+            raw_pool[candidate_idx].consensus_nearest_distance :=
+                expected_units;
+            for unit_idx := 0 to expected_units - 1 do
+            begin
+                support := 0.0;
+                for original_idx := 0 to original_count - 1 do
+                begin
+                    if SameText(original_units[original_idx][unit_idx],
+                        candidate_units[unit_idx]) then
+                    begin
+                        support := support + original_weights[original_idx];
+                    end
+                    else
+                    begin
+                        Inc(distances[original_idx]);
+                    end;
+                end;
+                support := support / total_weight;
+                raw_pool[candidate_idx].consensus_support_mean :=
+                    raw_pool[candidate_idx].consensus_support_mean + support;
+                raw_pool[candidate_idx].consensus_support_min := Min(
+                    raw_pool[candidate_idx].consensus_support_min, support);
+                if support >= 0.5 then
+                begin
+                    Inc(raw_pool[candidate_idx].consensus_majority_units);
+                end;
+                if support >= 0.999999 then
+                begin
+                    Inc(raw_pool[candidate_idx].consensus_unanimous_units);
+                end;
+                if unit_idx = raw_pool[candidate_idx].changed_position then
+                begin
+                    raw_pool[candidate_idx].consensus_changed_support :=
+                        support;
+                end;
+            end;
+            raw_pool[candidate_idx].consensus_support_mean :=
+                raw_pool[candidate_idx].consensus_support_mean /
+                expected_units;
+            raw_pool[candidate_idx].consensus_support := Round(
+                raw_pool[candidate_idx].consensus_support_mean * 1000.0);
+            distance_sum := 0;
+            for original_idx := 0 to original_count - 1 do
+            begin
+                raw_pool[candidate_idx].consensus_nearest_distance := Min(
+                    raw_pool[candidate_idx].consensus_nearest_distance,
+                    distances[original_idx]);
+                Inc(distance_sum, distances[original_idx]);
+            end;
+            raw_pool[candidate_idx].consensus_mean_distance :=
+                distance_sum / original_count;
+            if (raw_pool[candidate_idx].changed_position >= 0) and
+                (raw_pool[candidate_idx].changed_position <
+                Length(top_units)) and
+                SameText(top_units[raw_pool[candidate_idx].changed_position],
+                candidate_units[raw_pool[candidate_idx].changed_position]) then
+            begin
+                raw_pool[candidate_idx].consensus_changed_top_match := 1;
+            end;
+        end;
+    end;
+
+    function find_reusable_chain_features(
+        const item: TncLongCompletePoolRuntimeCandidate;
+        const require_path: Boolean;
+        const require_context: Boolean): Integer;
+    var
+        reusable_idx: Integer;
+    begin
+        Result := -1;
+        for reusable_idx := 0 to High(m_runtime_long_chain_candidates) do
+        begin
+            if (not m_runtime_long_chain_candidates[reusable_idx].features_valid) or
+                (not SameText(
+                m_runtime_long_chain_candidates[reusable_idx].feature_query_key,
+                normalized_query)) or
+                (not SameText(Trim(
+                m_runtime_long_chain_candidates[reusable_idx].text),
+                Trim(item.candidate.text))) then
+            begin
+                Continue;
+            end;
+            if require_path and (not SameText(Trim(
+                m_runtime_long_chain_candidates[reusable_idx].segment_path),
+                Trim(item.segment_path))) then
+            begin
+                Continue;
+            end;
+            if require_context and (not SameText(
+                m_runtime_long_chain_candidates[reusable_idx].feature_context_key,
+                left_context)) then
+            begin
+                Continue;
+            end;
+            Exit(reusable_idx);
+        end;
+    end;
+
+    procedure populate_word_lm_features;
+    var
+        candidate_idx: Integer;
+        reusable_chain_idx: Integer;
+        path_parts: TArray<string>;
+        part_idx: Integer;
+        query_offset: Integer;
+        previous_text_value: string;
+        current_text_value: string;
+        next_text_value: string;
+        previous_units: Integer;
+        current_units: Integer;
+        next_units: Integer;
+        transition_query: string;
+        transition_path: string;
+        bigram_bonus: Integer;
+        trigram_bonus: Integer;
+        boundary_bonus: Integer;
+        boundary_count: Integer;
+        supported_count: Integer;
+        strong_count: Integer;
+        trigram_count: Integer;
+        total_bonus: Int64;
+
+    begin
+        for candidate_idx := 0 to High(raw_pool) do
+        begin
+            reusable_chain_idx := find_reusable_chain_features(
+                raw_pool[candidate_idx], True, False);
+            if reusable_chain_idx >= 0 then
+            begin
+                raw_pool[candidate_idx].word_lm_bonus :=
+                    m_runtime_long_chain_candidates[reusable_chain_idx].word_lm_bonus;
+                raw_pool[candidate_idx].word_lm_boundary_count :=
+                    m_runtime_long_chain_candidates[reusable_chain_idx].word_lm_boundary_count;
+                raw_pool[candidate_idx].word_lm_boundary_min :=
+                    m_runtime_long_chain_candidates[reusable_chain_idx].word_lm_boundary_min;
+                raw_pool[candidate_idx].word_lm_boundary_max :=
+                    m_runtime_long_chain_candidates[reusable_chain_idx].word_lm_boundary_max;
+                raw_pool[candidate_idx].word_lm_boundary_first :=
+                    m_runtime_long_chain_candidates[reusable_chain_idx].word_lm_boundary_first;
+                raw_pool[candidate_idx].word_lm_boundary_last :=
+                    m_runtime_long_chain_candidates[reusable_chain_idx].word_lm_boundary_last;
+                raw_pool[candidate_idx].word_lm_supported_ratio :=
+                    m_runtime_long_chain_candidates[reusable_chain_idx].word_lm_supported_ratio;
+                raw_pool[candidate_idx].word_lm_strong_ratio :=
+                    m_runtime_long_chain_candidates[reusable_chain_idx].word_lm_strong_ratio;
+                raw_pool[candidate_idx].word_lm_trigram_ratio :=
+                    m_runtime_long_chain_candidates[reusable_chain_idx].word_lm_trigram_ratio;
+                raw_pool[candidate_idx].word_lm_zero_count :=
+                    m_runtime_long_chain_candidates[reusable_chain_idx].word_lm_zero_count;
+                Continue;
+            end;
+            path_parts := raw_pool[candidate_idx].segment_path.Split(
+                [c_segment_path_separator]);
+            if Length(path_parts) < 2 then
+            begin
+                Continue;
+            end;
+            query_offset := 0;
+            previous_text_value := '';
+            previous_units := 0;
+            boundary_count := 0;
+            supported_count := 0;
+            strong_count := 0;
+            trigram_count := 0;
+            total_bonus := 0;
+            raw_pool[candidate_idx].word_lm_boundary_min := MaxInt;
+            for part_idx := 0 to High(path_parts) - 1 do
+            begin
+                current_text_value := Trim(path_parts[part_idx]);
+                next_text_value := Trim(path_parts[part_idx + 1]);
+                current_units := get_candidate_text_unit_count(
+                    current_text_value);
+                next_units := get_candidate_text_unit_count(next_text_value);
+                if (current_text_value = '') or (next_text_value = '') or
+                    (current_units <= 0) or (next_units <= 0) or
+                    (query_offset + current_units + next_units >
+                    expected_units) then
+                begin
+                    boundary_count := 0;
+                    Break;
+                end;
+                transition_query := build_span_key(query_offset,
+                    current_units + next_units);
+                transition_path := current_text_value +
+                    c_segment_path_separator + next_text_value;
+                bigram_bonus := cached_lm_transition_bonus(transition_query,
+                    transition_path);
+                trigram_bonus := 0;
+                if (part_idx > 0) and (previous_text_value <> '') and
+                    (previous_units > 0) then
+                begin
+                    transition_query := build_span_key(
+                        query_offset - previous_units,
+                        previous_units + current_units + next_units);
+                    transition_path := previous_text_value +
+                        c_segment_path_separator + current_text_value +
+                        c_segment_path_separator + next_text_value;
+                    trigram_bonus := cached_lm_transition_bonus(
+                        transition_query, transition_path);
+                end;
+                boundary_bonus := Max(bigram_bonus, trigram_bonus);
+                if boundary_count = 0 then
+                begin
+                    raw_pool[candidate_idx].word_lm_boundary_first :=
+                        boundary_bonus;
+                end;
+                raw_pool[candidate_idx].word_lm_boundary_last :=
+                    boundary_bonus;
+                raw_pool[candidate_idx].word_lm_boundary_min := Min(
+                    raw_pool[candidate_idx].word_lm_boundary_min,
+                    boundary_bonus);
+                raw_pool[candidate_idx].word_lm_boundary_max := Max(
+                    raw_pool[candidate_idx].word_lm_boundary_max,
+                    boundary_bonus);
+                if boundary_bonus > 0 then
+                begin
+                    Inc(supported_count);
+                end;
+                if boundary_bonus >= c_min_strong_word_lm_bonus then
+                begin
+                    Inc(strong_count);
+                end;
+                if trigram_bonus > 0 then
+                begin
+                    Inc(trigram_count);
+                end;
+                Inc(total_bonus, boundary_bonus);
+                Inc(boundary_count);
+                previous_text_value := current_text_value;
+                previous_units := current_units;
+                Inc(query_offset, current_units);
+            end;
+            if boundary_count <= 0 then
+            begin
+                raw_pool[candidate_idx].word_lm_boundary_min := 0;
+                Continue;
+            end;
+            raw_pool[candidate_idx].word_lm_bonus :=
+                total_bonus div boundary_count;
+            raw_pool[candidate_idx].word_lm_boundary_count :=
+                boundary_count;
+            raw_pool[candidate_idx].word_lm_supported_ratio :=
+                supported_count * 1000 div boundary_count;
+            raw_pool[candidate_idx].word_lm_strong_ratio :=
+                strong_count * 1000 div boundary_count;
+            raw_pool[candidate_idx].word_lm_trigram_ratio :=
+                trigram_count * 1000 div boundary_count;
+            raw_pool[candidate_idx].word_lm_zero_count :=
+                boundary_count - supported_count;
+        end;
+    end;
+
+    procedure score_local_pairwise_candidates;
+    var
+        baseline_idx: Integer;
+        challenger_indices: TArray<Integer>;
+        challenger_count: Integer;
+        challenger_idx: Integer;
+        candidate_idx: Integer;
+        baseline_units: TArray<string>;
+        candidate_units: TArray<string>;
+        window_texts: TArray<string>;
+        window_scores: TArray<Integer>;
+        window_offsets: TArray<Integer>;
+        window_count: Integer;
+        radius: Integer;
+        window_start: Integer;
+        window_end: Integer;
+        candidate_features: TncLongLocalPoolCandidateFeatures;
+        baseline_features: TncLongLocalPoolCandidateFeatures;
+        relation_features: TncLongLocalPoolRelationFeatures;
+        top_lm: TncLongLocalPoolLmScores;
+        candidate_lm: TncLongLocalPoolLmScores;
+        model_features: TncLongLocalPairwisePoolFeatures;
+        score: Double;
+
+        procedure fill_candidate_features(const item:
+            TncLongCompletePoolRuntimeCandidate;
+            out features: TncLongLocalPoolCandidateFeatures);
+        begin
+            features := Default(TncLongLocalPoolCandidateFeatures);
+            features.pool_rank := item.pool_rank;
+            features.char_lm_score := item.char_lm_score;
+            features.seed_rank := item.seed_rank;
+            features.original := Ord(item.original);
+            features.substitutions := item.substitutions;
+            if item.original then
+            begin
+                features.changed_position_ratio := -1.0;
+            end
+            else
+            begin
+                features.changed_position_ratio :=
+                    item.changed_position / Max(1, expected_units - 1);
+            end;
+            features.source_char_weight := item.source_char_weight;
+            features.replacement_char_weight := item.replacement_char_weight;
+            features.char_weight_delta := item.replacement_char_weight -
+                item.source_char_weight;
+            features.consensus_seed_count := item.consensus_seed_count;
+            features.consensus_support_mean := item.consensus_support_mean;
+            features.consensus_support_min := item.consensus_support_min;
+            features.consensus_majority_units :=
+                item.consensus_majority_units;
+            features.consensus_unanimous_units :=
+                item.consensus_unanimous_units;
+            features.consensus_nearest_distance :=
+                item.consensus_nearest_distance;
+            features.consensus_mean_distance := item.consensus_mean_distance;
+            features.consensus_changed_support :=
+                item.consensus_changed_support;
+            features.consensus_changed_top_match :=
+                item.consensus_changed_top_match;
+        end;
+
+        function join_units(const units: TArray<string>;
+            const first_index: Integer; const last_index: Integer): string;
+        var
+            join_idx: Integer;
+        begin
+            Result := '';
+            for join_idx := first_index to last_index do
+            begin
+                Result := Result + units[join_idx];
+            end;
+        end;
+    begin
+        pairwise_best_idx := -1;
+        pairwise_best_score := -MaxDouble;
+        pairwise_insert_rank := -1;
+        baseline_idx := -1;
+        for candidate_idx := 0 to High(
+            m_runtime_long_complete_pool_candidates) do
+        begin
+            if m_runtime_long_complete_pool_candidates[candidate_idx].original and
+                (m_runtime_long_complete_pool_candidates[candidate_idx].seed_rank = 1) then
+            begin
+                baseline_idx := candidate_idx;
+                Break;
+            end;
+        end;
+        if baseline_idx < 0 then
+        begin
+            Exit;
+        end;
+        SetLength(challenger_indices,
+            c_long_local_pairwise_pool_max_challengers);
+        challenger_count := 0;
+        for candidate_idx := 0 to High(
+            m_runtime_long_complete_pool_candidates) do
+        begin
+            if (m_runtime_long_complete_pool_candidates[candidate_idx].source_kind <>
+                lcps_local_repair) or
+                (challenger_count >=
+                c_long_local_pairwise_pool_max_challengers) then
+            begin
+                Continue;
+            end;
+            challenger_indices[challenger_count] := candidate_idx;
+            Inc(challenger_count);
+        end;
+        if challenger_count <= 0 then
+        begin
+            Exit;
+        end;
+        SetLength(challenger_indices, challenger_count);
+        baseline_units := split_text_units(
+            m_runtime_long_complete_pool_candidates[baseline_idx].candidate.text);
+        if Length(baseline_units) <> expected_units then
+        begin
+            Exit;
+        end;
+        SetLength(window_offsets, challenger_count);
+        SetLength(window_texts, challenger_count * 8);
+        window_count := 0;
+        for challenger_idx := 0 to challenger_count - 1 do
+        begin
+            candidate_idx := challenger_indices[challenger_idx];
+            candidate_units := split_text_units(
+                m_runtime_long_complete_pool_candidates[candidate_idx].candidate.text);
+            if Length(candidate_units) <> expected_units then
+            begin
+                Exit;
+            end;
+            window_offsets[challenger_idx] := window_count;
+            for radius := 0 to 3 do
+            begin
+                window_start := Max(0,
+                    m_runtime_long_complete_pool_candidates[candidate_idx].changed_position -
+                    radius);
+                window_end := Min(expected_units - 1,
+                    m_runtime_long_complete_pool_candidates[candidate_idx].changed_position +
+                    radius);
+                window_texts[window_count] := join_units(baseline_units,
+                    window_start, window_end);
+                Inc(window_count);
+                window_texts[window_count] := join_units(candidate_units,
+                    window_start, window_end);
+                Inc(window_count);
+            end;
+        end;
+        SetLength(window_texts, window_count);
+        if (window_count <= 0) or
+            (not get_cached_char_lm_scores(window_texts, window_scores,
+            clsm_suffix, '')) or (Length(window_scores) <> window_count) then
+        begin
+            Exit;
+        end;
+        fill_candidate_features(
+            m_runtime_long_complete_pool_candidates[baseline_idx],
+            baseline_features);
+        for challenger_idx := 0 to challenger_count - 1 do
+        begin
+            candidate_idx := challenger_indices[challenger_idx];
+            fill_candidate_features(
+                m_runtime_long_complete_pool_candidates[candidate_idx],
+                candidate_features);
+            relation_features := Default(TncLongLocalPoolRelationFeatures);
+            relation_features.different_units := 1.0;
+            relation_features.different_runs := 1.0;
+            relation_features.max_different_run := 1.0;
+            relation_features.same_prefix_units :=
+                m_runtime_long_complete_pool_candidates[candidate_idx].changed_position;
+            relation_features.same_suffix_units := expected_units -
+                m_runtime_long_complete_pool_candidates[candidate_idx].changed_position - 1;
+            relation_features.difference_span_units := 1.0;
+            for radius := 0 to 3 do
+            begin
+                top_lm[radius] := window_scores[
+                    window_offsets[challenger_idx] + radius * 2];
+                candidate_lm[radius] := window_scores[
+                    window_offsets[challenger_idx] + radius * 2 + 1];
+            end;
+            build_long_local_pairwise_pool_features(candidate_features,
+                baseline_features, relation_features, top_lm, candidate_lm,
+                model_features);
+            score := long_local_pairwise_pool_score(model_features);
+            m_runtime_long_complete_pool_candidates[candidate_idx].local_pairwise_score :=
+                Round(score * 1000.0);
+            if score > pairwise_best_score then
+            begin
+                pairwise_best_score := score;
+                pairwise_best_idx := candidate_idx;
+            end;
+        end;
+        if pairwise_best_idx < 0 then
+        begin
+            Exit;
+        end;
+        if pairwise_best_score >=
+            c_long_local_pairwise_pool_top1_threshold then
+        begin
+            pairwise_insert_rank := 0;
+        end
+        else if pairwise_best_score >=
+            c_long_local_pairwise_pool_top2_threshold then
+        begin
+            pairwise_insert_rank := 1;
+        end
+        else
+        begin
+            pairwise_best_idx := -1;
+            Exit;
+        end;
+        m_runtime_long_complete_pool_candidates[pairwise_best_idx].local_pairwise_insert_rank :=
+            pairwise_insert_rank;
+        m_long_complete_pool_pairwise_text := Trim(
+            m_runtime_long_complete_pool_candidates[pairwise_best_idx].candidate.text);
+        m_long_complete_pool_pairwise_insert_rank := pairwise_insert_rank;
+        m_long_local_rerank_generated_text :=
+            m_long_complete_pool_pairwise_text;
+        m_long_local_rerank_composition_text := m_composition_text;
+        m_long_local_rerank_lookup_key := m_last_lookup_key;
+    end;
+
+    function generated_pool_candidate_has_visible_evidence(
+        const candidate_text: string;
+        const allow_primary_chain: Boolean): Boolean;
+    var
+        candidate_idx: Integer;
+        item: TncLongCompletePoolRuntimeCandidate;
+    begin
+        Result := True;
+        for candidate_idx := 0 to High(
+            m_runtime_long_complete_pool_candidates) do
+        begin
+            item := m_runtime_long_complete_pool_candidates[candidate_idx];
+            if not SameText(Trim(item.candidate.text),
+                Trim(candidate_text)) then
+            begin
+                Continue;
+            end;
+            if (item.source_kind <> lcps_exact_lattice) and
+                (item.source_kind <> lcps_existing) and
+                (item.source_kind <> lcps_chain) then
+            begin
+                Exit(True);
+            end;
+
+            if (item.source_kind = lcps_chain) and allow_primary_chain then
+            begin
+                Exit(True);
+            end;
+
+            { Keep zero-evidence lattice, pre-display and secondary chain paths
+              in the internal pool, but do not expose them as complete choices. }
+            Exit((item.pair_evidence > 0) or
+                (item.word_lm_supported_ratio > 0) or
+                (item.char_lm_score <> 0) or
+                (item.char_lm_suffix_score <> 0) or
+                (item.char_lm_context_score <> 0) or
+                (item.proper_name_confidence > 0));
+        end;
+    end;
+
+begin
+    pool_phase_tick := 0;
+    if m_config.debug_mode then
+    begin
+        pool_phase_tick := GetTickCount64;
+    end;
+    SetLength(m_runtime_long_complete_pool_candidates, 0);
+    m_long_complete_pool_pairwise_text := '';
+    m_long_complete_pool_pairwise_insert_rank := -1;
+    m_long_local_rerank_generated_text := '';
+    m_long_local_rerank_composition_text := '';
+    m_long_local_rerank_lookup_key := '';
+    if (m_dictionary = nil) or (m_page_index <> 0) or
+        (m_confirmed_text <> '') or (expected_units < 6) or
+        (Length(query_syllables) <> expected_units) or
+        (Length(candidates) < 2) or m_has_forced_visible_top_candidate then
+    begin
+        apply_long_final_visible_candidate_ranking(candidates,
+            source_indices);
+        Exit;
+    end;
+    if candidate_is_complete(candidates[0]) and
+        ((candidates[0].source = cs_user) or
+        m_dictionary.is_user_entry(normalized_query,
+        Trim(candidates[0].text)) or
+        (candidates[0].has_dict_weight and
+        m_dictionary.is_base_entry(normalized_query,
+        Trim(candidates[0].text)))) then
+    begin
+        apply_long_final_visible_candidate_ranking(candidates,
+            source_indices);
+        Exit;
+    end;
+
+    original_candidates := Copy(candidates, 0, Length(candidates));
+    original_source_indices := Copy(source_indices, 0,
+        Length(source_indices));
+    original_visible_count := Length(original_candidates);
+    SetLength(raw_pool, 0);
+    raw_index_by_text := TDictionary<string, Integer>.Create;
+    selected_texts := TDictionary<string, Boolean>.Create;
+    selected_signature_counts := TDictionary<string, Integer>.Create;
+    signature_totals := TDictionary<string, Integer>.Create;
+    exact_cache := TDictionary<string, TncCandidateList>.Create;
+    word_lm_cache := TDictionary<string, Integer>.Create;
+    emitted_texts := TDictionary<string, Boolean>.Create;
+    try
+        for idx := 0 to High(original_candidates) do
+        begin
+            source_idx := -1;
+            if idx < Length(original_source_indices) then
+            begin
+                source_idx := original_source_indices[idx];
+            end;
+            add_candidate(original_candidates[idx], source_idx, '',
+                lcps_visible, idx + 1, idx, True, 0, -1, 0, 0, 0);
+        end;
+
+        for chain_idx := 0 to High(m_runtime_long_chain_candidates) do
+        begin
+            candidate_value := Default(TncCandidate);
+            candidate_value.text :=
+                m_runtime_long_chain_candidates[chain_idx].text;
+            candidate_value.comment := '';
+            if m_runtime_long_chain_candidates[chain_idx].second_stage_score >
+                High(Integer) then
+            begin
+                candidate_value.score := High(Integer);
+            end
+            else if m_runtime_long_chain_candidates[chain_idx].second_stage_score <
+                Low(Integer) then
+            begin
+                candidate_value.score := Low(Integer);
+            end
+            else
+            begin
+                candidate_value.score :=
+                    m_runtime_long_chain_candidates[chain_idx].second_stage_score;
+            end;
+            candidate_value.source := cs_rule;
+            candidate_value.has_dict_weight := False;
+            candidate_value.dict_weight := 0;
+            add_candidate(candidate_value, -1,
+                m_runtime_long_chain_candidates[chain_idx].segment_path,
+                lcps_chain,
+                m_runtime_long_chain_candidates[chain_idx].rank,
+                -1, True, 0, -1, 0, 0, 0);
+        end;
+
+        for idx := 0 to Min(c_existing_probe_limit - 1,
+            High(m_candidates)) do
+        begin
+            add_candidate(m_candidates[idx], idx, '', lcps_existing,
+                idx + 1, -1, True, 0, -1, 0, 0, 0);
+        end;
+        raw_original_count := Length(raw_pool);
+        note_pool_phase('seed');
+        if raw_original_count <= 0 then
+        begin
+            apply_long_final_visible_candidate_ranking(candidates,
+                source_indices);
+            Exit;
+        end;
+
+        generate_exact_lattice_candidates;
+        note_pool_phase('lattice');
+        generate_exact_pair_candidates;
+        note_pool_phase('pair');
+        generate_local_repair_candidates;
+        note_pool_phase('repair');
+
+        get_recent_path_context_seed(previous_previous_text, previous_text);
+        left_context := Trim(previous_previous_text) + Trim(previous_text);
+        has_left_context := left_context <> '';
+
+        SetLength(char_texts, Length(raw_pool));
+        SetLength(char_scores, Length(raw_pool));
+        SetLength(char_suffix_scores, Length(raw_pool));
+        SetLength(char_context_scores, Length(raw_pool));
+        SetLength(missing_char_raw_indices, Length(raw_pool));
+        SetLength(missing_char_texts, Length(raw_pool));
+        missing_char_count := 0;
+        for raw_idx := 0 to High(raw_pool) do
+        begin
+            char_texts[raw_idx] := Trim(raw_pool[raw_idx].candidate.text);
+            chain_idx := find_reusable_chain_features(raw_pool[raw_idx],
+                False, True);
+            if chain_idx >= 0 then
+            begin
+                char_scores[raw_idx] :=
+                    m_runtime_long_chain_candidates[chain_idx].char_lm_score;
+                char_suffix_scores[raw_idx] :=
+                    m_runtime_long_chain_candidates[chain_idx].char_lm_suffix_score;
+                char_context_scores[raw_idx] :=
+                    m_runtime_long_chain_candidates[chain_idx].char_lm_context_score;
+            end
+            else
+            begin
+                missing_char_raw_indices[missing_char_count] := raw_idx;
+                missing_char_texts[missing_char_count] := char_texts[raw_idx];
+                Inc(missing_char_count);
+            end;
+        end;
+        SetLength(missing_char_raw_indices, missing_char_count);
+        SetLength(missing_char_texts, missing_char_count);
+        char_scores_ok := True;
+        if missing_char_count > 0 then
+        begin
+            char_scores_ok := get_cached_char_lm_scores(missing_char_texts,
+                missing_char_scores, clsm_full, '') and
+                (Length(missing_char_scores) = missing_char_count);
+            if char_scores_ok then
+            begin
+                if (not get_cached_char_lm_scores(missing_char_texts,
+                    missing_char_suffix_scores, clsm_suffix, '')) or
+                    (Length(missing_char_suffix_scores) <>
+                    missing_char_count) then
+                begin
+                    missing_char_suffix_scores := Copy(missing_char_scores);
+                end;
+                if has_left_context and
+                    get_cached_char_lm_scores(missing_char_texts,
+                    missing_char_context_scores, clsm_context,
+                    left_context) and
+                    (Length(missing_char_context_scores) =
+                    missing_char_count) then
+                begin
+                    { Keep the contextual scores returned by the dictionary. }
+                end
+                else
+                begin
+                    missing_char_context_scores :=
+                        Copy(missing_char_suffix_scores);
+                end;
+                for missing_char_idx := 0 to missing_char_count - 1 do
+                begin
+                    raw_idx := missing_char_raw_indices[missing_char_idx];
+                    char_scores[raw_idx] :=
+                        missing_char_scores[missing_char_idx];
+                    char_suffix_scores[raw_idx] :=
+                        missing_char_suffix_scores[missing_char_idx];
+                    char_context_scores[raw_idx] :=
+                        missing_char_context_scores[missing_char_idx];
+                end;
+            end;
+        end;
+        if not char_scores_ok then
+        begin
+            if (not get_cached_char_lm_scores(char_texts, char_scores,
+                clsm_full, '')) or
+                (Length(char_scores) <> Length(raw_pool)) then
+            begin
+                SetLength(char_scores, Length(raw_pool));
+            end;
+            if (not get_cached_char_lm_scores(char_texts,
+                char_suffix_scores, clsm_suffix, '')) or
+                (Length(char_suffix_scores) <> Length(raw_pool)) then
+            begin
+                char_suffix_scores := Copy(char_scores);
+            end;
+            if has_left_context and get_cached_char_lm_scores(char_texts,
+                char_context_scores, clsm_context, left_context) and
+                (Length(char_context_scores) = Length(raw_pool)) then
+            begin
+                { Use the contextual batch. }
+            end
+            else
+            begin
+                char_context_scores := Copy(char_suffix_scores);
+            end;
+        end;
+        for raw_idx := 0 to High(raw_pool) do
+        begin
+            raw_pool[raw_idx].char_lm_score := char_scores[raw_idx];
+            raw_pool[raw_idx].char_lm_suffix_score :=
+                char_suffix_scores[raw_idx];
+            raw_pool[raw_idx].char_lm_context_score :=
+                char_context_scores[raw_idx];
+            signature_totals.TryGetValue(
+                raw_pool[raw_idx].segmentation_signature, idx);
+                signature_totals.AddOrSetValue(
+                raw_pool[raw_idx].segmentation_signature, idx + 1);
+        end;
+        note_pool_phase('charlm');
+        populate_word_lm_features;
+        note_pool_phase('wordlm');
+        populate_consensus_features;
+        note_pool_phase('consensus');
+        for raw_idx := 0 to High(raw_pool) do
+        begin
+            signature_totals.TryGetValue(
+                raw_pool[raw_idx].segmentation_signature, idx);
+            raw_pool[raw_idx].signature_support := idx;
+        end;
+
+        SetLength(sorted_indices, Length(raw_pool));
+        for raw_idx := 0 to High(raw_pool) do
+        begin
+            sorted_indices[raw_idx] := raw_idx;
+        end;
+        { The raw pool is deliberately bounded at 192 entries. A stable
+          insertion sort avoids allocating a captured comparer in Delphi and
+          preserves deterministic source order for exact score ties. }
+        for sort_pos := 1 to High(sorted_indices) do
+        begin
+            sort_value := sorted_indices[sort_pos];
+            sort_insert_pos := sort_pos - 1;
+            while (sort_insert_pos >= 0) and pool_sort_is_better(
+                sort_value, sorted_indices[sort_insert_pos]) do
+            begin
+                sorted_indices[sort_insert_pos + 1] :=
+                    sorted_indices[sort_insert_pos];
+                Dec(sort_insert_pos);
+            end;
+            sorted_indices[sort_insert_pos + 1] := sort_value;
+        end;
+        note_pool_phase('presort');
+
+        SetLength(selected_indices, 0);
+        for raw_idx := 0 to High(raw_pool) do
+        begin
+            if raw_pool[raw_idx].source_kind = lcps_visible then
+            begin
+                select_raw_index(raw_idx);
+            end;
+        end;
+        reserve_source_lane(lcps_proper_name,
+            c_proper_name_reserved, True);
+        reserve_source_lane(lcps_chain, c_chain_reserved);
+        reserve_source_lane(lcps_exact_lattice,
+            c_exact_lattice_reserved);
+        reserve_source_lane(lcps_exact_pair, c_pair_reserved);
+        reserve_source_lane(lcps_local_repair, c_local_reserved);
+
+        for selected_idx := 0 to High(sorted_indices) do
+        begin
+            raw_idx := sorted_indices[selected_idx];
+            idx := 0;
+            selected_signature_counts.TryGetValue(
+                raw_pool[raw_idx].segmentation_signature, idx);
+            if idx >= c_signature_soft_limit then
+            begin
+                Continue;
+            end;
+            select_raw_index(raw_idx);
+            if Length(selected_indices) >= c_pool_limit then
+            begin
+                Break;
+            end;
+        end;
+        for selected_idx := 0 to High(sorted_indices) do
+        begin
+            if Length(selected_indices) >= c_pool_limit then
+            begin
+                Break;
+            end;
+            select_raw_index(sorted_indices[selected_idx]);
+        end;
+
+        SetLength(m_runtime_long_complete_pool_candidates,
+            Length(selected_indices));
+        for selected_idx := 0 to High(selected_indices) do
+        begin
+            raw_idx := selected_indices[selected_idx];
+            raw_pool[raw_idx].pool_rank := selected_idx + 1;
+            m_runtime_long_complete_pool_candidates[selected_idx] :=
+                raw_pool[raw_idx];
+            remember_segment_path_for_candidate(
+                raw_pool[raw_idx].candidate.text, '',
+                raw_pool[raw_idx].segment_path,
+                raw_pool[raw_idx].candidate.score);
+        end;
+        note_pool_phase('select');
+        score_local_pairwise_candidates;
+        note_pool_phase('localpair');
+
+        SetLength(internal_candidates,
+            Length(m_runtime_long_complete_pool_candidates));
+        SetLength(internal_source_indices, Length(internal_candidates));
+        for selected_idx := 0 to High(
+            m_runtime_long_complete_pool_candidates) do
+        begin
+            internal_candidates[selected_idx] :=
+                m_runtime_long_complete_pool_candidates[selected_idx].candidate;
+            internal_source_indices[selected_idx] :=
+                m_runtime_long_complete_pool_candidates[selected_idx].source_index;
+        end;
+        apply_long_final_visible_candidate_ranking(internal_candidates,
+            internal_source_indices, True);
+        note_pool_phase('rank');
+
+        SetLength(merged_candidates, original_visible_count);
+        SetLength(merged_sources, original_visible_count);
+        merged_count := 0;
+        complete_count := 0;
+        for idx := 0 to High(internal_candidates) do
+        begin
+            if (complete_count >= c_visible_complete_limit) or
+                (not candidate_is_complete(internal_candidates[idx])) then
+            begin
+                Continue;
+            end;
+            if not generated_pool_candidate_has_visible_evidence(
+                internal_candidates[idx].text, complete_count = 0) then
+            begin
+                Continue;
+            end;
+            path_value := LowerCase(Trim(internal_candidates[idx].text));
+            if emitted_texts.ContainsKey(path_value) then
+            begin
+                Continue;
+            end;
+            merged_candidates[merged_count] := internal_candidates[idx];
+            merged_sources[merged_count] := internal_source_indices[idx];
+            emitted_texts.Add(path_value, True);
+            Inc(merged_count);
+            Inc(complete_count);
+            if merged_count >= original_visible_count then
+            begin
+                Break;
+            end;
+        end;
+        for idx := 0 to High(original_candidates) do
+        begin
+            if (merged_count >= original_visible_count) or
+                candidate_is_complete(original_candidates[idx]) then
+            begin
+                Continue;
+            end;
+            path_value := LowerCase(Trim(original_candidates[idx].text)) +
+                #1 + LowerCase(Trim(original_candidates[idx].comment));
+            if emitted_texts.ContainsKey(path_value) then
+            begin
+                Continue;
+            end;
+            merged_candidates[merged_count] := original_candidates[idx];
+            if idx < Length(original_source_indices) then
+            begin
+                merged_sources[merged_count] := original_source_indices[idx];
+            end
+            else
+            begin
+                merged_sources[merged_count] := -1;
+            end;
+            emitted_texts.Add(path_value, True);
+            Inc(merged_count);
+        end;
+        for idx := 0 to High(original_candidates) do
+        begin
+            if merged_count >= original_visible_count then
+            begin
+                Break;
+            end;
+            path_value := LowerCase(Trim(original_candidates[idx].text)) +
+                #1 + LowerCase(Trim(original_candidates[idx].comment));
+            if emitted_texts.ContainsKey(path_value) then
+            begin
+                Continue;
+            end;
+            merged_candidates[merged_count] := original_candidates[idx];
+            if idx < Length(original_source_indices) then
+            begin
+                merged_sources[merged_count] := original_source_indices[idx];
+            end
+            else
+            begin
+                merged_sources[merged_count] := -1;
+            end;
+            emitted_texts.Add(path_value, True);
+            Inc(merged_count);
+        end;
+        SetLength(merged_candidates, merged_count);
+        SetLength(merged_sources, merged_count);
+        candidates := merged_candidates;
+        source_indices := merged_sources;
+        note_pool_phase('merge');
+    finally
+        emitted_texts.Free;
+        word_lm_cache.Free;
+        exact_cache.Free;
+        signature_totals.Free;
+        selected_signature_counts.Free;
+        selected_texts.Free;
+        raw_index_by_text.Free;
+    end;
+end;
+
 procedure TncEngine.apply_long_final_visible_candidate_ranking(
     var candidates: TncCandidateList;
-    var source_indices: TArray<Integer>);
+    var source_indices: TArray<Integer>;
+    const unified_pool_final: Boolean);
 var
     profile: Integer;
     candidate_count: Integer;
@@ -120307,6 +122671,7 @@ var
     insert_idx: Integer;
     current_idx: Integer;
     chain_idx: Integer;
+    pool_idx: Integer;
     normalized_query: string;
     latest_choice_text: string;
     previous_previous_text: string;
@@ -120319,6 +122684,7 @@ var
     char_suffix_scores: TArray<Integer>;
     char_context_scores: TArray<Integer>;
     candidate_chain_indices: TArray<Integer>;
+    candidate_pool_indices: TArray<Integer>;
     missing_candidate_indices: TArray<Integer>;
     missing_candidate_texts: TArray<string>;
     missing_char_scores: TArray<Integer>;
@@ -120387,6 +122753,8 @@ var
     local_difference_current_rank_debug: TArray<Integer>;
     local_top_lm_debug: array[0..3] of TArray<Integer>;
     local_candidate_lm_debug: array[0..3] of TArray<Integer>;
+    complete_pool_pairwise_position: Integer;
+    complete_pool_pairwise_target_position: Integer;
 
     function find_chain_candidate_index(const candidate_text: string): Integer;
     var
@@ -120396,6 +122764,24 @@ var
         for idx_local := 0 to High(m_runtime_long_chain_candidates) do
         begin
             if SameText(Trim(m_runtime_long_chain_candidates[idx_local].text),
+                Trim(candidate_text)) then
+            begin
+                Exit(idx_local);
+            end;
+        end;
+    end;
+
+    function find_complete_pool_candidate_index(
+        const candidate_text: string): Integer;
+    var
+        idx_local: Integer;
+    begin
+        Result := -1;
+        for idx_local := 0 to High(
+            m_runtime_long_complete_pool_candidates) do
+        begin
+            if SameText(Trim(
+                m_runtime_long_complete_pool_candidates[idx_local].candidate.text),
                 Trim(candidate_text)) then
             begin
                 Exit(idx_local);
@@ -120482,11 +122868,58 @@ var
         debug_item.complete_user := features.complete_user;
         debug_item.complete_dictionary := features.complete_dictionary;
         debug_item.complete_chain := features.complete_chain;
+        debug_item.complete_pool_present := features.complete_pool_present;
+        debug_item.complete_pool_source_kind :=
+            features.complete_pool_source_kind;
+        debug_item.complete_pool_rank := features.complete_pool_rank;
+        debug_item.complete_pool_seed_rank :=
+            features.complete_pool_seed_rank;
+        debug_item.complete_pool_original :=
+            features.complete_pool_original;
+        debug_item.complete_pool_substitutions :=
+            features.complete_pool_substitutions;
+        debug_item.complete_pool_changed_position :=
+            features.complete_pool_changed_position;
+        debug_item.complete_pool_pair_evidence :=
+            features.complete_pool_pair_evidence;
+        debug_item.complete_pool_proper_name_confidence :=
+            features.complete_pool_proper_name_confidence;
+        debug_item.complete_pool_signature_support :=
+            features.complete_pool_signature_support;
+        debug_item.complete_pool_consensus_support :=
+            features.complete_pool_consensus_support;
+        debug_item.complete_pool_consensus_seed_count :=
+            features.complete_pool_consensus_seed_count;
+        debug_item.complete_pool_consensus_support_mean :=
+            features.complete_pool_consensus_support_mean;
+        debug_item.complete_pool_consensus_support_min :=
+            features.complete_pool_consensus_support_min;
+        debug_item.complete_pool_consensus_majority_units :=
+            features.complete_pool_consensus_majority_units;
+        debug_item.complete_pool_consensus_unanimous_units :=
+            features.complete_pool_consensus_unanimous_units;
+        debug_item.complete_pool_consensus_nearest_distance :=
+            features.complete_pool_consensus_nearest_distance;
+        debug_item.complete_pool_consensus_mean_distance :=
+            features.complete_pool_consensus_mean_distance;
+        debug_item.complete_pool_consensus_changed_support :=
+            features.complete_pool_consensus_changed_support;
+        debug_item.complete_pool_consensus_changed_top_match :=
+            features.complete_pool_consensus_changed_top_match;
+        debug_item.complete_pool_local_pairwise_score :=
+            features.complete_pool_local_pairwise_score;
     end;
 
 begin
     SetLength(m_debug_long_final_candidates, 0);
-    profile := c_long_final_ranker_default_profile;
+    if unified_pool_final then
+    begin
+        profile := c_long_complete_pool_ranker_default_profile;
+    end
+    else
+    begin
+        profile := c_long_final_ranker_default_profile;
+    end;
     if m_debug_long_final_ranker_profile >= 0 then
     begin
         profile := m_debug_long_final_ranker_profile;
@@ -120536,6 +122969,7 @@ begin
 
     SetLength(candidate_texts, candidate_count);
     SetLength(candidate_chain_indices, candidate_count);
+    SetLength(candidate_pool_indices, candidate_count);
     SetLength(char_scores, candidate_count);
     SetLength(char_suffix_scores, candidate_count);
     SetLength(char_context_scores, candidate_count);
@@ -120546,8 +122980,21 @@ begin
     begin
         candidate_texts[candidate_idx] :=
             Trim(legacy_candidates[candidate_idx].text);
+        pool_idx := find_complete_pool_candidate_index(
+            candidate_texts[candidate_idx]);
+        candidate_pool_indices[candidate_idx] := pool_idx;
         chain_idx := find_chain_candidate_index(candidate_texts[candidate_idx]);
         candidate_chain_indices[candidate_idx] := chain_idx;
+        if pool_idx >= 0 then
+        begin
+            char_scores[candidate_idx] :=
+                m_runtime_long_complete_pool_candidates[pool_idx].char_lm_score;
+            char_suffix_scores[candidate_idx] :=
+                m_runtime_long_complete_pool_candidates[pool_idx].char_lm_suffix_score;
+            char_context_scores[candidate_idx] :=
+                m_runtime_long_complete_pool_candidates[pool_idx].char_lm_context_score;
+            Continue;
+        end;
         runtime_features_match := (chain_idx >= 0) and
             m_runtime_long_chain_candidates[chain_idx].features_valid and
             SameText(m_runtime_long_chain_candidates[chain_idx].feature_query_key,
@@ -120786,11 +123233,89 @@ begin
             complete_user := complete_match and source_user;
             complete_dictionary := complete_match and has_dict_weight;
             complete_chain := complete_match and source_chain;
+            pool_idx := candidate_pool_indices[candidate_idx];
+            complete_pool_present := pool_idx >= 0;
+            if complete_pool_present then
+            begin
+                complete_pool_source_kind := Ord(
+                    m_runtime_long_complete_pool_candidates[pool_idx].source_kind);
+                complete_pool_rank :=
+                    m_runtime_long_complete_pool_candidates[pool_idx].pool_rank;
+                complete_pool_seed_rank :=
+                    m_runtime_long_complete_pool_candidates[pool_idx].seed_rank;
+                complete_pool_original :=
+                    m_runtime_long_complete_pool_candidates[pool_idx].original;
+                complete_pool_substitutions :=
+                    m_runtime_long_complete_pool_candidates[pool_idx].substitutions;
+                complete_pool_changed_position :=
+                    m_runtime_long_complete_pool_candidates[pool_idx].changed_position;
+                complete_pool_pair_evidence :=
+                    m_runtime_long_complete_pool_candidates[pool_idx].pair_evidence;
+                complete_pool_proper_name_confidence :=
+                    m_runtime_long_complete_pool_candidates[pool_idx].proper_name_confidence;
+                complete_pool_signature_support :=
+                    m_runtime_long_complete_pool_candidates[pool_idx].signature_support;
+                complete_pool_consensus_support :=
+                    m_runtime_long_complete_pool_candidates[pool_idx].consensus_support;
+                complete_pool_consensus_seed_count :=
+                    m_runtime_long_complete_pool_candidates[pool_idx].consensus_seed_count;
+                complete_pool_consensus_support_mean := Round(
+                    m_runtime_long_complete_pool_candidates[pool_idx].consensus_support_mean *
+                    1000.0);
+                complete_pool_consensus_support_min := Round(
+                    m_runtime_long_complete_pool_candidates[pool_idx].consensus_support_min *
+                    1000.0);
+                complete_pool_consensus_majority_units :=
+                    m_runtime_long_complete_pool_candidates[pool_idx].consensus_majority_units;
+                complete_pool_consensus_unanimous_units :=
+                    m_runtime_long_complete_pool_candidates[pool_idx].consensus_unanimous_units;
+                complete_pool_consensus_nearest_distance :=
+                    m_runtime_long_complete_pool_candidates[pool_idx].consensus_nearest_distance;
+                complete_pool_consensus_mean_distance := Round(
+                    m_runtime_long_complete_pool_candidates[pool_idx].consensus_mean_distance *
+                    1000.0);
+                complete_pool_consensus_changed_support := Round(
+                    m_runtime_long_complete_pool_candidates[pool_idx].consensus_changed_support *
+                    1000.0);
+                complete_pool_consensus_changed_top_match :=
+                    m_runtime_long_complete_pool_candidates[pool_idx].consensus_changed_top_match > 0;
+                complete_pool_local_pairwise_score :=
+                    m_runtime_long_complete_pool_candidates[pool_idx].local_pairwise_score;
+                word_lm_bonus :=
+                    m_runtime_long_complete_pool_candidates[pool_idx].word_lm_bonus;
+                word_lm_boundary_count :=
+                    m_runtime_long_complete_pool_candidates[pool_idx].word_lm_boundary_count;
+                word_lm_boundary_min :=
+                    m_runtime_long_complete_pool_candidates[pool_idx].word_lm_boundary_min;
+                word_lm_boundary_max :=
+                    m_runtime_long_complete_pool_candidates[pool_idx].word_lm_boundary_max;
+                word_lm_boundary_first :=
+                    m_runtime_long_complete_pool_candidates[pool_idx].word_lm_boundary_first;
+                word_lm_boundary_last :=
+                    m_runtime_long_complete_pool_candidates[pool_idx].word_lm_boundary_last;
+                word_lm_supported_ratio :=
+                    m_runtime_long_complete_pool_candidates[pool_idx].word_lm_supported_ratio;
+                word_lm_strong_ratio :=
+                    m_runtime_long_complete_pool_candidates[pool_idx].word_lm_strong_ratio;
+                word_lm_trigram_ratio :=
+                    m_runtime_long_complete_pool_candidates[pool_idx].word_lm_trigram_ratio;
+                word_lm_zero_count :=
+                    m_runtime_long_complete_pool_candidates[pool_idx].word_lm_zero_count;
+            end;
         end;
         if profile > 0 then
         begin
-            rank_scores[candidate_idx] := long_final_ranker_score(
-                rank_features[candidate_idx]);
+            if unified_pool_final then
+            begin
+                rank_scores[candidate_idx] :=
+                    long_complete_pool_ranker_score(
+                    rank_features[candidate_idx]);
+            end
+            else
+            begin
+                rank_scores[candidate_idx] := long_final_ranker_score(
+                    rank_features[candidate_idx]);
+            end;
         end
         else
         begin
@@ -120889,11 +123414,55 @@ begin
                 rank_features[top_idx].query_choice_bonus;
             abstain_features.legacy_top_query_choice_bonus :=
                 rank_features[0].query_choice_bonus;
-            abstain_score := long_final_abstain_score(abstain_features);
+            abstain_features.ranker_top_pool_source_kind :=
+                rank_features[top_idx].complete_pool_source_kind;
+            abstain_features.legacy_top_pool_source_kind :=
+                rank_features[0].complete_pool_source_kind;
+            abstain_features.ranker_top_pool_rank :=
+                rank_features[top_idx].complete_pool_rank;
+            abstain_features.legacy_top_pool_rank :=
+                rank_features[0].complete_pool_rank;
+            abstain_features.ranker_top_pair_evidence :=
+                rank_features[top_idx].complete_pool_pair_evidence;
+            abstain_features.legacy_top_pair_evidence :=
+                rank_features[0].complete_pool_pair_evidence;
+            abstain_features.ranker_top_word_lm_bonus :=
+                rank_features[top_idx].word_lm_bonus;
+            abstain_features.legacy_top_word_lm_bonus :=
+                rank_features[0].word_lm_bonus;
+            abstain_features.ranker_top_word_lm_gain :=
+                rank_features[top_idx].word_lm_bonus -
+                rank_features[0].word_lm_bonus;
+            abstain_features.ranker_top_consensus_support :=
+                rank_features[top_idx].complete_pool_consensus_support;
+            abstain_features.legacy_top_consensus_support :=
+                rank_features[0].complete_pool_consensus_support;
+            abstain_features.ranker_top_consensus_gain :=
+                rank_features[top_idx].complete_pool_consensus_support -
+                rank_features[0].complete_pool_consensus_support;
+            abstain_features.ranker_top_proper_name_confidence :=
+                rank_features[top_idx].complete_pool_proper_name_confidence;
+            abstain_features.legacy_top_proper_name_confidence :=
+                rank_features[0].complete_pool_proper_name_confidence;
+            abstain_features.ranker_top_local_pairwise_score :=
+                rank_features[top_idx].complete_pool_local_pairwise_score;
+            abstain_features.legacy_top_local_pairwise_score :=
+                rank_features[0].complete_pool_local_pairwise_score;
+            if unified_pool_final then
+            begin
+                abstain_score := long_complete_pool_abstain_score(
+                    abstain_features);
+            end
+            else
+            begin
+                abstain_score := long_final_abstain_score(abstain_features);
+            end;
             apply_ranker := abstain_score > 0;
         end;
     end;
 
+    if not unified_pool_final then
+    begin
     { Compare the current visible Top1 with each challenger only after the
       existing ranker and abstain decision. This stage reuses all calculated
       features, does not query the dictionary, and can promote one item at
@@ -121146,6 +123715,74 @@ begin
         ordered_indices[0] := current_idx;
         local_difference_promoted_index := current_idx;
         apply_ranker := True;
+    end;
+
+    { The local one-character repair model is now a single confidence-gated
+      fallback after the unified complete-candidate ranking. It no longer
+      runs in several visible-candidate passes that can repeatedly change
+      Top1. }
+    complete_pool_pairwise_position := -1;
+    if (m_long_complete_pool_pairwise_text <> '') and
+        (m_long_complete_pool_pairwise_insert_rank in [0, 1]) then
+    begin
+        for candidate_idx := 0 to candidate_count - 1 do
+        begin
+            current_idx := ordered_indices[candidate_idx];
+            if SameText(Trim(legacy_candidates[current_idx].text),
+                Trim(m_long_complete_pool_pairwise_text)) then
+            begin
+                complete_pool_pairwise_position := candidate_idx;
+                Break;
+            end;
+        end;
+        complete_pool_pairwise_target_position := Min(
+            m_long_complete_pool_pairwise_insert_rank,
+            candidate_count - 1);
+        if complete_pool_pairwise_position >
+            complete_pool_pairwise_target_position then
+        begin
+            current_idx := ordered_indices[complete_pool_pairwise_position];
+            for candidate_idx := complete_pool_pairwise_position downto
+                complete_pool_pairwise_target_position + 1 do
+            begin
+                ordered_indices[candidate_idx] :=
+                    ordered_indices[candidate_idx - 1];
+            end;
+            ordered_indices[complete_pool_pairwise_target_position] :=
+                current_idx;
+            apply_ranker := True;
+        end;
+    end;
+    end
+    else
+    begin
+        { The complete pool has one owner for final ordering. Legacy residual
+          scores remain ranker features, but cannot mutate Top1 afterwards. }
+        if not apply_ranker then
+        begin
+            for candidate_idx := 0 to candidate_count - 1 do
+            begin
+                ordered_indices[candidate_idx] := candidate_idx;
+            end;
+        end;
+        local_difference_promoted_index := -1;
+        SetLength(local_difference_debug_scores, candidate_count);
+        SetLength(local_difference_current_rank_debug, candidate_count);
+        SetLength(local_different_units, candidate_count);
+        SetLength(local_different_runs, candidate_count);
+        SetLength(local_max_different_run, candidate_count);
+        SetLength(local_same_prefix_units, candidate_count);
+        SetLength(local_same_suffix_units, candidate_count);
+        SetLength(local_difference_span_units, candidate_count);
+        for local_radius := 0 to 3 do
+        begin
+            SetLength(local_top_lm_debug[local_radius], candidate_count);
+            SetLength(local_candidate_lm_debug[local_radius], candidate_count);
+        end;
+        for candidate_idx := 0 to candidate_count - 1 do
+        begin
+            local_difference_debug_scores[candidate_idx] := Low(Int64);
+        end;
     end;
 
     if apply_ranker then
@@ -129105,10 +131742,9 @@ begin
     if (m_lookup_text_units_cache <> nil) and
         m_lookup_text_units_cache.TryGetValue(input_text, cached_units) then
     begin
-        // Cached arrays are immutable after construction. Callers only inspect
-        // the returned units, so sharing avoids hundreds of tiny allocations
-        // while ranking long-sentence candidates.
-        Result := cached_units;
+        // Some ranking helpers rearrange their local unit array. Keep the
+        // persistent cache immutable so one lookup cannot change the next.
+        Result := Copy(cached_units);
         Exit;
     end;
 
@@ -129138,7 +131774,7 @@ begin
             begin
                 m_lookup_text_units_cache.Clear;
             end;
-            m_lookup_text_units_cache.AddOrSetValue(input_text, Result);
+            m_lookup_text_units_cache.AddOrSetValue(input_text, Copy(Result));
         end;
     finally
         list.Free;
@@ -166828,14 +169464,25 @@ var
             promote_visible_full_query_exact_over_generated_top;
             rerank_visible_complete_long_candidates_by_lm;
             rerank_visible_complete_long_candidates_by_char_lm;
+            // Keep the proven local models as first-stage proposal generators.
+            // Their output is folded into the internal complete pool below; only
+            // the unified pool ranker is allowed to decide the visible order.
             rerank_visible_complete_long_candidates_by_local_model_pass(
                 False, False);
             rerank_visible_complete_long_candidates_by_local_model_pass(
                 True, False);
+            // Preserve the established long-sentence pipeline as the
+            // first-stage seed ranker. Its visible-looking result remains
+            // internal: the complete pool below performs the only final
+            // ordering that is exposed to the user.
             apply_long_final_visible_candidate_ranking(Result,
                 visible_source_indices);
             rerank_visible_complete_long_candidates_by_local_model_pass(
                 True, True);
+            apply_long_complete_candidate_pool(Result,
+                visible_source_indices, normalized_pinyin, syllables,
+                expected_units);
+            note_display_phase('longpool');
             promote_strong_short_four_two_exact_path_visible_local(Result,
                 visible_source_indices);
             if (Length(Result) > 0) and

@@ -37,6 +37,22 @@ type
         ranker_top_path_confidence_gain: Integer;
         ranker_top_query_choice_bonus: Integer;
         legacy_top_query_choice_bonus: Integer;
+        ranker_top_pool_source_kind: Integer;
+        legacy_top_pool_source_kind: Integer;
+        ranker_top_pool_rank: Integer;
+        legacy_top_pool_rank: Integer;
+        ranker_top_pair_evidence: Integer;
+        legacy_top_pair_evidence: Integer;
+        ranker_top_word_lm_bonus: Integer;
+        legacy_top_word_lm_bonus: Integer;
+        ranker_top_word_lm_gain: Integer;
+        ranker_top_consensus_support: Integer;
+        legacy_top_consensus_support: Integer;
+        ranker_top_consensus_gain: Integer;
+        ranker_top_proper_name_confidence: Integer;
+        legacy_top_proper_name_confidence: Integer;
+        ranker_top_local_pairwise_score: Integer;
+        legacy_top_local_pairwise_score: Integer;
     end;
 
 const

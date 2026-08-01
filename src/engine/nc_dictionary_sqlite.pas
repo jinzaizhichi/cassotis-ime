@@ -49,6 +49,8 @@ type
         m_query_choice_bonus_cache: TDictionary<string, Integer>;
         m_query_latest_choice_text_cache: TDictionary<string, string>;
         m_query_path_bonus_cache: TDictionary<string, Integer>;
+        m_base_query_path_pinyin_cache: TDictionary<string, Boolean>;
+        m_base_query_path_pinyin_cache_loaded: Boolean;
         m_lm_transition_bonus_cache: TDictionary<string, Integer>;
         m_exact_pair_path_evidence_cache:
             TDictionary<string, TncPairPathEvidenceList>;
@@ -172,6 +174,9 @@ type
         procedure configure_user_connection;
         procedure load_base_exact_pinyin_bloom;
         function base_exact_pinyin_may_exist(const pinyin: string): Boolean;
+        procedure load_base_query_path_pinyin_cache;
+        function base_query_path_pinyin_may_exist(
+            const query_key: string): Boolean;
         procedure load_lm_transition_bonus_cache;
         function ensure_char_lm_available: Boolean;
         procedure cache_char_lm_entry(const ngram: string;
@@ -241,6 +246,8 @@ type
         function get_query_choice_bonus(const query_key: string; const candidate_text: string): Integer; override;
         function get_query_latest_choice_text(const query_key: string): string; override;
         function get_query_segment_path_bonus(const query_key: string; const encoded_path: string): Integer; override;
+        function get_long_query_segment_path_bonus(const query_key: string;
+            const encoded_path: string): Integer; override;
         function get_lm_transition_bonus(const query_key: string; const encoded_path: string): Integer; override;
         function get_exact_pair_path_evidence(const query_key: string;
             out results: TncPairPathEvidenceList): Boolean; override;
@@ -2146,6 +2153,8 @@ begin
     m_query_choice_bonus_cache := TDictionary<string, Integer>.Create;
     m_query_latest_choice_text_cache := TDictionary<string, string>.Create;
     m_query_path_bonus_cache := TDictionary<string, Integer>.Create;
+    m_base_query_path_pinyin_cache := TDictionary<string, Boolean>.Create;
+    m_base_query_path_pinyin_cache_loaded := False;
     m_lm_transition_bonus_cache := TDictionary<string, Integer>.Create;
     m_exact_pair_path_evidence_cache :=
         TDictionary<string, TncPairPathEvidenceList>.Create;
@@ -2252,6 +2261,11 @@ begin
     begin
         m_query_path_bonus_cache.Free;
         m_query_path_bonus_cache := nil;
+    end;
+    if m_base_query_path_pinyin_cache <> nil then
+    begin
+        m_base_query_path_pinyin_cache.Free;
+        m_base_query_path_pinyin_cache := nil;
     end;
     if m_lm_transition_bonus_cache <> nil then
     begin
@@ -2621,6 +2635,69 @@ begin
     m_base_connection.exec('PRAGMA mmap_size=134217728;');
     m_base_connection.exec('PRAGMA cache_size=-8192;');
     m_base_connection.exec('PRAGMA temp_store=MEMORY;');
+end;
+
+procedure TncSqliteDictionary.load_base_query_path_pinyin_cache;
+const
+    query_sql = 'SELECT DISTINCT query_pinyin FROM dict_base_query_path';
+var
+    stmt: Psqlite3_stmt;
+    step_result: Integer;
+    query_key: string;
+begin
+    if m_base_query_path_pinyin_cache_loaded then
+    begin
+        Exit;
+    end;
+
+    m_base_query_path_pinyin_cache_loaded := True;
+    if m_base_query_path_pinyin_cache <> nil then
+    begin
+        m_base_query_path_pinyin_cache.Clear;
+    end;
+    if (not m_base_ready) or (m_base_connection = nil) or
+        (m_base_query_path_pinyin_cache = nil) then
+    begin
+        Exit;
+    end;
+
+    stmt := nil;
+    try
+        // The table is optional for compatibility with older dictionaries.
+        if not m_base_connection.prepare(query_sql, stmt) then
+        begin
+            Exit;
+        end;
+        step_result := m_base_connection.step(stmt);
+        while step_result = SQLITE_ROW do
+        begin
+            query_key := m_base_connection.column_text(stmt, 0);
+            if query_key <> '' then
+            begin
+                m_base_query_path_pinyin_cache.AddOrSetValue(query_key, True);
+            end;
+            step_result := m_base_connection.step(stmt);
+        end;
+    finally
+        if stmt <> nil then
+        begin
+            m_base_connection.finalize(stmt);
+        end;
+    end;
+end;
+
+function TncSqliteDictionary.base_query_path_pinyin_may_exist(
+    const query_key: string): Boolean;
+var
+    present: Boolean;
+begin
+    if not m_base_query_path_pinyin_cache_loaded then
+    begin
+        load_base_query_path_pinyin_cache;
+    end;
+    Result := (m_base_query_path_pinyin_cache <> nil) and
+        m_base_query_path_pinyin_cache.TryGetValue(query_key, present) and
+        present;
 end;
 
 procedure TncSqliteDictionary.load_lm_transition_bonus_cache;
@@ -6817,6 +6894,11 @@ begin
     begin
         m_query_path_bonus_cache.Clear;
     end;
+    if m_base_query_path_pinyin_cache <> nil then
+    begin
+        m_base_query_path_pinyin_cache.Clear;
+    end;
+    m_base_query_path_pinyin_cache_loaded := False;
     if m_lm_transition_bonus_cache <> nil then
     begin
         m_lm_transition_bonus_cache.Clear;
@@ -11584,7 +11666,6 @@ begin
     begin
         Exit;
     end;
-
     try
         can_query_base := False;
         if m_stmt_base_query_path_bonus = nil then
@@ -11631,6 +11712,23 @@ begin
     begin
         m_query_path_bonus_cache.AddOrSetValue(cache_key, Result);
     end;
+end;
+
+function TncSqliteDictionary.get_long_query_segment_path_bonus(
+    const query_key: string; const encoded_path: string): Integer;
+var
+    normalized_query: string;
+begin
+    Result := 0;
+    normalized_query := LowerCase(Trim(query_key));
+    if (normalized_query = '') or (Trim(encoded_path) = '') or
+        (not ensure_open) or (not m_base_ready) or
+        (m_base_connection = nil) or
+        (not base_query_path_pinyin_may_exist(normalized_query)) then
+    begin
+        Exit;
+    end;
+    Result := get_query_segment_path_bonus(normalized_query, encoded_path);
 end;
 
 function TncSqliteDictionary.get_lm_transition_bonus(const query_key: string;

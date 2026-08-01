@@ -39,6 +39,8 @@ type
         function get_query_choice_bonus(const query_key: string; const candidate_text: string): Integer; virtual;
         function get_query_latest_choice_text(const query_key: string): string; virtual;
         function get_query_segment_path_bonus(const query_key: string; const encoded_path: string): Integer; virtual;
+        function get_long_query_segment_path_bonus(const query_key: string;
+            const encoded_path: string): Integer; virtual;
         function get_lm_transition_bonus(const query_key: string; const encoded_path: string): Integer; virtual;
         function get_exact_pair_path_evidence(const query_key: string;
             out results: TncPairPathEvidenceList): Boolean; virtual;
@@ -197,6 +199,12 @@ function TncDictionaryProvider.get_query_segment_path_bonus(const query_key: str
     const encoded_path: string): Integer;
 begin
     Result := 0;
+end;
+
+function TncDictionaryProvider.get_long_query_segment_path_bonus(
+    const query_key: string; const encoded_path: string): Integer;
+begin
+    Result := get_query_segment_path_bonus(query_key, encoded_path);
 end;
 
 function TncDictionaryProvider.get_lm_transition_bonus(const query_key: string;
