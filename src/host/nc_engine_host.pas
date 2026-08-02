@@ -61,6 +61,7 @@ type
             const config: TncEngineConfig);
         destructor Destroy; override;
         procedure touch;
+        procedure reactivate;
         procedure request_release;
         procedure update_config(const config: TncEngineConfig);
         procedure warm_candidate_window;
@@ -670,6 +671,13 @@ begin
 end;
 
 procedure TncHostSession.touch;
+begin
+    // RELEASE_SESSION is sticky: delayed IPC may refresh activity but must
+    // not revive a TSF instance whose owner has already been destroyed.
+    m_last_activity_tick := GetTickCount64;
+end;
+
+procedure TncHostSession.reactivate;
 begin
     m_last_activity_tick := GetTickCount64;
     m_release_requested := False;
@@ -1398,7 +1406,7 @@ begin
             m_recent_active_sessions.AddOrSetValue(session_id, GetTickCount);
             if m_sessions.TryGetValue(session_id, session) then
             begin
-                session.touch;
+                session.reactivate;
             end;
         end
         else

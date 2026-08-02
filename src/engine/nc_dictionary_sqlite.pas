@@ -4330,6 +4330,7 @@ var
     syllables: TArray<string>;
     text_units: TArray<string>;
     idx: Integer;
+    has_explicit_boundaries: Boolean;
     function text_unit_can_match_syllable(const syllable_text: string;
         const text_unit: string): Boolean;
     var
@@ -4428,6 +4429,7 @@ begin
     Result := False;
     pinyin_key := LowerCase(Trim(pinyin));
     text_key := Trim(text);
+    has_explicit_boundaries := Pos('''', pinyin_key) > 0;
     if (pinyin_key = '') or (text_key = '') or
         (not (
             ((Length(pinyin_key) > 2) and (pinyin_key[Length(pinyin_key)] = 'r') and
@@ -4448,7 +4450,9 @@ begin
         pinyin_key := Copy(pinyin_key, 1, Length(pinyin_key) - 1) + #39 + 'er';
     end;
 
-    if normalized_base_entry_exists(pinyin_key, text_key) then
+    if (has_explicit_boundaries and exact_base_entry_exists(pinyin_key,
+        text_key)) or ((not has_explicit_boundaries) and
+        normalized_base_entry_exists(pinyin_key, text_key)) then
     begin
         Exit(True);
     end;
@@ -4461,6 +4465,10 @@ begin
     end;
     if Length(text_units) <> Length(syllables) then
     begin
+        if has_explicit_boundaries then
+        begin
+            Exit(False);
+        end;
         // Compact pinyin can be segmented multiple ways without apostrophes.
         // Validate against the committed text length before rejecting learned
         // phrases such as yanquan -> 言泉.
@@ -4473,6 +4481,10 @@ begin
         if (get_valid_cjk_codepoint_count(text_units[idx]) <> 1) or
             (not text_unit_can_match_syllable(syllables[idx], text_units[idx])) then
         begin
+            if has_explicit_boundaries then
+            begin
+                Exit(False);
+            end;
             // Compact pinyin can have an equally long but wrong default parse:
             // feichange may parse as fei/chan/ge, while the committed text is
             // fei/chang/e. Fall back to text-unit guided segmentation before
@@ -7777,7 +7789,7 @@ begin
                     begin
                         text_value := Trim(m_user_connection.column_text(stmt, 0));
                         score_value := m_user_connection.column_int(stmt, 1);
-                        if not strict_full_pinyin_text_alignment_valid(query_key,
+                        if not strict_full_pinyin_text_alignment_valid(exact_query_key,
                             text_value) then
                         begin
                             Continue;
