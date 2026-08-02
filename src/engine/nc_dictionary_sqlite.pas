@@ -2420,7 +2420,7 @@ const
     c_result_cache_limit = 4096;
     base_prefix_sql =
         'SELECT pinyin, text, comment, weight FROM dict_base ' +
-        'WHERE pinyin >= ?1 AND pinyin < ?2 ' +
+        'WHERE pinyin >= ?1 AND pinyin < ?2 AND weight > 0 ' +
         'ORDER BY pinyin ASC, weight DESC, text ASC LIMIT ?3';
     user_prefix_sql =
         'SELECT pinyin, text, weight, last_used FROM dict_user ' +

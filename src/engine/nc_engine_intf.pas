@@ -803,6 +803,9 @@ function short_nocontext_large_weight_gap_blocks_promotion(
 function short_residual_exact_weight_is_eligible(
     const candidate_weight: Integer;
     const is_baseline: Boolean): Boolean;
+function long_exact_chunk_weight_is_eligible(
+    const candidate_weight: Integer;
+    const has_dict_weight: Boolean): Boolean;
 
 implementation
 
@@ -838,6 +841,13 @@ function short_residual_exact_weight_is_eligible(
 begin
     Result := is_baseline or
         (candidate_weight > c_short_residual_visibility_only_max_weight);
+end;
+
+function long_exact_chunk_weight_is_eligible(
+    const candidate_weight: Integer;
+    const has_dict_weight: Boolean): Boolean;
+begin
+    Result := (not has_dict_weight) or (candidate_weight > 0);
 end;
 
 function short_nocontext_large_weight_gap_blocks_promotion(
@@ -4066,6 +4076,7 @@ var
     short_extendable_tail_cache_valid: Boolean;
     short_extendable_tail_cache_value: Boolean;
     skip_three_syllable_contextual_completion: Boolean;
+    long_path_exact_lookup_filter_depth: Integer;
     ultra_long_exact_chunk_chain_miss_cached: Boolean;
     prefast_char_lm_texts: TArray<string>;
     prefast_char_lm_scores: TArray<Integer>;
@@ -4191,6 +4202,34 @@ var
         cached_results: TncCandidateList;
         phase_tick: UInt64;
 
+        procedure filter_visibility_only_path_entries_local;
+        var
+            read_idx: Integer;
+            write_idx: Integer;
+        begin
+            if long_path_exact_lookup_filter_depth <= 0 then
+            begin
+                Exit;
+            end;
+
+            write_idx := 0;
+            for read_idx := 0 to High(out_results) do
+            begin
+                if not long_exact_chunk_weight_is_eligible(
+                    out_results[read_idx].dict_weight,
+                    out_results[read_idx].has_dict_weight) then
+                begin
+                    Continue;
+                end;
+                if write_idx <> read_idx then
+                begin
+                    out_results[write_idx] := out_results[read_idx];
+                end;
+                Inc(write_idx);
+            end;
+            SetLength(out_results, write_idx);
+        end;
+
     begin
         SetLength(out_results, 0);
         if (m_dictionary = nil) or (pinyin_key = '') then
@@ -4204,6 +4243,7 @@ var
         begin
             Inc(lookup_cache_hits);
             out_results := Copy(cached_results, 0, Length(cached_results));
+            filter_visibility_only_path_entries_local;
             Exit(Length(out_results) > 0);
         end;
         if (m_build_lookup_cache <> nil) and
@@ -4211,6 +4251,7 @@ var
         begin
             Inc(lookup_cache_hits);
             out_results := Copy(cached_results, 0, Length(cached_results));
+            filter_visibility_only_path_entries_local;
             if lookup_cache <> nil then
             begin
                 lookup_cache.AddOrSetValue(cache_key,
@@ -4237,6 +4278,7 @@ var
             m_build_lookup_cache.AddOrSetValue(cache_key,
                 Copy(out_results, 0, Length(out_results)));
         end;
+        filter_visibility_only_path_entries_local;
         Result := Length(out_results) > 0;
     end;
 
@@ -4258,6 +4300,12 @@ var
 
         for exact_idx_local := 0 to High(exact_results_local) do
         begin
+            if not long_exact_chunk_weight_is_eligible(
+                exact_results_local[exact_idx_local].dict_weight,
+                exact_results_local[exact_idx_local].has_dict_weight) then
+            begin
+                Continue;
+            end;
             exact_text_local := Trim(exact_results_local[exact_idx_local].text);
             if (Trim(exact_results_local[exact_idx_local].comment) = '') and
                 SameText(exact_text_local, target_text) and
@@ -46936,6 +46984,11 @@ var
             min_weight_local: Integer;
         begin
             Result := True;
+            if not long_exact_chunk_weight_is_eligible(
+                candidate_local.dict_weight, candidate_local.has_dict_weight) then
+            begin
+                Exit(False);
+            end;
             if chunk_len_local <= 1 then
             begin
                 Exit;
@@ -47486,6 +47539,12 @@ var
                 begin
                     Continue;
                 end;
+                if not long_exact_chunk_weight_is_eligible(
+                    local_results_local[local_idx_local].dict_weight,
+                    local_results_local[local_idx_local].has_dict_weight) then
+                begin
+                    Continue;
+                end;
                 if SameText(Trim(local_results_local[local_idx_local].text),
                     candidate_text_local) then
                 begin
@@ -47871,6 +47930,12 @@ var
                 begin
                     Continue;
                 end;
+                if not long_exact_chunk_weight_is_eligible(
+                    local_results[local_idx].dict_weight,
+                    local_results[local_idx].has_dict_weight) then
+                begin
+                    Continue;
+                end;
 
                 candidate_text_local := Trim(local_results[local_idx].text);
                 if (get_candidate_text_unit_count(candidate_text_local) <> 1) or
@@ -47933,6 +47998,12 @@ var
                     Break;
                 end;
                 if Trim(local_results[local_idx].comment) <> '' then
+                begin
+                    Continue;
+                end;
+                if not long_exact_chunk_weight_is_eligible(
+                    local_results[local_idx].dict_weight,
+                    local_results[local_idx].has_dict_weight) then
                 begin
                     Continue;
                 end;
@@ -48458,6 +48529,12 @@ var
                         begin
                             Continue;
                         end;
+                        if not long_exact_chunk_weight_is_eligible(
+                            local_results[local_idx].dict_weight,
+                            local_results[local_idx].has_dict_weight) then
+                        begin
+                            Continue;
+                        end;
 
                         candidate_text_local := Trim(local_results[local_idx].text);
                         if (get_candidate_text_unit_count(candidate_text_local) <> 1) or
@@ -48514,6 +48591,12 @@ var
                             Break;
                         end;
                         if Trim(local_results[local_idx].comment) <> '' then
+                        begin
+                            Continue;
+                        end;
+                        if not long_exact_chunk_weight_is_eligible(
+                            local_results[local_idx].dict_weight,
+                            local_results[local_idx].has_dict_weight) then
                         begin
                             Continue;
                         end;
@@ -48646,6 +48729,12 @@ var
                     begin
                         Continue;
                     end;
+                    if not long_exact_chunk_weight_is_eligible(
+                        local_results[local_idx].dict_weight,
+                        local_results[local_idx].has_dict_weight) then
+                    begin
+                        Continue;
+                    end;
 
                     candidate_text_local := Trim(local_results[local_idx].text);
                     if (get_candidate_text_unit_count(candidate_text_local) <>
@@ -48714,6 +48803,12 @@ var
 
                 if Trim(candidate_local.comment) = '' then
                 begin
+                    if not long_exact_chunk_weight_is_eligible(
+                        candidate_local.dict_weight,
+                        candidate_local.has_dict_weight) then
+                    begin
+                        Continue;
+                    end;
                     candidate_score_local :=
                         get_exact_chunk_effective_weight_local(candidate_local);
                 end
@@ -49788,6 +49883,12 @@ var
                 begin
                     Continue;
                 end;
+                if not long_exact_chunk_weight_is_eligible(
+                    local_results[local_idx].dict_weight,
+                    local_results[local_idx].has_dict_weight) then
+                begin
+                    Continue;
+                end;
 
                 local_text := Trim(local_results[local_idx].text);
                 if (local_text = '') or
@@ -50187,6 +50288,12 @@ var
                         Break;
                     end;
                     if Trim(local_results[local_idx].comment) <> '' then
+                    begin
+                        Continue;
+                    end;
+                    if not long_exact_chunk_weight_is_eligible(
+                        local_results[local_idx].dict_weight,
+                        local_results[local_idx].has_dict_weight) then
                     begin
                         Continue;
                     end;
@@ -60761,8 +60868,13 @@ var
 
         fast_phase_tick := GetTickCount64;
         record_chain_search_status_local(c_chain_search_status_fast_search);
-        fast_build_ok := try_build_fast_dictionary_sentence_candidate_local(
-            fast_text, fast_path, fast_score, fast_segments, fast_states);
+        Inc(long_path_exact_lookup_filter_depth);
+        try
+            fast_build_ok := try_build_fast_dictionary_sentence_candidate_local(
+                fast_text, fast_path, fast_score, fast_segments, fast_states);
+        finally
+            Dec(long_path_exact_lookup_filter_depth);
+        end;
         fast_model_order_active := (Length(fast_states) > 0) and
             fast_states[0].ranker_model_ordered;
         if m_config.debug_mode then
@@ -99130,6 +99242,12 @@ var
                 begin
                     Continue;
                 end;
+                if not long_exact_chunk_weight_is_eligible(
+                    local_results[local_idx].dict_weight,
+                    local_results[local_idx].has_dict_weight) then
+                begin
+                    Continue;
+                end;
                 candidate_text_local := Trim(local_results[local_idx].text);
                 if SameText(candidate_text_local, local_text) and
                     (get_candidate_text_unit_count(candidate_text_local) =
@@ -99258,6 +99376,12 @@ var
                     begin
                         Continue;
                     end;
+                    if not long_exact_chunk_weight_is_eligible(
+                        results_local[result_idx_local].dict_weight,
+                        results_local[result_idx_local].has_dict_weight) then
+                    begin
+                        Continue;
+                    end;
                     candidate_text_local := Trim(results_local[result_idx_local].text);
                     if (candidate_text_local <> '') and
                         (get_candidate_text_unit_count(candidate_text_local) =
@@ -99277,6 +99401,12 @@ var
                     Break;
                 end;
                 if Trim(results_local[result_idx_local].comment) <> '' then
+                begin
+                    Continue;
+                end;
+                if not long_exact_chunk_weight_is_eligible(
+                    results_local[result_idx_local].dict_weight,
+                    results_local[result_idx_local].has_dict_weight) then
                 begin
                     Continue;
                 end;
@@ -100463,6 +100593,12 @@ var
                         begin
                             Continue;
                         end;
+                        if not long_exact_chunk_weight_is_eligible(
+                            local_results_value[local_idx_value].dict_weight,
+                            local_results_value[local_idx_value].has_dict_weight) then
+                        begin
+                            Continue;
+                        end;
                         if is_runtime_chain_candidate(
                             local_results_value[local_idx_value]) or
                             is_runtime_common_pattern_candidate(
@@ -100558,6 +100694,12 @@ var
                         Break;
                     end;
                     if Trim(local_results_value[local_idx_value].comment) <> '' then
+                    begin
+                        Continue;
+                    end;
+                    if not long_exact_chunk_weight_is_eligible(
+                        local_results_value[local_idx_value].dict_weight,
+                        local_results_value[local_idx_value].has_dict_weight) then
                     begin
                         Continue;
                     end;
@@ -101013,6 +101155,12 @@ var
                     begin
                         Continue;
                     end;
+                    if not long_exact_chunk_weight_is_eligible(
+                        local_results_value[local_idx_value].dict_weight,
+                        local_results_value[local_idx_value].has_dict_weight) then
+                    begin
+                        Continue;
+                    end;
                     if get_candidate_text_unit_count(
                         Trim(local_results_value[local_idx_value].text)) =
                         local_span_len_value then
@@ -101457,6 +101605,13 @@ var
                                 option_candidate_local :=
                                     exact_results_local[option_idx_local];
                                 if Trim(option_candidate_local.comment) <> '' then
+                                begin
+                                    Continue;
+                                end;
+                                if (span_len_local >= 2) and
+                                    (not long_exact_chunk_weight_is_eligible(
+                                    option_candidate_local.dict_weight,
+                                    option_candidate_local.has_dict_weight)) then
                                 begin
                                     Continue;
                                 end;
@@ -101916,6 +102071,12 @@ var
                     begin
                         Continue;
                     end;
+                    if not long_exact_chunk_weight_is_eligible(
+                        local_results[local_idx].dict_weight,
+                        local_results[local_idx].has_dict_weight) then
+                    begin
+                        Continue;
+                    end;
                     if is_runtime_chain_candidate(local_results[local_idx]) or
                         is_runtime_common_pattern_candidate(local_results[local_idx]) or
                         is_runtime_redup_candidate(local_results[local_idx]) then
@@ -102138,6 +102299,12 @@ var
                     begin
                         Continue;
                     end;
+                    if not long_exact_chunk_weight_is_eligible(
+                        local_results[local_idx].dict_weight,
+                        local_results[local_idx].has_dict_weight) then
+                    begin
+                        Continue;
+                    end;
                     if is_runtime_chain_candidate(local_results[local_idx]) or
                         is_runtime_common_pattern_candidate(
                         local_results[local_idx]) or
@@ -102287,6 +102454,12 @@ var
                         begin
                             Continue;
                         end;
+                        if not long_exact_chunk_weight_is_eligible(
+                            sub_results_local[sub_idx_local].dict_weight,
+                            sub_results_local[sub_idx_local].has_dict_weight) then
+                        begin
+                            Continue;
+                        end;
                         if is_runtime_chain_candidate(sub_results_local[sub_idx_local]) or
                             is_runtime_common_pattern_candidate(
                             sub_results_local[sub_idx_local]) or
@@ -102386,6 +102559,12 @@ var
                             Break;
                         end;
                         if Trim(span_results_local[span_idx_local].comment) <> '' then
+                        begin
+                            Continue;
+                        end;
+                        if not long_exact_chunk_weight_is_eligible(
+                            span_results_local[span_idx_local].dict_weight,
+                            span_results_local[span_idx_local].has_dict_weight) then
                         begin
                             Continue;
                         end;
@@ -112794,6 +112973,7 @@ begin
         short_extendable_tail_cache_valid := False;
         short_extendable_tail_cache_value := False;
         skip_three_syllable_contextual_completion := False;
+        long_path_exact_lookup_filter_depth := 0;
         SetLength(explicit_apostrophe_query_syllables, 0);
         explicit_apostrophe_query_parsed := False;
         SetLength(explicit_apostrophe_exact_candidates, 0);
@@ -120599,6 +120779,12 @@ var
         end;
         for value_idx := 0 to High(values) do
         begin
+            if not long_exact_chunk_weight_is_eligible(
+                values[value_idx].dict_weight,
+                values[value_idx].has_dict_weight) then
+            begin
+                Continue;
+            end;
             if (Trim(values[value_idx].comment) = '') and
                 (get_candidate_text_unit_count(
                 Trim(values[value_idx].text)) = unit_count) and
