@@ -2196,7 +2196,8 @@ end;
 
 function TncEngine.build_candidate_identity_key(const candidate_text: string; const comment_text: string): string;
 begin
-    Result := LowerCase(Trim(candidate_text)) + #1 + Trim(comment_text);
+    Result := LowerCase(Trim(candidate_text)) + #1 +
+        LowerCase(Trim(comment_text));
 end;
 
 procedure TncEngine.clear_segment_path_tracking;
@@ -120448,7 +120449,6 @@ var
     sort_insert_pos: Integer;
     sort_value: Integer;
     candidate_value: TncCandidate;
-    path_value: string;
     char_texts: TArray<string>;
     char_scores: TArray<Integer>;
     char_suffix_scores: TArray<Integer>;
@@ -120470,7 +120470,7 @@ var
     merged_sources: TArray<Integer>;
     merged_count: Integer;
     complete_count: Integer;
-    emitted_texts: TDictionary<string, Boolean>;
+    emitted_candidate_identities: TDictionary<string, Boolean>;
     pairwise_best_idx: Integer;
     pairwise_best_score: Double;
     pairwise_insert_rank: Integer;
@@ -122293,6 +122293,29 @@ var
         end;
     end;
 
+    function try_append_merged_candidate(const value: TncCandidate;
+        const candidate_source_index: Integer): Boolean;
+    var
+        identity_key: string;
+    begin
+        Result := False;
+        if merged_count >= Length(merged_candidates) then
+        begin
+            Exit;
+        end;
+        identity_key := build_candidate_identity_key(value.text,
+            value.comment);
+        if emitted_candidate_identities.ContainsKey(identity_key) then
+        begin
+            Exit;
+        end;
+        merged_candidates[merged_count] := value;
+        merged_sources[merged_count] := candidate_source_index;
+        emitted_candidate_identities.Add(identity_key, True);
+        Inc(merged_count);
+        Result := True;
+    end;
+
 begin
     pool_phase_tick := 0;
     if m_config.debug_mode then
@@ -122338,7 +122361,7 @@ begin
     signature_totals := TDictionary<string, Integer>.Create;
     exact_cache := TDictionary<string, TncCandidateList>.Create;
     word_lm_cache := TDictionary<string, Integer>.Create;
-    emitted_texts := TDictionary<string, Boolean>.Create;
+    emitted_candidate_identities := TDictionary<string, Boolean>.Create;
     try
         for idx := 0 to High(original_candidates) do
         begin
@@ -122640,15 +122663,16 @@ begin
             begin
                 Continue;
             end;
-            path_value := LowerCase(Trim(internal_candidates[idx].text));
-            if emitted_texts.ContainsKey(path_value) then
+            source_idx := -1;
+            if idx < Length(internal_source_indices) then
+            begin
+                source_idx := internal_source_indices[idx];
+            end;
+            if not try_append_merged_candidate(internal_candidates[idx],
+                source_idx) then
             begin
                 Continue;
             end;
-            merged_candidates[merged_count] := internal_candidates[idx];
-            merged_sources[merged_count] := internal_source_indices[idx];
-            emitted_texts.Add(path_value, True);
-            Inc(merged_count);
             Inc(complete_count);
             if merged_count >= original_visible_count then
             begin
@@ -122662,23 +122686,16 @@ begin
             begin
                 Continue;
             end;
-            path_value := LowerCase(Trim(original_candidates[idx].text)) +
-                #1 + LowerCase(Trim(original_candidates[idx].comment));
-            if emitted_texts.ContainsKey(path_value) then
+            source_idx := -1;
+            if idx < Length(original_source_indices) then
+            begin
+                source_idx := original_source_indices[idx];
+            end;
+            if not try_append_merged_candidate(original_candidates[idx],
+                source_idx) then
             begin
                 Continue;
             end;
-            merged_candidates[merged_count] := original_candidates[idx];
-            if idx < Length(original_source_indices) then
-            begin
-                merged_sources[merged_count] := original_source_indices[idx];
-            end
-            else
-            begin
-                merged_sources[merged_count] := -1;
-            end;
-            emitted_texts.Add(path_value, True);
-            Inc(merged_count);
         end;
         for idx := 0 to High(original_candidates) do
         begin
@@ -122686,23 +122703,13 @@ begin
             begin
                 Break;
             end;
-            path_value := LowerCase(Trim(original_candidates[idx].text)) +
-                #1 + LowerCase(Trim(original_candidates[idx].comment));
-            if emitted_texts.ContainsKey(path_value) then
-            begin
-                Continue;
-            end;
-            merged_candidates[merged_count] := original_candidates[idx];
+            source_idx := -1;
             if idx < Length(original_source_indices) then
             begin
-                merged_sources[merged_count] := original_source_indices[idx];
-            end
-            else
-            begin
-                merged_sources[merged_count] := -1;
+                source_idx := original_source_indices[idx];
             end;
-            emitted_texts.Add(path_value, True);
-            Inc(merged_count);
+            try_append_merged_candidate(original_candidates[idx],
+                source_idx);
         end;
         SetLength(merged_candidates, merged_count);
         SetLength(merged_sources, merged_count);
@@ -122710,7 +122717,7 @@ begin
         source_indices := merged_sources;
         note_pool_phase('merge');
     finally
-        emitted_texts.Free;
+        emitted_candidate_identities.Free;
         word_lm_cache.Free;
         exact_cache.Free;
         signature_totals.Free;
