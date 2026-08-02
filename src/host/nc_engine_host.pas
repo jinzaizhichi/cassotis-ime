@@ -26,6 +26,9 @@ type
     private
         m_owner: TncEngineHost;
         m_session_id: string;
+        m_instance_id: UInt64;
+        m_last_activity_tick: UInt64;
+        m_release_requested: Boolean;
         m_engine: TncEngine;
         m_candidate_window: TncCandidateWindow;
         m_last_caret: TPoint;
@@ -54,8 +57,11 @@ type
         procedure ensure_candidate_window;
         procedure handle_remove_user_candidate(const candidate_index: Integer);
     public
-        constructor create(const owner: TncEngineHost; const session_id: string; const config: TncEngineConfig);
+        constructor create(const owner: TncEngineHost; const session_id: string; const instance_id: UInt64;
+            const config: TncEngineConfig);
         destructor Destroy; override;
+        procedure touch;
+        procedure request_release;
         procedure update_config(const config: TncEngineConfig);
         procedure warm_candidate_window;
         procedure set_caret(const point: TPoint; const has_caret: Boolean; const line_height: Integer;
@@ -80,6 +86,9 @@ type
             out anchor_score: Integer; out candidate_generation: UInt64): Boolean;
         procedure hide_candidate_window;
         property engine: TncEngine read m_engine;
+        property instance_id: UInt64 read m_instance_id;
+        property last_activity_tick: UInt64 read m_last_activity_tick;
+        property release_requested: Boolean read m_release_requested;
         property last_caret: TPoint read m_last_caret;
         property has_caret: Boolean read m_has_caret;
         property caret_line_height: Integer read m_caret_line_height;
@@ -104,6 +113,7 @@ type
         m_last_user_activity_tick: UInt64;
         m_last_user_dict_checkpoint_attempt_tick: UInt64;
         m_last_user_dict_checkpoint_activity_tick: UInt64;
+        m_next_session_instance_id: UInt64;
         m_config: TncEngineConfig;
         m_last_lookup_perf_info: string;
         function get_config_write_time: TDateTime;
@@ -119,6 +129,10 @@ type
         function has_active_session: Boolean;
         procedure queue_session_prewarm(const session_id: string);
         procedure perform_session_prewarm;
+        procedure reclaim_inactive_sessions;
+        function reclaim_session_on_ui_thread(const session_id: string; const instance_id: UInt64;
+            const expected_activity_tick: UInt64; const reason: string): Boolean;
+        procedure remove_session_prewarm_locked(const session_id: string);
         procedure remove_user_candidate(const session_id: string; const candidate_index: Integer);
     public
         constructor create;
@@ -137,6 +151,7 @@ type
         function set_dictionary_variant(const session_id: string; const dictionary_variant: TncDictionaryVariant): Boolean;
         function get_active(out active: Boolean): Boolean;
         function set_active(const session_id: string; const active: Boolean): Boolean;
+        function release_session(const session_id: string): Boolean;
         function reload_config_now: Boolean;
         function clear_user_dictionary(const session_id: string): Boolean;
         procedure update_caret(const session_id: string; const point: TPoint; const has_caret: Boolean;
@@ -174,6 +189,12 @@ uses
     nc_sqlite,
     nc_log;
 
+type
+    TncHostSessionRef = record
+        session_id: string;
+        instance_id: UInt64;
+    end;
+
 const
     c_pipe_in_buffer = 65536;
     c_pipe_out_buffer = 65536;
@@ -185,6 +206,12 @@ const
     c_text_ext_offset = 6;
     c_maintenance_poll_ms = 200;
     c_recent_active_ttl_ms = 320;
+    // Each warm session owns two dictionary providers and their language-model
+    // caches. Keep a small LRU-style pool and reclaim abandoned TSF instances.
+    c_session_cache_limit = 4;
+    c_session_capacity_grace_ms = 1000;
+    c_session_release_grace_ms = 250;
+    c_session_idle_reclaim_ms = 5 * 60 * 1000;
     c_candidate_apply_merge_ms = 35;
     c_user_dict_checkpoint_idle_ms = 5000;
     c_user_dict_checkpoint_retry_ms = 5000;
@@ -606,11 +633,15 @@ begin
     end;
 end;
 
-constructor TncHostSession.create(const owner: TncEngineHost; const session_id: string; const config: TncEngineConfig);
+constructor TncHostSession.create(const owner: TncEngineHost; const session_id: string; const instance_id: UInt64;
+    const config: TncEngineConfig);
 begin
     inherited create;
     m_owner := owner;
     m_session_id := session_id;
+    m_instance_id := instance_id;
+    m_last_activity_tick := GetTickCount64;
+    m_release_requested := False;
     m_engine := TncEngine.create(config);
     m_candidate_window := nil;
     m_last_caret := Point(0, 0);
@@ -636,6 +667,18 @@ begin
     m_last_candidate_score := Low(Integer);
     m_last_candidate_apply_tick := 0;
     m_last_candidate_debug_mode := config.debug_mode;
+end;
+
+procedure TncHostSession.touch;
+begin
+    m_last_activity_tick := GetTickCount64;
+    m_release_requested := False;
+end;
+
+procedure TncHostSession.request_release;
+begin
+    m_last_activity_tick := GetTickCount64;
+    m_release_requested := True;
 end;
 
 destructor TncHostSession.Destroy;
@@ -1097,6 +1140,7 @@ begin
     m_last_user_activity_tick := 0;
     m_last_user_dict_checkpoint_attempt_tick := 0;
     m_last_user_dict_checkpoint_activity_tick := 0;
+    m_next_session_instance_id := 0;
     with TncConfigManager.create(m_config_path) do
     try
         m_config := load_engine_config;
@@ -1288,19 +1332,23 @@ var
     config_snapshot: TncEngineConfig;
     created_session: TncHostSession;
     added_session: Boolean;
+    instance_id: UInt64;
 begin
     m_lock.Acquire;
     try
         if m_sessions.TryGetValue(session_id, Result) then
         begin
+            Result.touch;
             Exit;
         end;
         config_snapshot := m_config;
+        Inc(m_next_session_instance_id);
+        instance_id := m_next_session_instance_id;
     finally
         m_lock.Release;
     end;
 
-    created_session := TncHostSession.create(Self, session_id, config_snapshot);
+    created_session := TncHostSession.create(Self, session_id, instance_id, config_snapshot);
     added_session := False;
     try
         m_lock.Acquire;
@@ -1313,6 +1361,7 @@ begin
                 created_session := nil;
                 added_session := True;
             end;
+            Result.touch;
         finally
             m_lock.Release;
         end;
@@ -1327,6 +1376,8 @@ begin
 end;
 
 procedure TncEngineHost.set_session_active(const session_id: string; const active: Boolean);
+var
+    session: TncHostSession;
 begin
     if session_id = '' then
     begin
@@ -1345,6 +1396,10 @@ begin
             m_recent_active_sessions.Clear;
             m_active_sessions.AddOrSetValue(session_id, 1);
             m_recent_active_sessions.AddOrSetValue(session_id, GetTickCount);
+            if m_sessions.TryGetValue(session_id, session) then
+            begin
+                session.touch;
+            end;
         end
         else
         begin
@@ -1358,6 +1413,10 @@ begin
             begin
                 m_active_sessions.Remove(session_id);
                 m_recent_active_sessions.Remove(session_id);
+            end;
+            if m_sessions.TryGetValue(session_id, session) then
+            begin
+                session.touch;
             end;
         end;
     finally
@@ -1379,6 +1438,8 @@ begin
 end;
 
 procedure TncEngineHost.touch_session_activity(const session_id: string);
+var
+    session: TncHostSession;
 begin
     if session_id = '' then
     begin
@@ -1388,10 +1449,16 @@ begin
     begin
         m_recent_active_sessions.AddOrSetValue(session_id, GetTickCount);
     end;
+    if m_sessions.TryGetValue(session_id, session) then
+    begin
+        session.touch;
+    end;
     m_last_user_activity_tick := GetTickCount64;
 end;
 
 procedure TncEngineHost.queue_session_prewarm(const session_id: string);
+var
+    session: TncHostSession;
 begin
     if session_id = '' then
     begin
@@ -1400,6 +1467,11 @@ begin
 
     m_lock.Acquire;
     try
+        if (not m_sessions.TryGetValue(session_id, session)) or
+            (not m_active_sessions.ContainsKey(session_id)) or session.release_requested then
+        begin
+            Exit;
+        end;
         if m_session_prewarm_pending.ContainsKey(session_id) then
         begin
             Exit;
@@ -1416,6 +1488,159 @@ begin
     end;
 end;
 
+procedure TncEngineHost.remove_session_prewarm_locked(const session_id: string);
+var
+    queue_count: Integer;
+    queue_index: Integer;
+    queued_session_id: string;
+begin
+    if (m_session_prewarm_queue <> nil) and (m_session_prewarm_queue.Count > 0) then
+    begin
+        queue_count := m_session_prewarm_queue.Count;
+        for queue_index := 1 to queue_count do
+        begin
+            queued_session_id := m_session_prewarm_queue.Dequeue;
+            if not SameText(queued_session_id, session_id) then
+            begin
+                m_session_prewarm_queue.Enqueue(queued_session_id);
+            end;
+        end;
+    end;
+    if m_session_prewarm_pending <> nil then
+    begin
+        m_session_prewarm_pending.Remove(session_id);
+    end;
+end;
+
+function TncEngineHost.reclaim_session_on_ui_thread(const session_id: string; const instance_id: UInt64;
+    const expected_activity_tick: UInt64; const reason: string): Boolean;
+var
+    reclaimed: Boolean;
+    remaining_count: Integer;
+begin
+    reclaimed := False;
+    remaining_count := 0;
+    run_on_ui_thread(
+        procedure
+        var
+            current_session: TncHostSession;
+            extracted_pair: TPair<string, TncHostSession>;
+            reclaimed_session: TncHostSession;
+        begin
+            m_lock.Acquire;
+            try
+                if (not m_sessions.TryGetValue(session_id, current_session)) or
+                    (current_session.instance_id <> instance_id) or
+                    (current_session.last_activity_tick <> expected_activity_tick) or
+                    m_active_sessions.ContainsKey(session_id) then
+                begin
+                    Exit;
+                end;
+
+                extracted_pair := m_sessions.ExtractPair(session_id);
+                reclaimed_session := extracted_pair.Value;
+                m_active_sessions.Remove(session_id);
+                m_recent_active_sessions.Remove(session_id);
+                if SameText(m_active_owner_session_id, session_id) then
+                begin
+                    m_active_owner_session_id := '';
+                end;
+                remove_session_prewarm_locked(session_id);
+                remaining_count := m_sessions.Count;
+                reclaimed := reclaimed_session <> nil;
+            finally
+                m_lock.Release;
+            end;
+
+            reclaimed_session.Free;
+        end);
+
+    if reclaimed then
+    begin
+        host_log(Format('[INFO] session reclaimed session=%s reason=%s remaining=%d',
+            [session_id, reason, remaining_count]));
+    end;
+    Result := reclaimed;
+end;
+
+procedure TncEngineHost.reclaim_inactive_sessions;
+var
+    session_pair: TPair<string, TncHostSession>;
+    session: TncHostSession;
+    candidate_session_id: string;
+    candidate_instance_id: UInt64;
+    candidate_activity_tick: UInt64;
+    candidate_priority: Integer;
+    priority: Integer;
+    reason: string;
+    candidate_reason: string;
+    now_tick: UInt64;
+    idle_ms: UInt64;
+    over_capacity: Boolean;
+begin
+    while True do
+    begin
+        candidate_session_id := '';
+        candidate_instance_id := 0;
+        candidate_activity_tick := 0;
+        candidate_priority := 0;
+        candidate_reason := '';
+
+        m_lock.Acquire;
+        try
+            now_tick := GetTickCount64;
+            over_capacity := m_sessions.Count > c_session_cache_limit;
+            for session_pair in m_sessions do
+            begin
+                session := session_pair.Value;
+                if (session = nil) or m_active_sessions.ContainsKey(session_pair.Key) then
+                begin
+                    Continue;
+                end;
+
+                idle_ms := now_tick - session.last_activity_tick;
+                priority := 0;
+                reason := '';
+                if session.release_requested and (idle_ms >= c_session_release_grace_ms) then
+                begin
+                    priority := 3;
+                    reason := 'released';
+                end
+                else if idle_ms >= c_session_idle_reclaim_ms then
+                begin
+                    priority := 2;
+                    reason := 'idle';
+                end
+                else if over_capacity and (idle_ms >= c_session_capacity_grace_ms) then
+                begin
+                    priority := 1;
+                    reason := 'capacity';
+                end;
+
+                if (priority > candidate_priority) or
+                    ((priority = candidate_priority) and (priority > 0) and
+                    ((candidate_session_id = '') or (session.last_activity_tick < candidate_activity_tick))) then
+                begin
+                    candidate_session_id := session_pair.Key;
+                    candidate_instance_id := session.instance_id;
+                    candidate_activity_tick := session.last_activity_tick;
+                    candidate_priority := priority;
+                    candidate_reason := reason;
+                end;
+            end;
+        finally
+            m_lock.Release;
+        end;
+
+        if candidate_session_id = '' then
+        begin
+            Break;
+        end;
+        reclaim_session_on_ui_thread(candidate_session_id, candidate_instance_id,
+            candidate_activity_tick, candidate_reason);
+    end;
+end;
+
 procedure TncEngineHost.perform_session_prewarm;
 var
     session_id: string;
@@ -1424,10 +1649,12 @@ var
     create_elapsed_ms: Int64;
     total_elapsed_ms: Int64;
     should_requeue: Boolean;
+    instance_id: UInt64;
 begin
     session_id := '';
     session := nil;
     should_requeue := False;
+    instance_id := 0;
 
     m_lock.Acquire;
     try
@@ -1442,8 +1669,7 @@ begin
 
     try
         create_start_tick := GetTickCount64;
-        session := get_or_create_session(session_id);
-        create_elapsed_ms := Int64(GetTickCount64 - create_start_tick);
+        create_elapsed_ms := 0;
 
         if not m_lock.TryEnter then
         begin
@@ -1454,8 +1680,10 @@ begin
             Exit;
         end;
         try
-            if m_sessions.TryGetValue(session_id, session) then
+            if m_sessions.TryGetValue(session_id, session) and
+                m_active_sessions.ContainsKey(session_id) and (not session.release_requested) then
             begin
+                instance_id := session.instance_id;
                 session.engine.reload_dictionary_if_needed;
                 session.engine.prewarm_dictionary_caches;
             end
@@ -1472,8 +1700,20 @@ begin
         begin
             TThread.Queue(nil,
                 procedure
+                var
+                    queued_session: TncHostSession;
                 begin
-                    session.warm_candidate_window;
+                    m_lock.Acquire;
+                    try
+                        if (not m_sessions.TryGetValue(session_id, queued_session)) or
+                            (queued_session.instance_id <> instance_id) then
+                        begin
+                            Exit;
+                        end;
+                    finally
+                        m_lock.Release;
+                    end;
+                    queued_session.warm_candidate_window;
                 end);
         end;
 
@@ -1746,6 +1986,7 @@ var
     queue_candidate_content_update: Boolean;
     candidate_content_generation: UInt64;
     has_candidate_anchor: Boolean;
+    session_instance_id: UInt64;
 begin
     handled := False;
     commit_text := '';
@@ -1778,6 +2019,7 @@ begin
     end;
 
     session := get_or_create_session(session_id);
+    session_instance_id := session.instance_id;
     should_hide_candidates := False;
     has_result := True;
     debug_logging := host_log_enabled_for(ll_debug);
@@ -1954,8 +2196,20 @@ begin
     begin
         TThread.Queue(nil,
             procedure
+            var
+                queued_session: TncHostSession;
             begin
-                session.hide_candidate_window;
+                m_lock.Acquire;
+                try
+                    if (not m_sessions.TryGetValue(session_id, queued_session)) or
+                        (queued_session.instance_id <> session_instance_id) then
+                    begin
+                        Exit;
+                    end;
+                finally
+                    m_lock.Release;
+                end;
+                queued_session.hide_candidate_window;
             end);
     end;
     if queue_candidate_apply then
@@ -1975,6 +2229,10 @@ begin
                 m_lock.Acquire;
                 try
                     if not m_sessions.TryGetValue(session_id, queued_session) then
+                    begin
+                        Exit;
+                    end;
+                    if queued_session.instance_id <> session_instance_id then
                     begin
                         Exit;
                     end;
@@ -2001,6 +2259,10 @@ begin
                 m_lock.Acquire;
                 try
                     if not m_sessions.TryGetValue(session_id, queued_session) then
+                    begin
+                        Exit;
+                    end;
+                    if queued_session.instance_id <> session_instance_id then
                     begin
                         Exit;
                     end;
@@ -2109,7 +2371,8 @@ var
     global_state_changed: Boolean;
     global_input_mode_changed: Boolean;
     config_to_save: TncEngineConfig;
-    sessions_to_hide: TList<TncHostSession>;
+    sessions_to_hide: TList<TncHostSessionRef>;
+    session_ref: TncHostSessionRef;
 begin
     Result := False;
     if session_id = '' then
@@ -2119,7 +2382,7 @@ begin
 
     sessions_to_hide := nil;
     try
-        sessions_to_hide := TList<TncHostSession>.Create;
+        sessions_to_hide := TList<TncHostSessionRef>.Create;
         reload_config_if_needed;
         session := get_or_create_session(session_id);
         m_lock.Acquire;
@@ -2136,7 +2399,9 @@ begin
             begin
                 session.engine.reset;
                 session.clear_candidates;
-                sessions_to_hide.Add(session);
+                session_ref.session_id := session.m_session_id;
+                session_ref.instance_id := session.instance_id;
+                sessions_to_hide.Add(session_ref);
             end;
 
             global_state_changed := (m_config.input_mode <> input_mode) or (m_config.full_width_mode <> full_width_mode) or
@@ -2153,7 +2418,9 @@ begin
                     begin
                         iter_session.engine.reset;
                         iter_session.clear_candidates;
-                        sessions_to_hide.Add(iter_session);
+                        session_ref.session_id := iter_session.m_session_id;
+                        session_ref.instance_id := iter_session.instance_id;
+                        sessions_to_hide.Add(session_ref);
                     end;
                 end;
                 config_to_save := m_config;
@@ -2172,10 +2439,21 @@ begin
             run_on_ui_thread(
                 procedure
                 var
+                    hide_ref: TncHostSessionRef;
                     hide_session: TncHostSession;
                 begin
-                    for hide_session in sessions_to_hide do
+                    for hide_ref in sessions_to_hide do
                     begin
+                        m_lock.Acquire;
+                        try
+                            if (not m_sessions.TryGetValue(hide_ref.session_id, hide_session)) or
+                                (hide_session.instance_id <> hide_ref.instance_id) then
+                            begin
+                                Continue;
+                            end;
+                        finally
+                            m_lock.Release;
+                        end;
                         hide_session.hide_candidate_window;
                     end;
                 end);
@@ -2196,7 +2474,8 @@ var
     iter_session: TncHostSession;
     global_variant_changed: Boolean;
     config_to_save: TncEngineConfig;
-    sessions_to_hide: TList<TncHostSession>;
+    sessions_to_hide: TList<TncHostSessionRef>;
+    session_ref: TncHostSessionRef;
     debug_logging: Boolean;
     total_start_tick: UInt64;
     sync_start_tick: UInt64;
@@ -2217,7 +2496,7 @@ begin
     persist_elapsed_ms := 0;
     sessions_to_hide := nil;
     try
-        sessions_to_hide := TList<TncHostSession>.Create;
+        sessions_to_hide := TList<TncHostSessionRef>.Create;
         reload_config_if_needed;
         session := get_or_create_session(session_id);
         m_lock.Acquire;
@@ -2239,7 +2518,9 @@ begin
                         iter_session.engine.reset;
                     end;
                     iter_session.clear_candidates;
-                    sessions_to_hide.Add(iter_session);
+                    session_ref.session_id := iter_session.m_session_id;
+                    session_ref.instance_id := iter_session.instance_id;
+                    sessions_to_hide.Add(session_ref);
                 end;
                 config_to_save := m_config;
             end;
@@ -2260,10 +2541,21 @@ begin
             run_on_ui_thread(
                 procedure
                 var
+                    hide_ref: TncHostSessionRef;
                     hide_session: TncHostSession;
                 begin
-                    for hide_session in sessions_to_hide do
+                    for hide_ref in sessions_to_hide do
                     begin
+                        m_lock.Acquire;
+                        try
+                            if (not m_sessions.TryGetValue(hide_ref.session_id, hide_session)) or
+                                (hide_session.instance_id <> hide_ref.instance_id) then
+                            begin
+                                Continue;
+                            end;
+                        finally
+                            m_lock.Release;
+                        end;
                         hide_session.hide_candidate_window;
                     end;
                 end);
@@ -2323,11 +2615,43 @@ begin
         finally
             m_lock.Release;
         end;
-        queue_session_prewarm(session_id);
     end;
 
     set_session_active(session_id, active);
+    if active then
+    begin
+        queue_session_prewarm(session_id);
+    end;
     Result := True;
+end;
+
+function TncEngineHost.release_session(const session_id: string): Boolean;
+var
+    session: TncHostSession;
+begin
+    Result := False;
+    if session_id = '' then
+    begin
+        Exit;
+    end;
+
+    set_session_active(session_id, False);
+    m_lock.Acquire;
+    try
+        if m_sessions.TryGetValue(session_id, session) then
+        begin
+            session.request_release;
+            remove_session_prewarm_locked(session_id);
+        end;
+        Result := True;
+    finally
+        m_lock.Release;
+    end;
+
+    if m_maintenance_wakeup <> nil then
+    begin
+        m_maintenance_wakeup.SetEvent;
+    end;
 end;
 
 function TncEngineHost.reload_config_now: Boolean;
@@ -2339,7 +2663,7 @@ function TncEngineHost.clear_user_dictionary(const session_id: string): Boolean;
 var
     initiating_session: TncHostSession;
     current_session: TncHostSession;
-    sessions_to_hide: TArray<TncHostSession>;
+    sessions_to_hide: TArray<TncHostSessionRef>;
     session_index: Integer;
 begin
     Result := False;
@@ -2373,7 +2697,8 @@ begin
                 current_session.engine.notify_user_dictionary_cleared;
             end;
             current_session.clear_candidates;
-            sessions_to_hide[session_index] := current_session;
+            sessions_to_hide[session_index].session_id := current_session.m_session_id;
+            sessions_to_hide[session_index].instance_id := current_session.instance_id;
             Inc(session_index);
         end;
         m_last_user_activity_tick := GetTickCount64;
@@ -2386,12 +2711,23 @@ begin
         procedure
         var
             hide_index: Integer;
+            hide_session: TncHostSession;
         begin
             for hide_index := 0 to High(sessions_to_hide) do
             begin
-                if sessions_to_hide[hide_index] <> nil then
+                m_lock.Acquire;
+                try
+                    if (not m_sessions.TryGetValue(sessions_to_hide[hide_index].session_id, hide_session)) or
+                        (hide_session.instance_id <> sessions_to_hide[hide_index].instance_id) then
+                    begin
+                        Continue;
+                    end;
+                finally
+                    m_lock.Release;
+                end;
+                if hide_session <> nil then
                 begin
-                    sessions_to_hide[hide_index].hide_candidate_window;
+                    hide_session.hide_candidate_window;
                 end;
             end;
         end);
@@ -2404,14 +2740,17 @@ var
     session: TncHostSession;
     should_apply: Boolean;
     should_queue: Boolean;
+    session_instance_id: UInt64;
 begin
     should_queue := False;
+    session_instance_id := 0;
     m_lock.Acquire;
     try
         if not m_sessions.TryGetValue(session_id, session) then
         begin
             Exit;
         end;
+        session_instance_id := session.instance_id;
         should_apply := session.has_candidates and
             session.needs_candidate_refresh(point, has_caret, line_height, terminal_like_target);
         session.set_caret(point, has_caret, line_height, terminal_like_target);
@@ -2441,6 +2780,10 @@ begin
                 m_lock.Acquire;
                 try
                     if not m_sessions.TryGetValue(session_id, queued_session) then
+                    begin
+                        Exit;
+                    end;
+                    if queued_session.instance_id <> session_instance_id then
                     begin
                         Exit;
                     end;
@@ -2494,6 +2837,7 @@ var
     preserved_candidate: TncCandidate;
     preserve_candidate_after_remove: Boolean;
     preserved_selected_index: Integer;
+    session_instance_id: UInt64;
 
     function candidate_has_pinyin_tail(const candidate: TncCandidate): Boolean;
     var
@@ -2554,6 +2898,7 @@ begin
     preserved_candidate.has_dict_weight := False;
     preserved_candidate.dict_weight := 0;
     session := nil;
+    session_instance_id := 0;
 
     m_lock.Acquire;
     try
@@ -2561,6 +2906,7 @@ begin
         begin
             Exit;
         end;
+        session_instance_id := session.instance_id;
 
         if (candidate_index < 0) or (candidate_index >= Length(session.m_candidates)) then
         begin
@@ -2639,16 +2985,28 @@ begin
 
     run_on_ui_thread(
         procedure
+        var
+            queued_session: TncHostSession;
         begin
+            m_lock.Acquire;
+            try
+                if (not m_sessions.TryGetValue(session_id, queued_session)) or
+                    (queued_session.instance_id <> session_instance_id) then
+                begin
+                    Exit;
+                end;
+            finally
+                m_lock.Release;
+            end;
             if should_hide then
             begin
-                session.hide_candidate_window;
+                queued_session.hide_candidate_window;
             end
             else
             begin
-                session.apply_candidate_state(caret_point, has_caret, session.caret_line_height,
-                    session.m_terminal_like_target, session.m_last_candidate_source, session.m_last_candidate_score,
-                    refresh_generation);
+                queued_session.apply_candidate_state(caret_point, has_caret, queued_session.caret_line_height,
+                    queued_session.m_terminal_like_target, queued_session.m_last_candidate_source,
+                    queued_session.m_last_candidate_score, refresh_generation);
             end;
         end);
 end;
@@ -2656,13 +3014,16 @@ end;
 procedure TncEngineHost.reset_session(const session_id: string);
 var
     session: TncHostSession;
+    session_instance_id: UInt64;
 begin
+    session_instance_id := 0;
     m_lock.Acquire;
     try
         if not m_sessions.TryGetValue(session_id, session) then
         begin
             Exit;
         end;
+        session_instance_id := session.instance_id;
         session.engine.reset;
         session.set_caret(Point(0, 0), False, 0, False);
         session.clear_candidates;
@@ -2672,8 +3033,20 @@ begin
 
     run_on_ui_thread(
         procedure
+        var
+            queued_session: TncHostSession;
         begin
-            session.hide_candidate_window;
+            m_lock.Acquire;
+            try
+                if (not m_sessions.TryGetValue(session_id, queued_session)) or
+                    (queued_session.instance_id <> session_instance_id) then
+                begin
+                    Exit;
+                end;
+            finally
+                m_lock.Release;
+            end;
+            queued_session.hide_candidate_window;
         end);
 end;
 
@@ -2736,6 +3109,7 @@ begin
                 Break;
             end;
             host.perform_session_prewarm;
+            host.reclaim_inactive_sessions;
             host.maybe_checkpoint_user_dictionary;
         except
             on e: Exception do
@@ -2957,6 +3331,24 @@ begin
                 ensure_tray_host_running;
             end;
             if m_host.set_active(session_id, active_flag) then
+            begin
+                Result := 'OK';
+            end
+            else
+            begin
+                Result := 'ERROR'#9'failed';
+            end;
+            Exit;
+        end;
+
+        if SameText(cmd, 'RELEASE_SESSION') then
+        begin
+            if Length(fields) < 2 then
+            begin
+                Result := 'ERROR'#9'bad_args';
+                Exit;
+            end;
+            if m_host.release_session(session_id) then
             begin
                 Result := 'OK';
             end

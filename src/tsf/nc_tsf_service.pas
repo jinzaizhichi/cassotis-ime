@@ -676,6 +676,10 @@ begin
     reset_session_if_needed(True);
     if m_ipc_client <> nil then
     begin
+        if (m_session_id <> '') and m_ipc_client.is_host_running then
+        begin
+            m_ipc_client.release_session(m_session_id);
+        end;
         m_ipc_client.Free;
         m_ipc_client := nil;
     end;

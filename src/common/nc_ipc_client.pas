@@ -38,6 +38,7 @@ type
             const punctuation_full_width: Boolean): Boolean;
         function set_dictionary_variant(const session_id: string; const dictionary_variant: TncDictionaryVariant): Boolean;
         function set_active(const session_id: string; const active: Boolean): Boolean;
+        function release_session(const session_id: string): Boolean;
         function set_caret(const session_id: string; const point: TPoint; const has_caret: Boolean;
             const line_height: Integer = 0; const source: TncCaretAnchorSource = casCursor;
             const anchor_score: Integer = 0; const terminal_like_target: Boolean = False): Boolean;
@@ -599,6 +600,30 @@ begin
     end;
 
     request_text := Format('SET_ACTIVE'#9'%s'#9'%d', [session_id, Ord(active)]);
+    if not call_pipe(request_text, response_text) then
+    begin
+        Result := False;
+        Exit;
+    end;
+
+    fields := response_text.Split([#9], TStringSplitOptions.None);
+    Result := (Length(fields) >= 1) and SameText(fields[0], 'OK');
+end;
+
+function TncIpcClient.release_session(const session_id: string): Boolean;
+var
+    request_text: string;
+    response_text: string;
+    fields: TArray<string>;
+begin
+    if session_id = '' then
+    begin
+        m_last_error := ERROR_INVALID_PARAMETER;
+        Result := False;
+        Exit;
+    end;
+
+    request_text := 'RELEASE_SESSION'#9 + session_id;
     if not call_pipe(request_text, response_text) then
     begin
         Result := False;
