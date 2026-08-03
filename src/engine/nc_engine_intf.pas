@@ -145026,8 +145026,13 @@ var
 
             sort_short_exact_rank_items_local;
             note_short_exact_phase_local('sort');
-            { No-context base exact order is final here. Only the dedicated
-              context stage below may rerank exact dictionary candidates. }
+            { Keep dictionary weight as the baseline, then allow the dedicated
+              residual model to correct high-confidence no-context errors. }
+            apply_short_nocontext_reranker_local;
+            if short_nocontext_promoted_exact_text <> '' then
+            begin
+                sort_short_exact_rank_items_local;
+            end;
             note_short_exact_phase_local('nocontext');
             apply_short_context_reranker_local;
             if short_context_promoted_exact_text <> '' then
