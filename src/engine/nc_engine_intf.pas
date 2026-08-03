@@ -264,6 +264,9 @@ type
         ranker_score: Int64;
         abstain_score: Int64;
         ranker_applied: Boolean;
+        top2_pairwise_score: Int64;
+        top2_pairwise_eligible: Boolean;
+        top2_pairwise_swapped: Boolean;
         local_difference_score: Int64;
         local_difference_promoted: Boolean;
         local_difference_current_rank: Integer;
@@ -373,6 +376,7 @@ type
         local_pairwise_score: Integer;
         local_pairwise_insert_rank: Integer;
         pool_rank: Integer;
+        visible_evidence: Boolean;
     end;
 
     TncLongCompletePoolRuntimeCandidateArray =
@@ -549,6 +553,7 @@ type
         m_debug_long_chain_probe_limit: Integer;
         m_debug_long_chain_ranker_profile: Integer;
         m_debug_long_final_ranker_profile: Integer;
+        m_debug_disable_long_top2_pairwise_swap: Boolean;
         m_single_quote_open: Boolean;
         m_double_quote_open: Boolean;
         m_page_index: Integer;
@@ -761,6 +766,8 @@ type
             const probe_limit: Integer);
         procedure debug_set_long_chain_ranker_profile(const profile: Integer);
         procedure debug_set_long_final_ranker_profile(const profile: Integer);
+        procedure debug_disable_long_top2_pairwise_swap(
+            const disabled: Boolean);
         procedure debug_set_composition_text(const text: string);
         function process_key(const key_code: Word; const key_state: TncKeyState): Boolean;
         function get_candidates: TncCandidateList;
@@ -806,6 +813,12 @@ function short_residual_exact_weight_is_eligible(
 function long_exact_chunk_weight_is_eligible(
     const candidate_weight: Integer;
     const has_dict_weight: Boolean): Boolean;
+function apply_long_top2_pairwise_index_swap(
+    var ordered_indices: TArray<Integer>;
+    const second_position: Integer;
+    const eligible: Boolean;
+    const score: Int64;
+    const threshold: Int64): Boolean;
 
 implementation
 
@@ -817,6 +830,8 @@ uses
     nc_long_final_abstain_model,
     nc_long_complete_pool_ranker_model,
     nc_long_complete_pool_abstain_model,
+    nc_long_top2_pairwise_swap_model,
+    nc_long_top2_pairwise_text_model,
     nc_long_visible_pairwise_residual_model,
     nc_long_local_difference_residual_model,
     nc_long_local_pairwise_pool_model,
@@ -860,6 +875,29 @@ begin
         (challenger_weight >= 0) and
         (challenger_weight < baseline_weight) and
         (Int64(challenger_weight) * 2 < Int64(baseline_weight));
+end;
+
+function apply_long_top2_pairwise_index_swap(
+    var ordered_indices: TArray<Integer>;
+    const second_position: Integer;
+    const eligible: Boolean;
+    const score: Int64;
+    const threshold: Int64): Boolean;
+var
+    first_index: Integer;
+begin
+    Result := eligible and (Length(ordered_indices) >= 2) and
+        (second_position > 0) and
+        (second_position < Length(ordered_indices)) and
+        (score >= threshold);
+    if not Result then
+    begin
+        Exit;
+    end;
+
+    first_index := ordered_indices[0];
+    ordered_indices[0] := ordered_indices[second_position];
+    ordered_indices[second_position] := first_index;
 end;
 
 type
@@ -1074,6 +1112,7 @@ begin
     m_debug_long_chain_probe_limit := 0;
     m_debug_long_chain_ranker_profile := -1;
     m_debug_long_final_ranker_profile := -1;
+    m_debug_disable_long_top2_pairwise_swap := False;
     reset_debug_target_recall_metrics;
     m_disable_subspan_standalone_oracle := 0;
     m_single_quote_open := False;
@@ -3250,6 +3289,12 @@ procedure TncEngine.debug_set_long_final_ranker_profile(
     const profile: Integer);
 begin
     m_debug_long_final_ranker_profile := Max(-1, Min(2, profile));
+end;
+
+procedure TncEngine.debug_disable_long_top2_pairwise_swap(
+    const disabled: Boolean);
+begin
+    m_debug_disable_long_top2_pairwise_swap := disabled;
 end;
 
 procedure TncEngine.debug_set_composition_text(const text: string);
@@ -122809,6 +122854,9 @@ begin
             raw_pool[raw_idx].pool_rank := selected_idx + 1;
             m_runtime_long_complete_pool_candidates[selected_idx] :=
                 raw_pool[raw_idx];
+            m_runtime_long_complete_pool_candidates[selected_idx].visible_evidence :=
+                generated_pool_candidate_has_visible_evidence(
+                raw_pool[raw_idx].candidate.text, False);
             remember_segment_path_for_candidate(
                 raw_pool[raw_idx].candidate.text, '',
                 raw_pool[raw_idx].segment_path,
@@ -123009,6 +123057,22 @@ var
     local_candidate_lm_debug: array[0..3] of TArray<Integer>;
     complete_pool_pairwise_position: Integer;
     complete_pool_pairwise_target_position: Integer;
+    top2_pairwise_features: TncLongTop2PairwiseSwapFeatures;
+    top2_pairwise_score: Int64;
+    top2_pairwise_candidate_index: Integer;
+    top2_pairwise_candidate_position: Integer;
+    top2_pairwise_top_pool_index: Integer;
+    top2_pairwise_candidate_pool_index: Integer;
+    top2_pairwise_eligible: Boolean;
+    top2_pairwise_swapped: Boolean;
+    top2_different_units: Integer;
+    top2_different_runs: Integer;
+    top2_max_different_run: Integer;
+    top2_same_prefix_units: Integer;
+    top2_same_suffix_units: Integer;
+    top2_difference_span_units: Integer;
+    top2_top_local_lm_scores: TArray<Integer>;
+    top2_candidate_local_lm_scores: TArray<Integer>;
 
     function find_chain_candidate_index(const candidate_text: string): Integer;
     var
@@ -123060,6 +123124,150 @@ var
         if rank_scores[left_idx] = rank_scores[right_idx] then
         begin
             Result := left_idx < right_idx;
+        end;
+    end;
+
+    procedure get_text_relation(const candidate_text: string;
+        const top_text: string; out different_units: Integer;
+        out different_runs: Integer; out max_different_run: Integer;
+        out same_prefix_units: Integer; out same_suffix_units: Integer;
+        out difference_span_units: Integer);
+    var
+        candidate_units: TArray<string>;
+        top_units: TArray<string>;
+        shared_units: Integer;
+        unit_idx: Integer;
+        current_run: Integer;
+    begin
+        candidate_units := split_text_units(Trim(candidate_text));
+        top_units := split_text_units(Trim(top_text));
+        shared_units := Min(Length(candidate_units), Length(top_units));
+        different_units := 0;
+        different_runs := 0;
+        max_different_run := 0;
+        same_prefix_units := 0;
+        same_suffix_units := 0;
+        current_run := 0;
+
+        while (same_prefix_units < shared_units) and
+            SameText(candidate_units[same_prefix_units],
+            top_units[same_prefix_units]) do
+        begin
+            Inc(same_prefix_units);
+        end;
+        while (same_suffix_units < shared_units - same_prefix_units) and
+            SameText(candidate_units[High(candidate_units) -
+            same_suffix_units], top_units[High(top_units) -
+            same_suffix_units]) do
+        begin
+            Inc(same_suffix_units);
+        end;
+
+        for unit_idx := 0 to shared_units - 1 do
+        begin
+            if not SameText(candidate_units[unit_idx], top_units[unit_idx]) then
+            begin
+                Inc(different_units);
+                Inc(current_run);
+                if current_run = 1 then
+                begin
+                    Inc(different_runs);
+                end;
+                max_different_run := Max(max_different_run, current_run);
+            end
+            else
+            begin
+                current_run := 0;
+            end;
+        end;
+        if Length(candidate_units) <> Length(top_units) then
+        begin
+            Inc(different_runs);
+            Inc(different_units,
+                Abs(Length(candidate_units) - Length(top_units)));
+            max_different_run := Max(max_different_run,
+                Abs(Length(candidate_units) - Length(top_units)));
+        end;
+        difference_span_units := Max(0,
+            Max(Length(candidate_units), Length(top_units)) -
+            same_prefix_units - same_suffix_units);
+    end;
+
+    function get_top2_cached_span_lm_scores(const top_text: string;
+        const candidate_text: string; out top_scores: TArray<Integer>;
+        out candidate_scores: TArray<Integer>): Boolean;
+    var
+        top_units: TArray<string>;
+        candidate_units: TArray<string>;
+        window_texts: TArray<string>;
+        window_scores: TArray<Integer>;
+        first_difference: Integer;
+        difference_end: Integer;
+        window_start: Integer;
+        window_end: Integer;
+        radius: Integer;
+        unit_idx: Integer;
+        top_window: string;
+        candidate_window: string;
+    begin
+        Result := False;
+        SetLength(top_scores, 4);
+        SetLength(candidate_scores, 4);
+        top_units := split_text_units(Trim(top_text));
+        candidate_units := split_text_units(Trim(candidate_text));
+        if (Length(top_units) = 0) or
+            (Length(top_units) <> Length(candidate_units)) then
+        begin
+            Exit;
+        end;
+
+        first_difference := 0;
+        while (first_difference < Length(top_units)) and
+            SameText(top_units[first_difference],
+            candidate_units[first_difference]) do
+        begin
+            Inc(first_difference);
+        end;
+        if first_difference >= Length(top_units) then
+        begin
+            Exit;
+        end;
+        difference_end := Length(top_units);
+        while (difference_end > first_difference) and
+            SameText(top_units[difference_end - 1],
+            candidate_units[difference_end - 1]) do
+        begin
+            Dec(difference_end);
+        end;
+
+        SetLength(window_texts, 8);
+        for radius := 0 to 3 do
+        begin
+            window_start := Max(0, first_difference - radius);
+            window_end := Min(Length(top_units), difference_end + radius);
+            top_window := '';
+            candidate_window := '';
+            for unit_idx := window_start to window_end - 1 do
+            begin
+                top_window := top_window + top_units[unit_idx];
+                candidate_window := candidate_window +
+                    candidate_units[unit_idx];
+            end;
+            window_texts[radius * 2] := top_window;
+            window_texts[radius * 2 + 1] := candidate_window;
+        end;
+
+        Result := (m_dictionary <> nil) and
+            m_dictionary.get_char_lm_cached_span_scores(window_texts,
+            window_scores) and (Length(window_scores) = 8);
+        if not Result then
+        begin
+            Exit;
+        end;
+        for radius := 0 to 3 do
+        begin
+            top_scores[radius] := window_scores[radius * 2];
+            candidate_scores[radius] := window_scores[radius * 2 + 1];
         end;
     end;
 
@@ -124039,6 +124247,98 @@ begin
         end;
     end;
 
+    top2_pairwise_score := 0;
+    top2_pairwise_candidate_index := -1;
+    top2_pairwise_candidate_position := -1;
+    top2_pairwise_eligible := False;
+    top2_pairwise_swapped := False;
+    if unified_pool_final and
+        (not m_debug_disable_long_top2_pairwise_swap) and
+        (candidate_count >= 2) then
+    begin
+        top_idx := ordered_indices[0];
+        top2_pairwise_top_pool_index := candidate_pool_indices[top_idx];
+        if rank_features[top_idx].complete_match and
+            (top2_pairwise_top_pool_index >= 0) and
+            m_runtime_long_complete_pool_candidates[
+            top2_pairwise_top_pool_index].visible_evidence then
+        begin
+            for candidate_idx := 1 to candidate_count - 1 do
+            begin
+                current_idx := ordered_indices[candidate_idx];
+                top2_pairwise_candidate_pool_index :=
+                    candidate_pool_indices[current_idx];
+                if rank_features[current_idx].complete_match and
+                    (top2_pairwise_candidate_pool_index >= 0) and
+                    m_runtime_long_complete_pool_candidates[
+                    top2_pairwise_candidate_pool_index].visible_evidence then
+                begin
+                    top2_pairwise_candidate_position := candidate_idx;
+                    top2_pairwise_candidate_index := current_idx;
+                    Break;
+                end;
+            end;
+        end;
+
+        if top2_pairwise_candidate_index >= 0 then
+        begin
+            current_idx := top2_pairwise_candidate_index;
+            top2_pairwise_eligible :=
+                (not rank_features[top_idx].source_user) and
+                (not rank_features[current_idx].source_user) and
+                (not rank_features[top_idx].complete_user) and
+                (not rank_features[current_idx].complete_user) and
+                (not rank_features[top_idx].latest_query_choice) and
+                (not rank_features[current_idx].latest_query_choice) and
+                (rank_features[top_idx].query_choice_bonus <= 0) and
+                (rank_features[current_idx].query_choice_bonus <= 0) and
+                (not SameText(Trim(legacy_candidates[top_idx].text),
+                Trim(legacy_candidates[current_idx].text)));
+            if top2_pairwise_eligible then
+            begin
+                get_text_relation(legacy_candidates[current_idx].text,
+                    legacy_candidates[top_idx].text,
+                    top2_different_units, top2_different_runs,
+                    top2_max_different_run, top2_same_prefix_units,
+                    top2_same_suffix_units, top2_difference_span_units);
+                top2_pairwise_eligible := get_top2_cached_span_lm_scores(
+                    legacy_candidates[top_idx].text,
+                    legacy_candidates[current_idx].text,
+                    top2_top_local_lm_scores,
+                    top2_candidate_local_lm_scores);
+            end;
+            if top2_pairwise_eligible then
+            begin
+                build_long_top2_pairwise_swap_features(
+                    rank_features[current_idx], rank_features[top_idx],
+                    rank_scores[current_idx], rank_scores[top_idx],
+                    apply_ranker, abstain_score, top2_different_units,
+                    top2_different_runs, top2_max_different_run,
+                    top2_same_prefix_units, top2_same_suffix_units,
+                    top2_difference_span_units,
+                    SameText(legacy_paths[current_idx],
+                    legacy_paths[top_idx]), top2_top_local_lm_scores,
+                    top2_candidate_local_lm_scores,
+                    top2_pairwise_features);
+                top2_pairwise_score := long_top2_pairwise_swap_score(
+                    top2_pairwise_features);
+                top2_pairwise_score := long_top2_pairwise_combined_score(
+                    top2_pairwise_score,
+                    legacy_candidates[current_idx].text,
+                    legacy_candidates[top_idx].text);
+                top2_pairwise_swapped :=
+                    apply_long_top2_pairwise_index_swap(ordered_indices,
+                    top2_pairwise_candidate_position, True,
+                    top2_pairwise_score,
+                    c_long_top2_pairwise_combined_threshold);
+                if top2_pairwise_swapped then
+                begin
+                    apply_ranker := True;
+                end;
+            end;
+        end;
+    end;
+
     if apply_ranker then
     begin
         for candidate_idx := 0 to candidate_count - 1 do
@@ -124087,6 +124387,15 @@ begin
             abstain_score;
         m_debug_long_final_candidates[candidate_idx].ranker_applied :=
             apply_ranker;
+        if candidate_idx = top2_pairwise_candidate_index then
+        begin
+            m_debug_long_final_candidates[candidate_idx].top2_pairwise_score :=
+                top2_pairwise_score;
+            m_debug_long_final_candidates[candidate_idx].top2_pairwise_eligible :=
+                top2_pairwise_eligible;
+            m_debug_long_final_candidates[candidate_idx].top2_pairwise_swapped :=
+                top2_pairwise_swapped;
+        end;
         m_debug_long_final_candidates[candidate_idx].local_difference_score :=
             local_difference_debug_scores[candidate_idx];
         m_debug_long_final_candidates[candidate_idx].local_difference_promoted :=

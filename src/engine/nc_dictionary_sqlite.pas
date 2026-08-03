@@ -187,7 +187,8 @@ type
             const entries: TDictionary<string, TncCharLmCacheEntry>): Boolean;
         function get_char_lm_text_scores_internal(const texts: TArray<string>;
             out scores: TArray<Integer>; const include_begin_marker: Boolean;
-            const left_context: string; const include_end_marker: Boolean): Boolean;
+            const left_context: string; const include_end_marker: Boolean;
+            const cache_only: Boolean = False): Boolean;
         procedure purge_user_entry_internal(const pinyin: string; const text: string;
             const apply_penalty: Boolean; const purge_all_by_text: Boolean);
         procedure prune_user_entries_existing_in_base;
@@ -257,6 +258,8 @@ type
         function get_char_lm_text_scores(const texts: TArray<string>;
             out scores: TArray<Integer>): Boolean; override;
         function get_char_lm_suffix_scores(const texts: TArray<string>;
+            out scores: TArray<Integer>): Boolean; override;
+        function get_char_lm_cached_span_scores(const texts: TArray<string>;
             out scores: TArray<Integer>): Boolean; override;
         function get_char_lm_continuation_scores(const left_context: string;
             const texts: TArray<string>; out scores: TArray<Integer>): Boolean; override;
@@ -12255,7 +12258,7 @@ end;
 function TncSqliteDictionary.get_char_lm_text_scores_internal(
     const texts: TArray<string>; out scores: TArray<Integer>;
     const include_begin_marker: Boolean; const left_context: string;
-    const include_end_marker: Boolean): Boolean;
+    const include_end_marker: Boolean; const cache_only: Boolean): Boolean;
 const
     c_begin_marker = #2;
     c_end_marker = #3;
@@ -12295,6 +12298,8 @@ var
     normalized_text: string;
     normalized_context: string;
     all_scores_cached: Boolean;
+    wanted_key: string;
+    cached_entry: TncCharLmCacheEntry;
 
     function try_get_loaded_entry(const ngram: string;
         out score: Integer; out backoff: Integer): Boolean;
@@ -12339,9 +12344,13 @@ begin
         end;
         cache_prefix := 'C' + #1 + normalized_context + #1;
     end
-    else
+    else if include_end_marker then
     begin
         cache_prefix := 'S' + #1;
+    end
+    else
+    begin
+        cache_prefix := 'N' + #1;
     end;
 
     SetLength(normalized_texts, Length(texts));
@@ -12471,7 +12480,23 @@ begin
             end;
 
             wanted_keys := wanted.Keys.ToArray;
-            if (Length(wanted_keys) > 0) and
+            if cache_only then
+            begin
+                if m_char_lm_entry_cache = nil then
+                begin
+                    Exit;
+                end;
+                for wanted_key in wanted_keys do
+                begin
+                    if not m_char_lm_entry_cache.TryGetValue(wanted_key,
+                        cached_entry) then
+                    begin
+                        Exit;
+                    end;
+                    loaded_entries.AddOrSetValue(wanted_key, cached_entry);
+                end;
+            end
+            else if (Length(wanted_keys) > 0) and
                 (not load_char_lm_entries(wanted_keys, loaded_entries)) then
             begin
                 Exit;
@@ -12600,8 +12625,11 @@ begin
             scores[text_idx] :=
                 -((-total_score + predicted - 1) div predicted);
         end;
-        cache_char_lm_text_score(cache_prefix + normalized_text,
-            scores[text_idx]);
+        if not cache_only then
+        begin
+            cache_char_lm_text_score(cache_prefix + normalized_text,
+                scores[text_idx]);
+        end;
         end;
         Result := True;
     finally
@@ -12619,6 +12647,13 @@ function TncSqliteDictionary.get_char_lm_suffix_scores(const texts: TArray<strin
     out scores: TArray<Integer>): Boolean;
 begin
     Result := get_char_lm_text_scores_internal(texts, scores, False, '', True);
+end;
+
+function TncSqliteDictionary.get_char_lm_cached_span_scores(
+    const texts: TArray<string>; out scores: TArray<Integer>): Boolean;
+begin
+    Result := get_char_lm_text_scores_internal(texts, scores, False, '',
+        False, True);
 end;
 
 function TncSqliteDictionary.get_char_lm_continuation_scores(
