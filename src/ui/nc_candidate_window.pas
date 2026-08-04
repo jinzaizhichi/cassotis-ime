@@ -1166,7 +1166,8 @@ begin
     Canvas.Font.Assign(m_weight_font);
     weight_text_height := Canvas.TextHeight(c_candidate_text_height_sample);
 
-    font_size_delta := m_base_list_font_size - c_default_candidate_font_size;
+    font_size_delta := m_base_list_font_size -
+        c_candidate_font_layout_reference_size;
     if font_size_delta < 0 then
     begin
         font_size_delta := 0;

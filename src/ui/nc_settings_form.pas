@@ -162,7 +162,8 @@ type
         m_chk_show_status_widget: TncModernCheckBox;
         m_combo_candidate_font: TComboBox;
         m_track_candidate_font_size: TTrackBar;
-        m_candidate_font_size_labels: array[0..6] of TLabel;
+        m_candidate_font_size_labels:
+            array[0..c_candidate_font_size_level_count - 1] of TLabel;
         m_combo_candidate_page_size: TComboBox;
         m_combo_candidate_color_scheme: TComboBox;
         m_candidate_preview: TPaintBox;
@@ -294,6 +295,8 @@ const
     c_check_width = c_section_width - c_label_left - 20;
     c_hint_width = c_section_width - (c_label_left * 2);
     c_general_row_gap = 8;
+    c_candidate_preview_height = 104;
+    c_appearance_group_height = 360;
     c_tbm_get_channel_rect = WM_USER + 26;
     c_official_website_url = 'https://www.yanquan.org';
 
@@ -1578,7 +1581,8 @@ begin
     update_check_box_metrics(m_chk_debug_mode);
     if m_candidate_preview <> nil then
     begin
-        m_candidate_preview.Height := scale_ui_for_dpi(64, dpi);
+        m_candidate_preview.Height := scale_ui_for_dpi(
+            c_candidate_preview_height, dpi);
         if m_candidate_preview.Parent <> nil then
         begin
             m_candidate_preview.Parent.Height := Max(m_candidate_preview.Parent.Height,
@@ -1810,7 +1814,7 @@ var
     section_top: Integer;
     appearance_group: TPanel;
     label_index: Integer;
-    size_label_texts: array[0..6] of string;
+    size_label_texts: array[0..c_candidate_font_size_level_count - 1] of string;
     candidate_control_width: Integer;
     label_width: Integer;
     tick_center: Integer;
@@ -1820,16 +1824,17 @@ var
     track_channel_width: Integer;
     track_label_left: Integer;
 begin
-    size_label_texts[0] := SSizeMinimum;
-    size_label_texts[1] := '';
-    size_label_texts[2] := '';
-    size_label_texts[3] := SSizeDefault;
-    size_label_texts[4] := '';
-    size_label_texts[5] := '';
-    size_label_texts[6] := SSizeMaximum;
+    for label_index := Low(size_label_texts) to High(size_label_texts) do
+    begin
+        size_label_texts[label_index] := '';
+    end;
+    size_label_texts[Low(size_label_texts)] := SSizeMinimum;
+    size_label_texts[c_default_candidate_font_size_level] := SSizeDefault;
+    size_label_texts[High(size_label_texts)] := SSizeMaximum;
 
     section_top := scale_ui(18);
-    appearance_group := create_section_group(Self, m_tab_appearance, '', section_top, 316);
+    appearance_group := create_section_group(Self, m_tab_appearance, '',
+        section_top, c_appearance_group_height);
 
     top := scale_ui(c_untitled_section_inner_top);
     m_chk_show_status_widget := create_check_box(Self, appearance_group, top, SCheckShowStatusWidget, mark_dirty);
@@ -1855,13 +1860,13 @@ begin
     m_track_candidate_font_size.Width := candidate_control_width;
     m_track_candidate_font_size.Height := scale_ui(34);
     m_track_candidate_font_size.Min := 0;
-    m_track_candidate_font_size.Max := c_max_candidate_font_size - c_min_candidate_font_size;
+    m_track_candidate_font_size.Max := High(c_candidate_font_size_levels);
     m_track_candidate_font_size.Frequency := 1;
     m_track_candidate_font_size.LineSize := 1;
     m_track_candidate_font_size.PageSize := 1;
     m_track_candidate_font_size.TickMarks := tmBottomRight;
     m_track_candidate_font_size.TickStyle := tsAuto;
-    m_track_candidate_font_size.Position := c_default_candidate_font_size - c_min_candidate_font_size;
+    m_track_candidate_font_size.Position := c_default_candidate_font_size_level;
     m_track_candidate_font_size.OnChange := on_candidate_appearance_change;
 
     track_channel_rect := Rect(0, 0, m_track_candidate_font_size.Width, 0);
@@ -1937,7 +1942,7 @@ begin
     m_candidate_preview.Left := scale_ui(c_control_left);
     m_candidate_preview.Top := top;
     m_candidate_preview.Width := appearance_group.Width - scale_ui(c_control_left + c_label_left);
-    m_candidate_preview.Height := scale_ui(64);
+    m_candidate_preview.Height := scale_ui(c_candidate_preview_height);
     m_candidate_preview.Anchors := [akLeft, akTop, akRight];
     m_candidate_preview.OnPaint := on_candidate_preview_paint;
 end;
@@ -2720,25 +2725,32 @@ begin
 end;
 
 function TncSettingsForm.get_candidate_font_size_from_slider: Integer;
+var
+    level_index: Integer;
 begin
     Result := c_default_candidate_font_size;
     if m_track_candidate_font_size <> nil then
     begin
-        Result := c_min_candidate_font_size + m_track_candidate_font_size.Position;
-    end;
-    if Result < c_min_candidate_font_size then
-    begin
-        Result := c_min_candidate_font_size;
-    end
-    else if Result > c_max_candidate_font_size then
-    begin
-        Result := c_max_candidate_font_size;
+        level_index := m_track_candidate_font_size.Position;
+        if level_index < Low(c_candidate_font_size_levels) then
+        begin
+            level_index := Low(c_candidate_font_size_levels);
+        end
+        else if level_index > High(c_candidate_font_size_levels) then
+        begin
+            level_index := High(c_candidate_font_size_levels);
+        end;
+        Result := c_candidate_font_size_levels[level_index];
     end;
 end;
 
 procedure TncSettingsForm.set_candidate_font_size_slider(const font_size: Integer);
 var
     effective_size: Integer;
+    level_index: Integer;
+    best_level_index: Integer;
+    best_distance: Integer;
+    distance: Integer;
 begin
     if m_track_candidate_font_size = nil then
     begin
@@ -2754,7 +2766,20 @@ begin
     begin
         effective_size := c_max_candidate_font_size;
     end;
-    m_track_candidate_font_size.Position := effective_size - c_min_candidate_font_size;
+    best_level_index := Low(c_candidate_font_size_levels);
+    best_distance := MaxInt;
+    for level_index := Low(c_candidate_font_size_levels) to
+        High(c_candidate_font_size_levels) do
+    begin
+        distance := Abs(c_candidate_font_size_levels[level_index] -
+            effective_size);
+        if distance < best_distance then
+        begin
+            best_distance := distance;
+            best_level_index := level_index;
+        end;
+    end;
+    m_track_candidate_font_size.Position := best_level_index;
 end;
 
 function TncSettingsForm.get_selected_candidate_page_size: Integer;
@@ -2906,29 +2931,36 @@ var
         item_width: Integer;
         text_value: string;
         selected: Boolean;
+        paint_item_rect: TRect;
     begin
         text_value := c_preview_texts[index];
         selected := index = 0;
         item_width := canvas.TextWidth(text_value) + (horizontal_padding * 2);
         item_rect := Rect(x, row_top, x + item_width, row_top + line_height);
+        if not IntersectRect(paint_item_rect, item_rect, preview_inner_rect) then
+        begin
+            x := item_rect.Right + item_gap;
+            Exit;
+        end;
 
         if selected then
         begin
             canvas.Brush.Color := theme.selected_background_color;
             canvas.Pen.Color := theme.selected_border_color;
-            canvas.RoundRect(item_rect.Left, item_rect.Top + 1, item_rect.Right,
-                item_rect.Bottom - 1, scale_ui_for_dpi(6, dpi), scale_ui_for_dpi(6, dpi));
+            canvas.RoundRect(paint_item_rect.Left, paint_item_rect.Top + 1,
+                paint_item_rect.Right, paint_item_rect.Bottom - 1,
+                scale_ui_for_dpi(6, dpi), scale_ui_for_dpi(6, dpi));
             canvas.Font.Color := theme.selected_text_color;
         end
         else
         begin
             canvas.Brush.Color := theme.background_color;
             canvas.Pen.Color := theme.background_color;
-            canvas.FillRect(item_rect);
+            canvas.FillRect(paint_item_rect);
             canvas.Font.Color := theme.text_color;
         end;
 
-        text_rect := item_rect;
+        text_rect := paint_item_rect;
         InflateRect(text_rect, -horizontal_padding, 0);
         SetTextColor(canvas.Handle, ColorToRGB(canvas.Font.Color));
         draw_preview_text(text_value, text_rect);
@@ -2967,7 +2999,7 @@ begin
     canvas.Font.Color := theme.text_color;
 
     text_height := canvas.TextHeight('Hg国');
-    font_size_delta := font_size - c_default_candidate_font_size;
+    font_size_delta := font_size - c_candidate_font_layout_reference_size;
     if font_size_delta < 0 then
     begin
         font_size_delta := 0;
@@ -3014,10 +3046,6 @@ begin
     InflateRect(preview_inner_rect, -window_padding, -window_padding);
     canvas.Brush.Color := theme.background_color;
     canvas.FillRect(preview_inner_rect);
-    canvas.Pen.Color := theme.border_color;
-    canvas.Brush.Style := bsClear;
-    canvas.Rectangle(preview_rect.Left, preview_rect.Top, preview_rect.Right, preview_rect.Bottom);
-    canvas.Brush.Style := bsSolid;
 
     content_top := preview_inner_rect.Top;
     preedit_rect := Rect(preview_inner_rect.Left, content_top, preview_inner_rect.Right, content_top + preedit_height);
@@ -3035,6 +3063,14 @@ begin
     begin
         draw_item(item_index);
     end;
+
+    // Content is clipped to the inner rectangle; draw the frame last so a
+    // large-font row can never overwrite its bottom or side edges.
+    canvas.Pen.Color := theme.border_color;
+    canvas.Brush.Style := bsClear;
+    canvas.Rectangle(preview_rect.Left, preview_rect.Top, preview_rect.Right,
+        preview_rect.Bottom);
+    canvas.Brush.Style := bsSolid;
 end;
 
 function TncSettingsForm.browse_for_save_file(const title: string; const filter: string; const default_ext: string;

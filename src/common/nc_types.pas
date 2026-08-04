@@ -4,9 +4,15 @@ interface
 
 const
     c_default_candidate_font_name = 'Microsoft YaHei UI';
-    c_default_candidate_font_size = 10;
-    c_min_candidate_font_size = c_default_candidate_font_size - 3;
-    c_max_candidate_font_size = c_default_candidate_font_size + 3;
+    c_min_candidate_font_size = 7;
+    c_default_candidate_font_size = 12;
+    c_max_candidate_font_size = 18;
+    c_candidate_font_layout_reference_size = 10;
+    c_candidate_font_size_level_count = 11;
+    c_default_candidate_font_size_level = 5;
+    // Preserve every legacy 7..13 value while extending the top end by four steps.
+    c_candidate_font_size_levels: array[0..c_candidate_font_size_level_count - 1]
+        of Integer = (7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 18);
     c_default_candidate_page_size = 9;
     c_min_candidate_page_size = 3;
     c_max_candidate_page_size = 9;
