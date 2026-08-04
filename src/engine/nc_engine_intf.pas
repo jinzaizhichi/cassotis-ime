@@ -832,6 +832,7 @@ uses
     nc_long_complete_pool_abstain_model,
     nc_long_top2_pairwise_swap_model,
     nc_long_top2_pairwise_text_model,
+    nc_long_top2_pairwise_difference_model,
     nc_long_visible_pairwise_residual_model,
     nc_long_local_difference_residual_model,
     nc_long_local_pairwise_pool_model,
@@ -123073,6 +123074,9 @@ var
     top2_difference_span_units: Integer;
     top2_top_local_lm_scores: TArray<Integer>;
     top2_candidate_local_lm_scores: TArray<Integer>;
+    top2_query_parts: TncPinyinParseResult;
+    top2_query_syllables: TncLongTop2DifferencePinyinSyllables;
+    top2_query_idx: Integer;
 
     function find_chain_candidate_index(const candidate_text: string): Integer;
     var
@@ -124309,6 +124313,15 @@ begin
             end;
             if top2_pairwise_eligible then
             begin
+                top2_query_parts := get_effective_compact_pinyin_syllables(
+                    normalized_query);
+                SetLength(top2_query_syllables, Length(top2_query_parts));
+                for top2_query_idx := 0 to High(top2_query_parts) do
+                begin
+                    top2_query_syllables[top2_query_idx] :=
+                        normalize_pinyin_text(
+                        top2_query_parts[top2_query_idx].text);
+                end;
                 build_long_top2_pairwise_swap_features(
                     rank_features[current_idx], rank_features[top_idx],
                     rank_scores[current_idx], rank_scores[top_idx],
@@ -124326,11 +124339,17 @@ begin
                     top2_pairwise_score,
                     legacy_candidates[current_idx].text,
                     legacy_candidates[top_idx].text);
+                top2_pairwise_score :=
+                    long_top2_pairwise_difference_combined_score(
+                    top2_pairwise_score, top2_query_syllables,
+                    legacy_candidates[current_idx].text,
+                    legacy_candidates[top_idx].text,
+                    legacy_paths[current_idx], legacy_paths[top_idx]);
                 top2_pairwise_swapped :=
                     apply_long_top2_pairwise_index_swap(ordered_indices,
                     top2_pairwise_candidate_position, True,
                     top2_pairwise_score,
-                    c_long_top2_pairwise_combined_threshold);
+                    c_long_top2_pairwise_difference_combined_threshold);
                 if top2_pairwise_swapped then
                 begin
                     apply_ranker := True;
