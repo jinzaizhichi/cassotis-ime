@@ -88,6 +88,9 @@ type
         m_stmt_exact_base: Psqlite3_stmt;
         m_stmt_exact_base_alias: Psqlite3_stmt;
         m_stmt_exact_user: Psqlite3_stmt;
+        m_stmt_exact_component_base: Psqlite3_stmt;
+        m_stmt_exact_component_base_alias: Psqlite3_stmt;
+        m_stmt_exact_component_user: Psqlite3_stmt;
         m_stmt_exact_admin_prefix: Psqlite3_stmt;
         m_stmt_lookup_base: Psqlite3_stmt;
         m_stmt_lookup_single_char_exact: Psqlite3_stmt;
@@ -104,6 +107,8 @@ type
         m_lookup_result_cache_order: TQueue<string>;
         m_exact_lookup_result_cache: TDictionary<string, TncCandidateList>;
         m_exact_lookup_result_cache_order: TQueue<string>;
+        m_exact_component_lookup_cache: TDictionary<string, TncCandidateList>;
+        m_exact_component_lookup_cache_order: TQueue<string>;
         m_base_exact_pinyin_bloom: TBytes;
         m_base_exact_pinyin_bloom_ready: Boolean;
         m_prefix_lookup_result_cache: TDictionary<string, TncCandidateList>;
@@ -219,6 +224,8 @@ type
         function get_base_text_prefix_bonus(const prefix_text: string): Integer; override;
         function lookup(const pinyin: string; out results: TncCandidateList): Boolean; override;
         function lookup_exact_full_pinyin(const pinyin: string;
+            out results: TncCandidateList): Boolean; override;
+        function lookup_isolated_exact_component(const pinyin: string;
             out results: TncCandidateList): Boolean; override;
         function lookup_full_pinyin_prefix(const pinyin_prefix: string;
             out results: TncCandidateList): Boolean; override;
@@ -2139,6 +2146,9 @@ begin
     m_stmt_exact_base := nil;
     m_stmt_exact_base_alias := nil;
     m_stmt_exact_user := nil;
+    m_stmt_exact_component_base := nil;
+    m_stmt_exact_component_base_alias := nil;
+    m_stmt_exact_component_user := nil;
     m_stmt_exact_admin_prefix := nil;
     m_stmt_lookup_base := nil;
     m_stmt_lookup_single_char_exact := nil;
@@ -2186,6 +2196,8 @@ begin
     m_lookup_result_cache_order := TQueue<string>.Create;
     m_exact_lookup_result_cache := TDictionary<string, TncCandidateList>.Create;
     m_exact_lookup_result_cache_order := TQueue<string>.Create;
+    m_exact_component_lookup_cache := TDictionary<string, TncCandidateList>.Create;
+    m_exact_component_lookup_cache_order := TQueue<string>.Create;
     SetLength(m_base_exact_pinyin_bloom, 0);
     m_base_exact_pinyin_bloom_ready := False;
     m_prefix_lookup_result_cache := TDictionary<string, TncCandidateList>.Create;
@@ -2342,6 +2354,16 @@ begin
     begin
         m_exact_lookup_result_cache_order.Free;
         m_exact_lookup_result_cache_order := nil;
+    end;
+    if m_exact_component_lookup_cache <> nil then
+    begin
+        m_exact_component_lookup_cache.Free;
+        m_exact_component_lookup_cache := nil;
+    end;
+    if m_exact_component_lookup_cache_order <> nil then
+    begin
+        m_exact_component_lookup_cache_order.Free;
+        m_exact_component_lookup_cache_order := nil;
     end;
     if m_prefix_lookup_result_cache <> nil then
     begin
@@ -6799,6 +6821,18 @@ begin
         m_base_connection.finalize(m_stmt_exact_base_alias);
         m_stmt_exact_base_alias := nil;
     end;
+    if (m_stmt_exact_component_base <> nil) and
+        (m_base_connection <> nil) then
+    begin
+        m_base_connection.finalize(m_stmt_exact_component_base);
+        m_stmt_exact_component_base := nil;
+    end;
+    if (m_stmt_exact_component_base_alias <> nil) and
+        (m_base_connection <> nil) then
+    begin
+        m_base_connection.finalize(m_stmt_exact_component_base_alias);
+        m_stmt_exact_component_base_alias := nil;
+    end;
     if (m_stmt_exact_admin_prefix <> nil) and (m_base_connection <> nil) then
     begin
         m_base_connection.finalize(m_stmt_exact_admin_prefix);
@@ -7005,6 +7039,12 @@ begin
         m_user_connection.finalize(m_stmt_exact_user);
         m_stmt_exact_user := nil;
     end;
+    if (m_stmt_exact_component_user <> nil) and
+        (m_user_connection <> nil) then
+    begin
+        m_user_connection.finalize(m_stmt_exact_component_user);
+        m_stmt_exact_component_user := nil;
+    end;
     if (m_stmt_record_context_pair_update <> nil) and (m_user_connection <> nil) then
     begin
         m_user_connection.finalize(m_stmt_record_context_pair_update);
@@ -7087,6 +7127,14 @@ begin
     if m_exact_lookup_result_cache_order <> nil then
     begin
         m_exact_lookup_result_cache_order.Clear;
+    end;
+    if m_exact_component_lookup_cache <> nil then
+    begin
+        m_exact_component_lookup_cache.Clear;
+    end;
+    if m_exact_component_lookup_cache_order <> nil then
+    begin
+        m_exact_component_lookup_cache_order.Clear;
     end;
     if m_prefix_lookup_result_cache <> nil then
     begin
@@ -7307,6 +7355,242 @@ begin
       separators. Keep that stable; lookup() selects the strict user-input
       path when the composition contains an explicit separator. }
     Result := lookup_exact_full_pinyin_internal(pinyin, results, False);
+end;
+
+function TncSqliteDictionary.lookup_isolated_exact_component(
+    const pinyin: string; out results: TncCandidateList): Boolean;
+const
+    c_component_cache_limit = 8192;
+    base_sql = 'SELECT pinyin, text, comment, weight FROM dict_base WHERE pinyin = ?1 ' +
+        'ORDER BY weight DESC, text ASC';
+    base_alias_sql =
+        'SELECT b.pinyin, b.text, b.comment, b.weight ' +
+        'FROM dict_base_pinyin_alias a INNER JOIN dict_base b ON b.id = a.word_id ' +
+        'WHERE a.compact_pinyin = ?1 ' +
+        'ORDER BY b.weight DESC, b.text ASC';
+    user_sql = 'SELECT text, weight, last_used FROM dict_user WHERE pinyin = ?1 ' +
+        'ORDER BY weight DESC, last_used DESC, text ASC';
+var
+    cache_key: string;
+    evicted_cache_key: string;
+    stmt: Psqlite3_stmt;
+    step_result: Integer;
+    list: TList<TncCandidate>;
+    seen: TDictionary<string, Integer>;
+    item: TncCandidate;
+    existing: TncCandidate;
+    text_value: string;
+    comment_value: string;
+    score_value: Integer;
+    existing_idx: Integer;
+    idx: Integer;
+    base_candidates_before: Integer;
+
+    procedure add_or_merge_local(const candidate_text: string;
+        const candidate_comment: string; const candidate_weight: Integer;
+        const candidate_source: TncCandidateSource);
+    begin
+        text_value := Trim(candidate_text);
+        if text_value = '' then
+        begin
+            Exit;
+        end;
+        if seen.TryGetValue(text_value, existing_idx) then
+        begin
+            existing := list[existing_idx];
+            if candidate_weight > existing.score then
+            begin
+                existing.score := candidate_weight;
+            end;
+            if candidate_weight > existing.dict_weight then
+            begin
+                existing.dict_weight := candidate_weight;
+            end;
+            if (candidate_source = cs_user) or
+                (existing.source = cs_user) then
+            begin
+                existing.source := cs_user;
+            end;
+            list[existing_idx] := existing;
+            Exit;
+        end;
+
+        item := Default(TncCandidate);
+        item.text := text_value;
+        item.comment := Trim(candidate_comment);
+        item.score := candidate_weight;
+        item.source := candidate_source;
+        item.has_dict_weight := True;
+        item.dict_weight := candidate_weight;
+        seen.Add(text_value, list.Count);
+        list.Add(item);
+    end;
+
+    procedure sort_local;
+    var
+        left_idx: Integer;
+        right_idx: Integer;
+        temp: TncCandidate;
+    begin
+        for left_idx := 0 to list.Count - 2 do
+        begin
+            for right_idx := left_idx + 1 to list.Count - 1 do
+            begin
+                if (list[right_idx].score > list[left_idx].score) or
+                    ((list[right_idx].score = list[left_idx].score) and
+                    (list[right_idx].source = cs_user) and
+                    (list[left_idx].source <> cs_user)) or
+                    ((list[right_idx].score = list[left_idx].score) and
+                    (list[right_idx].source = list[left_idx].source) and
+                    (CompareText(list[right_idx].text,
+                    list[left_idx].text) < 0)) then
+                begin
+                    temp := list[left_idx];
+                    list[left_idx] := list[right_idx];
+                    list[right_idx] := temp;
+                end;
+            end;
+        end;
+    end;
+begin
+    SetLength(results, 0);
+    Result := False;
+    cache_key := normalize_compact_pinyin_key(Trim(pinyin));
+    if cache_key = '' then
+    begin
+        Exit;
+    end;
+    if not ensure_open then
+    begin
+        Exit;
+    end;
+    refresh_user_data_version_if_changed(False);
+    if (m_exact_component_lookup_cache <> nil) and
+        m_exact_component_lookup_cache.TryGetValue(cache_key, results) then
+    begin
+        results := Copy(results, 0, Length(results));
+        Exit(Length(results) > 0);
+    end;
+
+    if not is_full_pinyin_key(cache_key) then
+    begin
+        Exit;
+    end;
+
+    list := TList<TncCandidate>.Create;
+    seen := TDictionary<string, Integer>.Create;
+    try
+        if m_user_ready then
+        begin
+            if m_stmt_exact_component_user = nil then
+            begin
+                m_user_connection.prepare(user_sql,
+                    m_stmt_exact_component_user);
+            end;
+            stmt := m_stmt_exact_component_user;
+            if (stmt <> nil) and m_user_connection.reset(stmt) and
+                m_user_connection.clear_bindings(stmt) and
+                m_user_connection.bind_text(stmt, 1, cache_key) then
+            begin
+                repeat
+                    step_result := m_user_connection.step(stmt);
+                    if step_result = SQLITE_ROW then
+                    begin
+                        text_value := Trim(m_user_connection.column_text(stmt, 0));
+                        score_value := m_user_connection.column_int(stmt, 1);
+                        add_or_merge_local(text_value, '', score_value,
+                            cs_user);
+                    end;
+                until step_result <> SQLITE_ROW;
+            end;
+        end;
+
+        if m_base_ready then
+        begin
+            base_candidates_before := list.Count;
+            if m_stmt_exact_component_base = nil then
+            begin
+                m_base_connection.prepare(base_sql,
+                    m_stmt_exact_component_base);
+            end;
+            stmt := m_stmt_exact_component_base;
+            if (stmt <> nil) and m_base_connection.reset(stmt) and
+                m_base_connection.clear_bindings(stmt) and
+                m_base_connection.bind_text(stmt, 1, cache_key) then
+            begin
+                repeat
+                    step_result := m_base_connection.step(stmt);
+                    if step_result = SQLITE_ROW then
+                    begin
+                        text_value := Trim(m_base_connection.column_text(stmt, 1));
+                        comment_value := Trim(m_base_connection.column_text(stmt, 2));
+                        score_value := m_base_connection.column_int(stmt, 3);
+                        add_or_merge_local(text_value, comment_value,
+                            score_value, cs_rule);
+                    end;
+                until step_result <> SQLITE_ROW;
+            end;
+
+            if list.Count = base_candidates_before then
+            begin
+                if m_stmt_exact_component_base_alias = nil then
+                begin
+                    m_base_connection.prepare(base_alias_sql,
+                        m_stmt_exact_component_base_alias);
+                end;
+                stmt := m_stmt_exact_component_base_alias;
+                if (stmt <> nil) and m_base_connection.reset(stmt) and
+                    m_base_connection.clear_bindings(stmt) and
+                    m_base_connection.bind_text(stmt, 1, cache_key) then
+                begin
+                    repeat
+                        step_result := m_base_connection.step(stmt);
+                        if step_result = SQLITE_ROW then
+                        begin
+                            text_value := Trim(
+                                m_base_connection.column_text(stmt, 1));
+                            comment_value := Trim(
+                                m_base_connection.column_text(stmt, 2));
+                            score_value := m_base_connection.column_int(stmt, 3);
+                            add_or_merge_local(text_value, comment_value,
+                                score_value, cs_rule);
+                        end;
+                    until step_result <> SQLITE_ROW;
+                end;
+            end;
+        end;
+
+        sort_local;
+        SetLength(results, list.Count);
+        for idx := 0 to list.Count - 1 do
+        begin
+            results[idx] := list[idx];
+        end;
+        Result := Length(results) > 0;
+    finally
+        seen.Free;
+        list.Free;
+    end;
+    if m_exact_component_lookup_cache <> nil then
+    begin
+        while m_exact_component_lookup_cache.Count >= c_component_cache_limit do
+        begin
+            if (m_exact_component_lookup_cache_order = nil) or
+                (m_exact_component_lookup_cache_order.Count = 0) then
+            begin
+                m_exact_component_lookup_cache.Clear;
+                Break;
+            end;
+            evicted_cache_key := m_exact_component_lookup_cache_order.Dequeue;
+            m_exact_component_lookup_cache.Remove(evicted_cache_key);
+        end;
+        m_exact_component_lookup_cache.AddOrSetValue(cache_key,
+            Copy(results, 0, Length(results)));
+        if m_exact_component_lookup_cache_order <> nil then
+        begin
+            m_exact_component_lookup_cache_order.Enqueue(cache_key);
+        end;
+    end;
 end;
 
 function TncSqliteDictionary.lookup_exact_full_pinyin_internal(const pinyin: string;

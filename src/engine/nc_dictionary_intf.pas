@@ -12,6 +12,8 @@ type
         function lookup(const pinyin: string; out results: TncCandidateList): Boolean; virtual; abstract;
         function lookup_exact_full_pinyin(const pinyin: string;
             out results: TncCandidateList): Boolean; virtual;
+        function lookup_isolated_exact_component(const pinyin: string;
+            out results: TncCandidateList): Boolean; virtual;
         function lookup_full_pinyin_prefix(const pinyin_prefix: string;
             out results: TncCandidateList): Boolean; virtual;
         function lookup_literal_user_words(const query: string;
@@ -74,6 +76,12 @@ function TncDictionaryProvider.lookup_exact_full_pinyin(const pinyin: string;
     out results: TncCandidateList): Boolean;
 begin
     Result := lookup(pinyin, results);
+end;
+
+function TncDictionaryProvider.lookup_isolated_exact_component(
+    const pinyin: string; out results: TncCandidateList): Boolean;
+begin
+    Result := lookup_exact_full_pinyin(pinyin, results);
 end;
 
 function TncDictionaryProvider.lookup_full_pinyin_prefix(const pinyin_prefix: string;
