@@ -46154,7 +46154,8 @@ var
     procedure ensure_best_exact_chunk_chain_complete_candidate_visible(
         var candidates: TncCandidateList;
         const force_fast_validation: Boolean = False;
-        const allow_fast_repair: Boolean = True);
+        const allow_fast_repair: Boolean = True;
+        const allow_incremental_tail_repair: Boolean = False);
     const
         c_chain_probe_limit = 8;
         c_fast_visible_probe_limit = 24;
@@ -57359,7 +57360,8 @@ var
 
         function try_repair_state_with_covering_exact_pairs_local(
             const source_state: TExactChunkChainState;
-            out repaired_state: TExactChunkChainState): Boolean;
+            out repaired_state: TExactChunkChainState;
+            const incremental_tail_only: Boolean = False): Boolean;
         const
             c_min_covering_pair_exact_weight = 240;
             c_min_single_chain_triple_exact_weight = 180;
@@ -59937,6 +59939,139 @@ var
                 end;
             end;
 
+            function try_repair_incremental_tail_prefix_shift_local(
+                out out_text_local: string; out out_path_local: string): Boolean;
+            const
+                c_tail_units = 3;
+            var
+                source_units_local: TArray<string>;
+                source_path_segments_local: TArray<string>;
+                segment_idx_local: Integer;
+                segment_text_local: string;
+                segment_units_local: Integer;
+                path_offset_local: Integer;
+                tail_start_local: Integer;
+                suffix_segment_count_local: Integer;
+                prefix_text_local: string;
+                prefix_path_local: string;
+                current_tail_text_local: string;
+                repaired_tail_text_local: string;
+                repaired_tail_path_local: string;
+                particle_text_local: string;
+                tail_exact_key_local: string;
+                tail_exact_score_local: Integer;
+                unit_idx_local: Integer;
+            begin
+                Result := False;
+                out_text_local := '';
+                out_path_local := '';
+                source_units_local := split_text_units(Trim(source_state.text));
+                if (Length(source_units_local) <> syllable_count_local) or
+                    (Length(source_units_local) < c_tail_units) or
+                    (Trim(source_state.path) = '') then
+                begin
+                    Exit;
+                end;
+
+                tail_start_local := Length(source_units_local) - c_tail_units;
+                source_path_segments_local := source_state.path.Split(
+                    [c_segment_path_separator]);
+                path_offset_local := 0;
+                suffix_segment_count_local := 0;
+                prefix_path_local := '';
+                for segment_idx_local := 0 to High(source_path_segments_local) do
+                begin
+                    segment_text_local := Trim(
+                        source_path_segments_local[segment_idx_local]);
+                    segment_units_local := get_candidate_text_unit_count(
+                        segment_text_local);
+                    if (segment_text_local = '') or (segment_units_local <= 0) or
+                        (path_offset_local + segment_units_local >
+                        Length(source_units_local)) then
+                    begin
+                        Exit(False);
+                    end;
+
+                    if path_offset_local < tail_start_local then
+                    begin
+                        { Incremental repair must not cut through an existing
+                          exact segment. It only reconsiders the final boundary. }
+                        if path_offset_local + segment_units_local >
+                            tail_start_local then
+                        begin
+                            Exit(False);
+                        end;
+                        if prefix_path_local <> '' then
+                        begin
+                            prefix_path_local := prefix_path_local +
+                                c_segment_path_separator;
+                        end;
+                        prefix_path_local := prefix_path_local + segment_text_local;
+                    end
+                    else
+                    begin
+                        Inc(suffix_segment_count_local);
+                    end;
+                    Inc(path_offset_local, segment_units_local);
+                end;
+
+                if (path_offset_local <> Length(source_units_local)) or
+                    (suffix_segment_count_local < 2) then
+                begin
+                    Exit;
+                end;
+
+                prefix_text_local := '';
+                for unit_idx_local := 0 to tail_start_local - 1 do
+                begin
+                    prefix_text_local := prefix_text_local +
+                        source_units_local[unit_idx_local];
+                end;
+                current_tail_text_local := '';
+                for unit_idx_local := tail_start_local to
+                    High(source_units_local) do
+                begin
+                    current_tail_text_local := current_tail_text_local +
+                        source_units_local[unit_idx_local];
+                end;
+
+                if not try_get_particle_tail_text_at_local(tail_start_local,
+                    particle_text_local) then
+                begin
+                    Exit;
+                end;
+                tail_exact_key_local := build_query_key_local(
+                    tail_start_local + 1, 2);
+                if (tail_exact_key_local = '') or
+                    (not try_get_best_exact_text_local(tail_exact_key_local, 2,
+                    500, repaired_tail_text_local,
+                    tail_exact_score_local)) then
+                begin
+                    Exit;
+                end;
+                repaired_tail_path_local := particle_text_local +
+                    c_segment_path_separator + repaired_tail_text_local;
+                repaired_tail_text_local := particle_text_local +
+                    repaired_tail_text_local;
+                if SameText(repaired_tail_text_local,
+                    current_tail_text_local) then
+                begin
+                    Exit;
+                end;
+
+                out_text_local := prefix_text_local + repaired_tail_text_local;
+                out_path_local := prefix_path_local;
+                if (out_path_local <> '') and (repaired_tail_path_local <> '') then
+                begin
+                    out_path_local := out_path_local + c_segment_path_separator;
+                end;
+                out_path_local := out_path_local + repaired_tail_path_local;
+                Result := (out_text_local <> '') and
+                    (not SameText(out_text_local, source_state.text)) and
+                    (get_candidate_text_unit_count(out_text_local) =
+                    syllable_count_local);
+            end;
+
             function try_repair_text_exact_span_splits_local(
                 const source_text_local: string; const source_path_local: string;
                 out out_text_local: string; out out_path_local: string): Boolean;
@@ -60377,6 +60512,33 @@ var
             if source_state.text = '' then
             begin
                 Exit;
+            end;
+
+            if incremental_tail_only then
+            begin
+                if not try_repair_incremental_tail_prefix_shift_local(
+                    repaired_text_local, repaired_path_local) then
+                begin
+                    Exit;
+                end;
+                if repaired_text_rewrites_directional_place_span_local or
+                    repaired_text_rewrites_protected_source_exact_span_local then
+                begin
+                    Exit;
+                end;
+
+                repaired_state.text := repaired_text_local;
+                repaired_state.path := repaired_path_local;
+                repaired_state.score := source_state.score + c_repair_bonus;
+                repaired_state.segments := Max(1,
+                    get_encoded_path_segment_count_local(repaired_path_local));
+                if m_config.debug_mode then
+                begin
+                    m_last_full_path_debug_info := m_last_full_path_debug_info +
+                        Format(' xfasttailrepair=[%s>%s]',
+                        [source_state.text, repaired_state.text]);
+                end;
+                Exit(True);
             end;
 
             if (source_state.path <> '') and
@@ -61762,9 +61924,11 @@ var
                 fast_state_to_upsert := fast_states[fast_state_idx];
                 if fast_state_idx = 0 then
                 begin
-                    if allow_fast_repair and
+                    if (allow_fast_repair or allow_incremental_tail_repair) and
                         try_repair_state_with_covering_exact_pairs_local(
-                        fast_states[fast_state_idx], fast_repaired_state) and
+                        fast_states[fast_state_idx], fast_repaired_state,
+                        allow_incremental_tail_repair and
+                        (not allow_fast_repair)) and
                         should_promote_fast_repair_state_local(
                         fast_state_to_upsert, fast_repaired_state) then
                     begin
@@ -116044,7 +116208,8 @@ begin
             m_candidates[0] := fast_chain_seed_candidate;
             phase_start_tick := GetTickCount64;
             ensure_best_exact_chunk_chain_complete_candidate_visible(
-                m_candidates, False, not m_composition_built_incrementally);
+                m_candidates, False, not m_composition_built_incrementally,
+                m_composition_built_incrementally);
             note_debug_helper_elapsed('tpldp', phase_start_tick);
             if (Length(m_candidates) > 0) and
                 (m_candidates[0].source = cs_rule) and
