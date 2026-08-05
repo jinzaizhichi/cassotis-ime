@@ -30,6 +30,7 @@ The project focus is:
 - TSF binaries support Win64 and Win32 (`svr.dll` / `svr32.dll`), while host process is Win64 only.
 - Candidate window, paging, selection, and commit flow are implemented.
 - Full Pinyin and six selectable Double Pinyin schemes—Microsoft, Xiaohe, Ziranma, Sogou, Ziguang, and Pinyin Jiajia—share the same candidate ranking and user-learning data.
+- Configurable fuzzy Pinyin is supported for common initial and final pairs.
 - Dictionary split is supported: simplified base DB, traditional base DB, and user DB.
 - Base dictionary now includes `dict_jianpin` index entries for initial-letter abbreviations (for example `jt -> 今天`; retroflex variants like `zsjs/zhshjsh` are both generated).
 - Full-path segmented phrase decoding is enabled (for example `womenjintian -> 我们今天`) while keeping prefix candidates for partial-commit fallback.
@@ -107,6 +108,8 @@ Cassotis v1.8.0 strengthens learned ranking on both paths. Long-sentence decodin
 
 Cassotis v1.9.0 upgrades long-sentence recall and ranking with a unified, corpus-trained complete-candidate pool. It retains structurally diverse, lexicon-constrained complete paths and ranks them with language-model, N-best consensus, and residual signals under confidence and latency controls.
 
+Cassotis v1.10.0 extends corpus-trained transition evidence to controlled 1+2 and 2+1 exact-word combinations for three-syllable input, while adding a conservative pairwise review of the leading complete long-sentence candidates. Both paths change results only when the learned evidence is sufficiently strong.
+
 To keep the deeper ranking pipeline responsive, search, second-stage ranking, residual comparison, and final selection reuse character-LM scores, exact dictionary lookups, path features, and context features. Expensive consensus and lookup work uses shared caches and explicit time budgets to limit long-tail latency. Exact and prefix candidate visibility remains protected, while repeated work across ranking stages is avoided.
 
 The statistical model is quantized into the local dictionary database, while the compact rerankers are exported as deterministic native Pascal parameters. Runtime scoring is local and bounded: it starts no PyTorch/ONNX environment or external model service and requires no network connection or GPU. Long-sentence and short-word ranking remain separate paths, so improvements to one do not replace the other's matching rules.
@@ -118,6 +121,7 @@ Corpus: 16,300 eligible Chinese sentences from the developer's own novel [**Eleg
 
 | Version | Top1 | Top2 | Mean (ms) | P50 (ms) | P95 (ms) | Max (ms) |
 |---|---:|---:|---:|---:|---:|---:|
+| `v1.10.0` | 9279/16300 (56.93%) | 10708/16300 (65.69%) | 60.39 | 47 | 188 | 1046 |
 | `v1.9.0` | 9121/16300 (55.96%) | 10685/16300 (65.55%) | 59.65 | 47 | 187 | 1172 |
 | `v1.8.1` | 8285/16300 (50.83%) | 9067/16300 (55.63%) | 72.44 | 47 | 281 | 1594 |
 | `v1.7.0` | 7940/16300 (48.71%) | 8642/16300 (53.02%) | 71.55 | 47 | 235 | 2047 |
@@ -147,6 +151,7 @@ See [BENCHMARK.md](BENCHMARK.md) for the shared corpus source, short-word case c
 
 | Version | Top1 | Top2 | Contested Top1 | Contested Top2 | Mean (ms) | P50 (ms) | P95 (ms) | Max (ms) |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|
+| `v1.10.0` | 61214/65000 (94.18%) | 63448/65000 (97.61%) | 9191/11728 (78.37%) | 10732/11728 (91.51%) | 4.425 | 3.446 | 9.591 | 84.68 |
 | `v1.9.0` | 61215/65000 (94.18%) | 63448/65000 (97.61%) | 9191/11728 (78.37%) | 10732/11728 (91.51%) | 4.214 | 3.268 | 9.113 | 71.004 |
 | `v1.8.1` | 61206/65000 (94.16%) | 63430/65000 (97.58%) | 9182/11728 (78.29%) | 10725/11728 (91.45%) | 4.85 | 3.721 | 10.413 | 107.714 |
 | `v1.7.0` | 61053/65000 (93.93%) | 63424/65000 (97.58%) | 9154/11728 (78.05%) | 10723/11728 (91.43%) | 4.668 | 3.468 | 10.013 | 158.471 |
