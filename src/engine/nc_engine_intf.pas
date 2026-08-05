@@ -90848,11 +90848,12 @@ var
                 Exit;
             end;
 
-            lookup_ok := dictionary_exact_lookup_cached(query_key, local_results);
-            if not lookup_ok then
-            begin
-                lookup_ok := dictionary_lookup_cached(query_key, local_results);
-            end;
+            { This helper scores dictionary phrase evidence for an already
+              parsed full-pinyin span. Prefix, jianpin and typo expansion
+              cannot produce stronger exact evidence here and made every
+              missing lattice span run the full short-query pipeline. }
+            lookup_ok := dictionary_exact_lookup_cached(query_key,
+                local_results);
             if not lookup_ok then
             begin
                 Exit;
@@ -91161,11 +91162,8 @@ var
                 Exit;
             end;
 
-            lookup_ok := dictionary_exact_lookup_cached(query_key, local_results);
-            if not lookup_ok then
-            begin
-                lookup_ok := dictionary_lookup_cached(query_key, local_results);
-            end;
+            lookup_ok := dictionary_exact_lookup_cached(query_key,
+                local_results);
             if not lookup_ok then
             begin
                 Exit;
