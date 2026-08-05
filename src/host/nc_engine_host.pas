@@ -513,7 +513,9 @@ begin
             (left_candidates[i].score <> right_candidates[i].score) or
             (left_candidates[i].source <> right_candidates[i].source) or
             (left_candidates[i].has_dict_weight <> right_candidates[i].has_dict_weight) or
-            (left_candidates[i].dict_weight <> right_candidates[i].dict_weight) then
+            (left_candidates[i].dict_weight <> right_candidates[i].dict_weight) or
+            (left_candidates[i].fuzzy_cost <> right_candidates[i].fuzzy_cost) or
+            (left_candidates[i].fuzzy_rules <> right_candidates[i].fuzzy_rules) then
         begin
             Result := False;
             Exit;
@@ -2905,6 +2907,8 @@ begin
     preserved_candidate.source := cs_rule;
     preserved_candidate.has_dict_weight := False;
     preserved_candidate.dict_weight := 0;
+    preserved_candidate.fuzzy_cost := 0;
+    preserved_candidate.fuzzy_rules := [];
     session := nil;
     session_instance_id := 0;
 

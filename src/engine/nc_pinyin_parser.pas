@@ -22,6 +22,7 @@ type
 
 function nc_is_pinyin_spelling_helper_compatible(const initial_value: string;
     const final_value: string): Boolean;
+function nc_is_canonical_pinyin_syllable(const value: string): Boolean;
 
 implementation
 
@@ -73,6 +74,114 @@ begin
     end;
 
     Result := True;
+end;
+
+function is_initial_final_compatible_common(const initial_value: string;
+    const final_value: string): Boolean;
+begin
+    if final_value = 'er' then
+    begin
+        Exit(False);
+    end;
+
+    if ((initial_value = 'b') or (initial_value = 'p') or
+        (initial_value = 'm') or (initial_value = 'f') or
+        (initial_value = 'w')) and (Length(final_value) > 1) and
+        (final_value[1] = 'u') then
+    begin
+        Exit(False);
+    end;
+
+    if not nc_is_pinyin_spelling_helper_compatible(initial_value,
+        final_value) then
+    begin
+        Exit(False);
+    end;
+
+    if (initial_value = 'j') or (initial_value = 'q') or
+        (initial_value = 'x') then
+    begin
+        if (final_value = 'ua') or (final_value = 'uai') or
+            (final_value = 'uang') or (final_value = 'ui') or
+            (final_value = 'uo') then
+        begin
+            Exit(False);
+        end;
+    end;
+
+    if (initial_value = 'zh') or (initial_value = 'ch') or
+        (initial_value = 'sh') or (initial_value = 'r') or
+        (initial_value = 'z') or (initial_value = 'c') or
+        (initial_value = 's') then
+    begin
+        if (final_value = 'ia') or (final_value = 'in') or
+            (final_value = 'ing') or (final_value = 'iu') or
+            (final_value = 'ie') or (final_value = 'ian') or
+            (final_value = 'iang') or (final_value = 'iao') or
+            (final_value = 'iong') or (final_value = 'ue') or
+            (final_value = 've') or (final_value = 'van') or
+            (final_value = 'vn') then
+        begin
+            Exit(False);
+        end;
+    end;
+
+    if ((initial_value = 'b') or (initial_value = 'p') or
+        (initial_value = 'm') or (initial_value = 'f') or
+        (initial_value = 'd') or (initial_value = 't') or
+        (initial_value = 'g') or (initial_value = 'k') or
+        (initial_value = 'h')) and
+        ((final_value = 'iang') or (final_value = 'iong')) then
+    begin
+        Exit(False);
+    end;
+
+    Result := True;
+end;
+
+function nc_is_canonical_pinyin_syllable(const value: string): Boolean;
+var
+    normalized: string;
+    initial_idx: Integer;
+    final_idx: Integer;
+    initial_value: string;
+    final_value: string;
+begin
+    normalized := LowerCase(Trim(value));
+    if normalized = '' then
+    begin
+        Exit(False);
+    end;
+
+    for final_idx := Low(c_finals_no_initial) to
+        High(c_finals_no_initial) do
+    begin
+        if normalized = c_finals_no_initial[final_idx] then
+        begin
+            Exit(True);
+        end;
+    end;
+
+    for initial_idx := Low(c_initials) to High(c_initials) do
+    begin
+        initial_value := c_initials[initial_idx];
+        if Copy(normalized, 1, Length(initial_value)) <> initial_value then
+        begin
+            Continue;
+        end;
+        final_value := Copy(normalized, Length(initial_value) + 1, MaxInt);
+        for final_idx := Low(c_finals) to High(c_finals) do
+        begin
+            if (final_value = c_finals[final_idx]) and
+                is_initial_final_compatible_common(initial_value,
+                final_value) then
+            begin
+                Exit(True);
+            end;
+        end;
+    end;
+
+    Result := False;
 end;
 
 function TncPinyinParser.parse(const input_text: string): TncPinyinParseResult; 

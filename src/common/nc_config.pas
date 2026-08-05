@@ -45,11 +45,15 @@ function get_default_dictionary_path_simplified: string;
 function get_default_dictionary_path_traditional: string;
 function get_default_user_dictionary_path: string;
 function nc_create_utf8_ini_file(const config_path: string): TMemIniFile;
+function nc_fuzzy_pinyin_rules_to_text(
+    const rules: TncFuzzyPinyinRules): string;
+function nc_parse_fuzzy_pinyin_rules_text(
+    const value: string): TncFuzzyPinyinRules;
 
 implementation
 
 const
-    c_config_version = 14;
+    c_config_version = 15;
     c_font_name_utf8_migration_version = 11;
     c_candidate_font_size_config_version = 2;
     c_config_mutex_name = 'Local\CassotisIme_Config_v1';
@@ -123,6 +127,90 @@ begin
         Exit(pis_pinyinjiajia_shuangpin);
     end;
     Result := pis_full_pinyin;
+end;
+
+function fuzzy_pinyin_rule_to_text(const value: TncFuzzyPinyinRule): string;
+begin
+    case value of
+        fpr_z_zh: Result := 'z-zh';
+        fpr_c_ch: Result := 'c-ch';
+        fpr_s_sh: Result := 's-sh';
+        fpr_l_n: Result := 'l-n';
+        fpr_f_h: Result := 'f-h';
+        fpr_r_l: Result := 'r-l';
+        fpr_an_ang: Result := 'an-ang';
+        fpr_en_eng: Result := 'en-eng';
+        fpr_in_ing: Result := 'in-ing';
+        fpr_ian_iang: Result := 'ian-iang';
+        fpr_uan_uang: Result := 'uan-uang';
+    else
+        Result := '';
+    end;
+end;
+
+function try_parse_fuzzy_pinyin_rule(const value: string;
+    out rule: TncFuzzyPinyinRule): Boolean;
+var
+    candidate: TncFuzzyPinyinRule;
+    normalized: string;
+begin
+    normalized := LowerCase(Trim(value));
+    for candidate := Low(TncFuzzyPinyinRule) to
+        High(TncFuzzyPinyinRule) do
+    begin
+        if SameText(normalized, fuzzy_pinyin_rule_to_text(candidate)) then
+        begin
+            rule := candidate;
+            Exit(True);
+        end;
+    end;
+
+    rule := Low(TncFuzzyPinyinRule);
+    Result := False;
+end;
+
+function nc_fuzzy_pinyin_rules_to_text(
+    const rules: TncFuzzyPinyinRules): string;
+var
+    rule: TncFuzzyPinyinRule;
+    rule_text: string;
+begin
+    Result := '';
+    for rule := Low(TncFuzzyPinyinRule) to High(TncFuzzyPinyinRule) do
+    begin
+        if not (rule in rules) then
+        begin
+            Continue;
+        end;
+        rule_text := fuzzy_pinyin_rule_to_text(rule);
+        if rule_text = '' then
+        begin
+            Continue;
+        end;
+        if Result <> '' then
+        begin
+            Result := Result + ',';
+        end;
+        Result := Result + rule_text;
+    end;
+end;
+
+function nc_parse_fuzzy_pinyin_rules_text(
+    const value: string): TncFuzzyPinyinRules;
+var
+    parts: TArray<string>;
+    part: string;
+    rule: TncFuzzyPinyinRule;
+begin
+    Result := [];
+    parts := value.Split([',', ';', ' '], TStringSplitOptions.ExcludeEmpty);
+    for part in parts do
+    begin
+        if try_parse_fuzzy_pinyin_rule(part, rule) then
+        begin
+            Include(Result, rule);
+        end;
+    end;
 end;
 
 function try_extract_ini_section_name(const line_text: string; out section_name: string): Boolean;
@@ -884,6 +972,8 @@ var
 begin
     Result.input_mode := im_chinese;
     Result.pinyin_input_scheme := pis_full_pinyin;
+    Result.fuzzy_pinyin_enabled := False;
+    Result.fuzzy_pinyin_rules := [];
     Result.max_candidates := 9;
     Result.enable_ctrl_space_toggle := False;
     Result.enable_shift_space_full_width_toggle := True;
@@ -936,6 +1026,10 @@ begin
             'pinyin_scheme', 'full-pinyin');
         Result.pinyin_input_scheme := parse_pinyin_input_scheme_text(
             stored_pinyin_scheme_text);
+        Result.fuzzy_pinyin_enabled := safe_ini_read_bool(ini, 'pinyin',
+            'fuzzy_enabled', False);
+        Result.fuzzy_pinyin_rules := nc_parse_fuzzy_pinyin_rules_text(
+            safe_ini_read_string(ini, 'pinyin', 'fuzzy_rules', ''));
 
         Result.max_candidates := 9;
         Result.enable_ctrl_space_toggle := False;
@@ -1022,6 +1116,8 @@ begin
             not safe_ini_value_exists(ini, 'engine', 'pinyin_scheme') or
             not SameText(Trim(stored_pinyin_scheme_text),
                 pinyin_input_scheme_to_text(Result.pinyin_input_scheme)) or
+            not safe_ini_value_exists(ini, 'pinyin', 'fuzzy_enabled') or
+            not safe_ini_value_exists(ini, 'pinyin', 'fuzzy_rules') or
             safe_ini_value_exists(ini, 'engine', 'max_candidates') or
             safe_ini_value_exists(ini, 'engine', 'enable_ctrl_space_toggle') or
             safe_ini_value_exists(ini, 'engine', 'enable_shift_space_full_width_toggle') or
@@ -1104,12 +1200,17 @@ begin
         shortcut_config := config.shortcuts;
         nc_normalize_shortcut_config(shortcut_config);
         ini.EraseSection('engine');
+        ini.EraseSection('pinyin');
         ini.EraseSection('appearance');
         ini.EraseSection('dictionary');
         ini.EraseSection('shortcuts');
         ini.WriteInteger('engine', 'input_mode', Ord(config.input_mode));
         ini.WriteString('engine', 'pinyin_scheme',
             pinyin_input_scheme_to_text(config.pinyin_input_scheme));
+        ini.WriteBool('pinyin', 'fuzzy_enabled',
+            config.fuzzy_pinyin_enabled);
+        ini.WriteString('pinyin', 'fuzzy_rules',
+            nc_fuzzy_pinyin_rules_to_text(config.fuzzy_pinyin_rules));
         ini.WriteBool('engine', 'full_width_mode', config.full_width_mode);
         ini.WriteBool('engine', 'punctuation_full_width', config.punctuation_full_width);
         ini.WriteInteger('engine', 'debug', Ord(config.debug_mode));

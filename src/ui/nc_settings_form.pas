@@ -147,6 +147,7 @@ type
         m_page_control: TncFlatPageControl;
         m_tab_general: TTabSheet;
         m_tab_appearance: TTabSheet;
+        m_tab_fuzzy_pinyin: TTabSheet;
         m_tab_shortcuts: TTabSheet;
         m_tab_logging: TTabSheet;
         m_tab_advanced: TTabSheet;
@@ -157,6 +158,9 @@ type
         m_btn_cancel: TncModernButton;
         m_combo_input_mode: TComboBox;
         m_combo_pinyin_input_scheme: TComboBox;
+        m_chk_fuzzy_pinyin_enabled: TncModernCheckBox;
+        m_chk_fuzzy_pinyin_rules:
+            array[TncFuzzyPinyinRule] of TncModernCheckBox;
         m_combo_punctuation_mode: TComboBox;
         m_chk_full_width_mode: TncModernCheckBox;
         m_chk_show_status_widget: TncModernCheckBox;
@@ -199,6 +203,7 @@ type
         procedure update_dialog_height_for_content;
         procedure add_general_controls;
         procedure add_appearance_controls;
+        procedure add_fuzzy_pinyin_controls;
         procedure add_shortcut_controls;
         procedure add_logging_controls;
         procedure add_advanced_controls;
@@ -206,6 +211,8 @@ type
         procedure mark_dirty(Sender: TObject);
         procedure update_apply_button;
         procedure update_logging_controls;
+        procedure update_fuzzy_pinyin_controls;
+        procedure on_fuzzy_pinyin_enabled_click(Sender: TObject);
         procedure restore_current_page_defaults;
         procedure load_from_config;
         procedure populate_candidate_font_combo;
@@ -304,6 +311,7 @@ resourcestring
     SSettingsTitle = 'Cassotis 设置';
     STabGeneral = '常规';
     STabAppearance = '外观';
+    STabFuzzyPinyin = '模糊拼音';
     STabShortcuts = '快捷键';
     STabLogging = '日志';
     STabAdvanced = '高级';
@@ -332,6 +340,7 @@ resourcestring
     SOptionSogouShuangpin = '搜狗双拼';
     SOptionZiguangShuangpin = '紫光双拼';
     SOptionPinyinJiajiaShuangpin = '拼音加加';
+    SCheckEnableFuzzyPinyin = '启用模糊拼音';
     SLabelPunctuationMode = '标点';
     SCheckFullWidthMode = '使用全角输入';
     SCheckShowStatusWidget = '显示状态浮窗';
@@ -1298,6 +1307,8 @@ function build_default_engine_config_value: TncEngineConfig;
 begin
     Result.input_mode := im_chinese;
     Result.pinyin_input_scheme := pis_full_pinyin;
+    Result.fuzzy_pinyin_enabled := False;
+    Result.fuzzy_pinyin_rules := [];
     Result.max_candidates := 9;
     Result.enable_ctrl_space_toggle := False;
     Result.enable_shift_space_full_width_toggle := True;
@@ -1338,6 +1349,7 @@ begin
     configure_buttons;
     add_general_controls;
     add_appearance_controls;
+    add_fuzzy_pinyin_controls;
     add_shortcut_controls;
     add_logging_controls;
     add_advanced_controls;
@@ -1558,6 +1570,7 @@ end;
 procedure TncSettingsForm.update_scaled_control_metrics;
 var
     dpi: Integer;
+    fuzzy_rule: TncFuzzyPinyinRule;
 
     procedure update_check_box_metrics(const control: TncModernCheckBox);
     begin
@@ -1576,6 +1589,12 @@ begin
     end;
     m_scaled_dpi := dpi;
     update_check_box_metrics(m_chk_full_width_mode);
+    update_check_box_metrics(m_chk_fuzzy_pinyin_enabled);
+    for fuzzy_rule := Low(TncFuzzyPinyinRule) to
+        High(TncFuzzyPinyinRule) do
+    begin
+        update_check_box_metrics(m_chk_fuzzy_pinyin_rules[fuzzy_rule]);
+    end;
     update_check_box_metrics(m_chk_show_status_widget);
     update_check_box_metrics(m_chk_log_enabled);
     update_check_box_metrics(m_chk_debug_mode);
@@ -1638,6 +1657,10 @@ begin
     m_tab_appearance := TTabSheet.Create(m_page_control);
     m_tab_appearance.PageControl := m_page_control;
     m_tab_appearance.Caption := STabAppearance;
+
+    m_tab_fuzzy_pinyin := TTabSheet.Create(m_page_control);
+    m_tab_fuzzy_pinyin.PageControl := m_page_control;
+    m_tab_fuzzy_pinyin.Caption := STabFuzzyPinyin;
 
     m_tab_shortcuts := TTabSheet.Create(m_page_control);
     m_tab_shortcuts.PageControl := m_page_control;
@@ -1806,6 +1829,44 @@ begin
 
     Inc(top, scale_ui(c_row_height + c_general_row_gap));
     m_chk_full_width_mode := create_check_box(Self, defaults_group, top, SCheckFullWidthMode, mark_dirty);
+end;
+
+procedure TncSettingsForm.add_fuzzy_pinyin_controls;
+var
+    top: Integer;
+    fuzzy_group: TPanel;
+    fuzzy_rule: TncFuzzyPinyinRule;
+    rule_index: Integer;
+    rule_column: Integer;
+    rule_row: Integer;
+    rule_left: Integer;
+    rule_width: Integer;
+const
+    c_fuzzy_rule_captions: array[TncFuzzyPinyinRule] of string = (
+        'z / zh', 'c / ch', 's / sh', 'l / n', 'f / h', 'r / l',
+        'an / ang', 'en / eng', 'in / ing', 'ian / iang', 'uan / uang'
+    );
+begin
+    fuzzy_group := create_section_group(Self, m_tab_fuzzy_pinyin, '',
+        scale_ui(18), 158);
+    top := scale_ui(c_untitled_section_inner_top);
+    m_chk_fuzzy_pinyin_enabled := create_check_box(Self, fuzzy_group, top,
+        SCheckEnableFuzzyPinyin, on_fuzzy_pinyin_enabled_click);
+
+    rule_width := (fuzzy_group.ClientWidth - scale_ui(c_label_left * 2)) div 3;
+    for fuzzy_rule := Low(TncFuzzyPinyinRule) to High(TncFuzzyPinyinRule) do
+    begin
+        rule_index := Ord(fuzzy_rule) - Ord(Low(TncFuzzyPinyinRule));
+        rule_column := rule_index mod 3;
+        rule_row := rule_index div 3;
+        rule_left := scale_ui(c_label_left) + (rule_column * rule_width);
+        m_chk_fuzzy_pinyin_rules[fuzzy_rule] := create_check_box(Self,
+            fuzzy_group, top + scale_ui(28 + (rule_row * 25)),
+            c_fuzzy_rule_captions[fuzzy_rule], mark_dirty);
+        m_chk_fuzzy_pinyin_rules[fuzzy_rule].Left := rule_left;
+        m_chk_fuzzy_pinyin_rules[fuzzy_rule].Width := rule_width;
+    end;
+    update_fuzzy_pinyin_controls;
 end;
 
 procedure TncSettingsForm.add_appearance_controls;
@@ -2502,11 +2563,34 @@ begin
     end;
 end;
 
+procedure TncSettingsForm.update_fuzzy_pinyin_controls;
+var
+    enabled: Boolean;
+    rule: TncFuzzyPinyinRule;
+begin
+    enabled := (m_chk_fuzzy_pinyin_enabled <> nil) and
+        m_chk_fuzzy_pinyin_enabled.Checked;
+    for rule := Low(TncFuzzyPinyinRule) to High(TncFuzzyPinyinRule) do
+    begin
+        if m_chk_fuzzy_pinyin_rules[rule] <> nil then
+        begin
+            m_chk_fuzzy_pinyin_rules[rule].Enabled := enabled;
+        end;
+    end;
+end;
+
+procedure TncSettingsForm.on_fuzzy_pinyin_enabled_click(Sender: TObject);
+begin
+    update_fuzzy_pinyin_controls;
+    mark_dirty(Sender);
+end;
+
 procedure TncSettingsForm.restore_current_page_defaults;
 var
     default_engine_config: TncEngineConfig;
     default_log_config: TncLogConfig;
     candidate_font_name: string;
+    fuzzy_rule: TncFuzzyPinyinRule;
     restored: Boolean;
 begin
     default_engine_config := build_default_engine_config_value;
@@ -2548,6 +2632,17 @@ begin
         set_candidate_page_size_combo(default_engine_config.candidate_page_size);
         set_candidate_color_scheme_combo(default_engine_config.candidate_color_scheme);
     end
+    else if m_page_control.ActivePage = m_tab_fuzzy_pinyin then
+    begin
+        m_chk_fuzzy_pinyin_enabled.Checked :=
+            default_engine_config.fuzzy_pinyin_enabled;
+        for fuzzy_rule := Low(TncFuzzyPinyinRule) to
+            High(TncFuzzyPinyinRule) do
+        begin
+            m_chk_fuzzy_pinyin_rules[fuzzy_rule].Checked :=
+                fuzzy_rule in default_engine_config.fuzzy_pinyin_rules;
+        end;
+    end
     else if m_page_control.ActivePage = m_tab_shortcuts then
     begin
         load_shortcut_controls(default_engine_config.shortcuts);
@@ -2586,6 +2681,7 @@ begin
 
     m_dirty := True;
     update_logging_controls;
+    update_fuzzy_pinyin_controls;
     update_candidate_preview;
     update_apply_button;
 end;
@@ -3168,6 +3264,7 @@ end;
 procedure TncSettingsForm.load_from_config;
 var
     candidate_font_name: string;
+    fuzzy_rule: TncFuzzyPinyinRule;
 begin
     if m_combo_input_mode <> nil then
     begin
@@ -3196,6 +3293,20 @@ begin
             (m_combo_pinyin_input_scheme.ItemIndex >= m_combo_pinyin_input_scheme.Items.Count) then
         begin
             m_combo_pinyin_input_scheme.ItemIndex := Ord(pis_full_pinyin);
+        end;
+    end;
+    if m_chk_fuzzy_pinyin_enabled <> nil then
+    begin
+        m_chk_fuzzy_pinyin_enabled.Checked :=
+            m_engine_config.fuzzy_pinyin_enabled;
+    end;
+    for fuzzy_rule := Low(TncFuzzyPinyinRule) to
+        High(TncFuzzyPinyinRule) do
+    begin
+        if m_chk_fuzzy_pinyin_rules[fuzzy_rule] <> nil then
+        begin
+            m_chk_fuzzy_pinyin_rules[fuzzy_rule].Checked :=
+                fuzzy_rule in m_engine_config.fuzzy_pinyin_rules;
         end;
     end;
     if m_combo_punctuation_mode <> nil then
@@ -3267,6 +3378,7 @@ begin
     end;
     m_dirty := False;
     update_logging_controls;
+    update_fuzzy_pinyin_controls;
     update_candidate_preview;
     update_apply_button;
 end;
@@ -3303,6 +3415,7 @@ var
     other_index: Integer;
     action: TncShortcutAction;
     other_action: TncShortcutAction;
+    fuzzy_rule: TncFuzzyPinyinRule;
 begin
     next_config := m_engine_config;
     next_log_config := m_log_config;
@@ -3351,6 +3464,18 @@ begin
             next_config.pinyin_input_scheme := pis_pinyinjiajia_shuangpin;
     else
         next_config.pinyin_input_scheme := pis_full_pinyin;
+    end;
+
+    next_config.fuzzy_pinyin_enabled :=
+        m_chk_fuzzy_pinyin_enabled.Checked;
+    next_config.fuzzy_pinyin_rules := [];
+    for fuzzy_rule := Low(TncFuzzyPinyinRule) to
+        High(TncFuzzyPinyinRule) do
+    begin
+        if m_chk_fuzzy_pinyin_rules[fuzzy_rule].Checked then
+        begin
+            Include(next_config.fuzzy_pinyin_rules, fuzzy_rule);
+        end;
     end;
 
     next_config.full_width_mode := m_chk_full_width_mode.Checked;

@@ -5,7 +5,7 @@ CREATE TABLE IF NOT EXISTS meta (
     value TEXT NOT NULL
 );
 
-INSERT OR IGNORE INTO meta(key, value) VALUES('schema_version', '13');
+INSERT OR IGNORE INTO meta(key, value) VALUES('schema_version', '14');
 
 CREATE TABLE IF NOT EXISTS dict_base (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -77,6 +77,17 @@ CREATE TABLE IF NOT EXISTS dict_user_stats (
 
 CREATE INDEX IF NOT EXISTS idx_dict_user_stats_pinyin ON dict_user_stats(pinyin);
 CREATE INDEX IF NOT EXISTS idx_dict_user_stats_text ON dict_user_stats(text);
+
+CREATE TABLE IF NOT EXISTS dict_user_fuzzy_choice (
+    pinyin TEXT NOT NULL,
+    text TEXT NOT NULL,
+    commit_count INTEGER DEFAULT 0,
+    last_used INTEGER DEFAULT 0,
+    PRIMARY KEY(pinyin, text)
+);
+
+CREATE INDEX IF NOT EXISTS idx_dict_user_fuzzy_choice_pinyin
+ON dict_user_fuzzy_choice(pinyin);
 
 CREATE TABLE IF NOT EXISTS dict_user_query_latest (
     query_pinyin TEXT NOT NULL PRIMARY KEY,

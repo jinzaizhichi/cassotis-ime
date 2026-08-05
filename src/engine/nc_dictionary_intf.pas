@@ -16,6 +16,13 @@ type
             out results: TncCandidateList): Boolean; virtual;
         function lookup_full_pinyin_prefix(const pinyin_prefix: string;
             out results: TncCandidateList): Boolean; virtual;
+        function lookup_fuzzy_full_pinyin(const pinyin: string;
+            out results: TncCandidateList): Boolean; virtual;
+        function lookup_fuzzy_full_pinyin_bounded(const pinyin: string;
+            out results: TncCandidateList; const max_cost: Integer;
+            const max_variants: Integer;
+            const max_syllables: Integer;
+            const max_candidates_per_variant: Integer = 0): Boolean; virtual;
         function lookup_literal_user_words(const query: string;
             out results: TncCandidateList): Boolean; virtual;
         function resolve_literal_user_word_pinyin(const query: string;
@@ -27,6 +34,10 @@ type
         procedure commit_learning_batch; virtual;
         procedure rollback_learning_batch; virtual;
         procedure set_debug_mode(const enabled: Boolean); virtual;
+        procedure set_fuzzy_pinyin_config(const enabled: Boolean;
+            const rules: TncFuzzyPinyinRules); virtual;
+        procedure record_fuzzy_choice(const pinyin: string;
+            const text: string); virtual;
         procedure record_commit(const pinyin: string; const text: string;
             const explicit_choice: Boolean = False); virtual;
         procedure record_context_pair(const left_text: string; const committed_text: string); virtual;
@@ -91,6 +102,22 @@ begin
     Result := False;
 end;
 
+function TncDictionaryProvider.lookup_fuzzy_full_pinyin(const pinyin: string;
+    out results: TncCandidateList): Boolean;
+begin
+    SetLength(results, 0);
+    Result := False;
+end;
+
+function TncDictionaryProvider.lookup_fuzzy_full_pinyin_bounded(
+    const pinyin: string; out results: TncCandidateList;
+    const max_cost: Integer; const max_variants: Integer;
+    const max_syllables: Integer;
+    const max_candidates_per_variant: Integer): Boolean;
+begin
+    Result := lookup_fuzzy_full_pinyin(pinyin, results);
+end;
+
 function TncDictionaryProvider.lookup_literal_user_words(const query: string;
     out results: TncCandidateList): Boolean;
 begin
@@ -153,6 +180,16 @@ begin
 end;
 
 procedure TncDictionaryProvider.set_debug_mode(const enabled: Boolean);
+begin
+end;
+
+procedure TncDictionaryProvider.set_fuzzy_pinyin_config(
+    const enabled: Boolean; const rules: TncFuzzyPinyinRules);
+begin
+end;
+
+procedure TncDictionaryProvider.record_fuzzy_choice(const pinyin: string;
+    const text: string);
 begin
 end;
 

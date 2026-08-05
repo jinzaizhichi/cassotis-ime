@@ -36,6 +36,7 @@ type
         canonical_pinyin: string;
         explicit_choice: Boolean;
         literal_choice: Boolean;
+        fuzzy_choice: Boolean;
     end;
 
     TncInferredPathCacheValue = record
@@ -487,6 +488,8 @@ type
         m_pending_commit_allow_learning: Boolean;
         m_pending_commit_explicit_choice: Boolean;
         m_pending_commit_literal_choice: Boolean;
+        m_pending_commit_fuzzy_choice: Boolean;
+        m_pending_commit_fuzzy_text: string;
         m_pending_commit_segment_path: string;
         m_pending_commit_query_key: string;
         m_last_debug_commit_segment_path: string;
@@ -575,6 +578,7 @@ type
         function get_candidate_limit: Integer;
         function get_candidate_page_size: Integer;
         function get_total_candidate_limit: Integer;
+        function is_fuzzy_pinyin_active: Boolean; inline;
         function create_dictionary_from_config: TncDictionaryProvider;
         function take_cached_dictionary_provider(const variant: TncDictionaryVariant;
             const base_path: string; const user_path: string): TncDictionaryProvider;
@@ -730,14 +734,16 @@ type
         procedure push_confirmed_segment(const text: string; const pinyin: string;
             const input_code: string; const canonical_pinyin: string = '';
             const explicit_choice: Boolean = False;
-            const literal_choice: Boolean = False);
+            const literal_choice: Boolean = False;
+            const fuzzy_choice: Boolean = False);
         function pop_confirmed_segment(out out_segment: TncConfirmedSegment): Boolean;
         procedure rebuild_confirmed_text;
         function rollback_last_segment: Boolean;
         procedure apply_partial_commit(const selected_text: string; const remaining_pinyin: string;
             const segment_path: string = ''; const explicit_choice: Boolean = False;
             const remaining_input_code: string = '';
-            const literal_choice: Boolean = False);
+            const literal_choice: Boolean = False;
+            const fuzzy_choice: Boolean = False);
         procedure update_left_context(const committed_text: string);
         procedure record_context_pair(const left_text: string; const committed_text: string);
         procedure note_session_commit(const text: string);
@@ -754,7 +760,9 @@ type
         procedure set_pending_commit(const text: string; const remaining_pinyin: string = '';
             const allow_learning: Boolean = True; const segment_path: string = '';
             const explicit_choice: Boolean = False; const remaining_input_code: string = '';
-            const literal_choice: Boolean = False);
+            const literal_choice: Boolean = False;
+            const fuzzy_choice: Boolean = False;
+            const fuzzy_choice_text: string = '');
         procedure clear_pending_commit;
         procedure update_dictionary_state;
         procedure toggle_input_mode;
@@ -925,6 +933,8 @@ type
         prev_pinyin_text: string;
         prev_prev_text: string;
         path_text: string;
+        fuzzy_cost: Integer;
+        fuzzy_rules: TncFuzzyPinyinRules;
     end;
 
     TncLongLocalRerankPoolItem = record
@@ -1068,6 +1078,8 @@ begin
     m_pending_commit_allow_learning := True;
     m_pending_commit_explicit_choice := False;
     m_pending_commit_literal_choice := False;
+    m_pending_commit_fuzzy_choice := False;
+    m_pending_commit_fuzzy_text := '';
     m_pending_commit_query_key := '';
     m_last_lookup_key := '';
     m_last_lookup_normalized_from := '';
@@ -3320,6 +3332,8 @@ begin
     m_pending_commit_allow_learning := True;
     m_pending_commit_explicit_choice := False;
     m_pending_commit_literal_choice := False;
+    m_pending_commit_fuzzy_choice := False;
+    m_pending_commit_fuzzy_text := '';
     m_pending_commit_segment_path := '';
     m_pending_commit_query_key := '';
     m_last_lookup_key := '';
@@ -3548,6 +3562,8 @@ begin
     m_pending_commit_allow_learning := True;
     m_pending_commit_explicit_choice := False;
     m_pending_commit_literal_choice := False;
+    m_pending_commit_fuzzy_choice := False;
+    m_pending_commit_fuzzy_text := '';
     m_pending_commit_segment_path := '';
     m_pending_commit_query_key := '';
     m_page_index := 0;
@@ -3561,12 +3577,16 @@ var
     previous_config: TncEngineConfig;
     dictionary_changed: Boolean;
     input_scheme_changed: Boolean;
+    fuzzy_pinyin_changed: Boolean;
     previous_page_size: Integer;
 begin
     previous_config := m_config;
     previous_page_size := get_candidate_page_size;
     dictionary_changed := m_config.dictionary_variant <> config.dictionary_variant;
     input_scheme_changed := m_config.pinyin_input_scheme <> config.pinyin_input_scheme;
+    fuzzy_pinyin_changed :=
+        (m_config.fuzzy_pinyin_enabled <> config.fuzzy_pinyin_enabled) or
+        (m_config.fuzzy_pinyin_rules <> config.fuzzy_pinyin_rules);
     m_config := config;
     nc_normalize_shortcut_config(m_config.shortcuts);
     m_config.candidate_page_key_scheme :=
@@ -3587,11 +3607,25 @@ begin
     if m_dictionary <> nil then
     begin
         m_dictionary.set_debug_mode(m_config.debug_mode);
+        m_dictionary.set_fuzzy_pinyin_config(
+            m_config.fuzzy_pinyin_enabled, m_config.fuzzy_pinyin_rules);
     end;
     if dictionary_changed then
     begin
         store_current_dictionary_provider(previous_config);
         set_dictionary_provider(create_dictionary_from_config);
+    end;
+    if fuzzy_pinyin_changed and (not dictionary_changed) then
+    begin
+        if m_build_lookup_cache <> nil then
+        begin
+            m_build_lookup_cache.Clear;
+        end;
+        if m_composition_text <> '' then
+        begin
+            build_candidates;
+            normalize_page_and_selection;
+        end;
     end;
 end;
 
@@ -3611,6 +3645,8 @@ begin
     if m_dictionary <> nil then
     begin
         m_dictionary.set_debug_mode(m_config.debug_mode);
+        m_dictionary.set_fuzzy_pinyin_config(
+            m_config.fuzzy_pinyin_enabled, m_config.fuzzy_pinyin_rules);
     end;
     m_context_db_bonus_cache_key := '';
     if m_context_db_bonus_cache <> nil then
@@ -3776,6 +3812,12 @@ end;
 function TncEngine.get_candidate_limit: Integer;
 begin
     Result := c_default_page_size;
+end;
+
+function TncEngine.is_fuzzy_pinyin_active: Boolean;
+begin
+    Result := m_config.fuzzy_pinyin_enabled and
+        (m_config.fuzzy_pinyin_rules <> []);
 end;
 
 function TncEngine.get_candidate_page_size: Integer;
@@ -4446,6 +4488,8 @@ var
     procedure filter_short_query_nonlexicon_complete_noise(
         var candidates: TncCandidateList); forward;
     function build_exact_leading_prefix_partial_candidates(
+        const query_text: string; out out_candidates: TncCandidateList): Boolean; forward;
+    function build_fuzzy_short_query_recall_candidates(
         const query_text: string; out out_candidates: TncCandidateList): Boolean; forward;
     function top_complete_candidate_is_reliable_local(
         const candidates: TncCandidateList): Boolean; forward;
@@ -8393,6 +8437,19 @@ var
             for in_idx_local := 0 to High(candidates) do
             begin
                 candidate_text_local := Trim(candidates[in_idx_local].text);
+                if is_fuzzy_pinyin_active and
+                    (candidates[in_idx_local].fuzzy_cost > 0) and
+                    (Trim(candidates[in_idx_local].comment) = '') and
+                    (get_candidate_text_unit_count(candidate_text_local) =
+                    input_syllable_count) then
+                begin
+                    if out_idx_local <> in_idx_local then
+                    begin
+                        candidates[out_idx_local] := candidates[in_idx_local];
+                    end;
+                    Inc(out_idx_local);
+                    Continue;
+                end;
                 if (Trim(candidates[in_idx_local].comment) = '') and
                     ((((best_complete_exact_text_local <> '') and
                     SameText(candidate_text_local,
@@ -8588,6 +8645,8 @@ var
                 candidate_is_unsupported_complete_local :=
                     (Trim(candidates[in_idx_local].comment) = '') and
                     (candidate_text_local <> '') and
+                    ((not is_fuzzy_pinyin_active) or
+                    (candidates[in_idx_local].fuzzy_cost <= 0)) and
                     (candidates[in_idx_local].source <> cs_user) and
                     (get_candidate_text_unit_count(candidate_text_local) =
                     input_syllable_count) and
@@ -9102,6 +9161,11 @@ var
                 end;
             begin
                 Result := True;
+                if is_fuzzy_pinyin_active and
+                    (candidate.fuzzy_cost > 0) then
+                begin
+                    Exit;
+                end;
                 if (m_dictionary = nil) or (candidate.source = cs_user) or
                     (Trim(candidate.comment) <> '') or
                     (get_candidate_text_unit_count(text_value) <>
@@ -11448,6 +11512,7 @@ var
         const allow_expensive_prefix_rerank: Boolean = True;
         const allow_dangling_initial_prediction: Boolean = True);
     var
+        fuzzy_short_candidates_local: TncCandidateList;
         filtered_prefix_misaligned_count_local: Integer;
         deduped_prefix_candidate_count_local: Integer;
         top_partial_head_units_local: Integer;
@@ -11797,6 +11862,11 @@ var
 
             begin
                 Result := True;
+                if is_fuzzy_pinyin_active and
+                    (candidate.fuzzy_cost > 0) then
+                begin
+                    Exit;
+                end;
                 if (m_dictionary = nil) or (candidate.source = cs_user) or
                     (Trim(candidate.comment) <> '') or
                     ((get_candidate_text_unit_count(text_value) <>
@@ -12022,6 +12092,10 @@ var
                 end;
             begin
                 Result := False;
+                if is_fuzzy_pinyin_active and (candidate.fuzzy_cost > 0) then
+                begin
+                    Exit;
+                end;
                 candidate_units_local := split_text_units(text_value);
                 matched_unit_count_local := Length(candidate_units_local);
                 if (Length(query_syllables_local) <> input_syllable_count) or
@@ -12257,6 +12331,8 @@ var
                 if (Trim(candidates[in_idx_local].comment) = '') and
                     (candidate_text_local <> '') and
                     (candidates[in_idx_local].source <> cs_user) and
+                    (not (is_fuzzy_pinyin_active and
+                    (candidates[in_idx_local].fuzzy_cost > 0))) and
                     (get_candidate_text_unit_count(candidate_text_local) =
                     input_syllable_count) and
                     (not has_exact_full_query_support_local(
@@ -13535,6 +13611,13 @@ var
             (Pos('short4prefixraw=1', debug_extra) > 0);
         filtered_prefix_misaligned_count_local := 0;
         deduped_prefix_candidate_count_local := 0;
+        if build_fuzzy_short_query_recall_candidates(lookup_text,
+            fuzzy_short_candidates_local) then
+        begin
+            m_candidates := merge_candidate_lists(m_candidates,
+                fuzzy_short_candidates_local, 0);
+            sort_candidates_lightweight(m_candidates);
+        end;
         ensure_fixed_head_tail_complete_from_visible_partial_local(m_candidates);
         if build_short_particle_tail_dictionary_candidates(lookup_text,
             short_particle_tail_candidates) then
@@ -17885,7 +17968,12 @@ var
         function get_candidate_effective_weight_local(const local_candidate: TncCandidate;
             const local_source_bonus: Integer): Integer;
         begin
-            if local_candidate.has_dict_weight then
+            if is_fuzzy_pinyin_active and
+                (local_candidate.fuzzy_cost > 0) then
+            begin
+                Result := local_candidate.score;
+            end
+            else if local_candidate.has_dict_weight then
             begin
                 Result := local_candidate.dict_weight;
             end
@@ -23567,7 +23655,8 @@ var
             const candidate: TncCandidate; const chunk_syllables: Integer): Integer;
         begin
             Result := candidate.score;
-            if candidate.has_dict_weight then
+            if ((not is_fuzzy_pinyin_active) or
+                (candidate.fuzzy_cost <= 0)) and candidate.has_dict_weight then
             begin
                 if chunk_syllables <= 2 then
                 begin
@@ -30836,6 +30925,18 @@ var
             end;
 
             if candidates[idx].has_dict_weight or (candidates[idx].source = cs_user) then
+            begin
+                if out_idx <> idx then
+                begin
+                    candidates[out_idx] := candidates[idx];
+                end;
+                Inc(out_idx);
+                Continue;
+            end;
+
+            if is_fuzzy_pinyin_active and
+                (candidates[idx].fuzzy_cost > 0) and
+                (candidate_text_units = input_syllable_count) then
             begin
                 if out_idx <> idx then
                 begin
@@ -72666,6 +72767,33 @@ var
             out_results);
     end;
 
+    function dictionary_fuzzy_lattice_lookup_cached(const pinyin_key: string;
+        out out_results: TncCandidateList): Boolean;
+    var
+        cache_key: string;
+    begin
+        SetLength(out_results, 0);
+        if (m_dictionary = nil) or (pinyin_key = '') or
+            (not m_config.fuzzy_pinyin_enabled) or
+            (m_config.fuzzy_pinyin_rules = []) then
+        begin
+            Exit(False);
+        end;
+
+        cache_key := '#fuzzy-lattice#' + pinyin_key;
+        if lookup_cache.TryGetValue(cache_key, out_results) then
+        begin
+            Exit(Length(out_results) > 0);
+        end;
+        if not m_dictionary.lookup_fuzzy_full_pinyin_bounded(pinyin_key,
+            out_results, 1, 6, 4, 16) then
+        begin
+            SetLength(out_results, 0);
+        end;
+        lookup_cache.AddOrSetValue(cache_key, out_results);
+        Result := Length(out_results) > 0;
+    end;
+
     function try_build_explicit_apostrophe_lookup_seed_local(
         out out_results: TncCandidateList): Boolean;
     begin
@@ -73927,6 +74055,8 @@ var
             prev_text: string;
             prev_prev_text: string;
             last_segment_syllable_count: Integer;
+            fuzzy_cost: Integer;
+            fuzzy_rules: TncFuzzyPinyinRules;
         end;
         TLightSentenceStateArray = TArray<TLightSentenceState>;
         TLightSentenceStaticAdjustment = record
@@ -74036,6 +74166,81 @@ var
             end;
 
             Result := c_light_sentence_exact_top_n;
+        end;
+
+        procedure reserve_fuzzy_lattice_edges_local(
+            var candidates: TncCandidateList);
+        const
+            c_max_reserved_fuzzy_edges = 1;
+        var
+            prefix_limit: Integer;
+            reserve_limit: Integer;
+            fuzzy_in_prefix: Integer;
+            target_idx: Integer;
+            best_idx: Integer;
+            idx: Integer;
+            best_score: Integer;
+            candidate_tmp: TncCandidate;
+        begin
+            if (not m_config.fuzzy_pinyin_enabled) or
+                (m_config.fuzzy_pinyin_rules = []) or
+                (Length(candidates) = 0) then
+            begin
+                Exit;
+            end;
+
+            prefix_limit := Min(get_light_sentence_exact_top_n_local,
+                Length(candidates));
+            if prefix_limit <= 0 then
+            begin
+                Exit;
+            end;
+            reserve_limit := Min(c_max_reserved_fuzzy_edges,
+                Max(1, prefix_limit div 2));
+
+            fuzzy_in_prefix := 0;
+            for idx := 0 to prefix_limit - 1 do
+            begin
+                if candidates[idx].fuzzy_cost > 0 then
+                begin
+                    Inc(fuzzy_in_prefix);
+                end;
+            end;
+
+            while fuzzy_in_prefix < reserve_limit do
+            begin
+                best_idx := -1;
+                best_score := Low(Integer);
+                for idx := prefix_limit to High(candidates) do
+                begin
+                    if (candidates[idx].fuzzy_cost > 0) and
+                        (candidates[idx].score > best_score) then
+                    begin
+                        best_idx := idx;
+                        best_score := candidates[idx].score;
+                    end;
+                end;
+                if best_idx < 0 then
+                begin
+                    Break;
+                end;
+
+                target_idx := prefix_limit - 1;
+                while (target_idx >= 0) and
+                    (candidates[target_idx].fuzzy_cost > 0) do
+                begin
+                    Dec(target_idx);
+                end;
+                if target_idx < 0 then
+                begin
+                    Break;
+                end;
+
+                candidate_tmp := candidates[target_idx];
+                candidates[target_idx] := candidates[best_idx];
+                candidates[best_idx] := candidate_tmp;
+                Inc(fuzzy_in_prefix);
+            end;
         end;
 
         function get_sentence_context_bonus_scaled(const left_text: string;
@@ -75434,6 +75639,14 @@ var
             text_units := get_candidate_text_unit_count(text_value);
             if segment_syllables <= 1 then
             begin
+                if is_fuzzy_pinyin_active and
+                    (candidate.fuzzy_cost > 0) then
+                begin
+                    // The dictionary already validated this text against the
+                    // alternate canonical syllable. Rechecking it against
+                    // the raw syllable would incorrectly discard the edge.
+                    Exit(text_units = 1);
+                end;
                 effective_weight := candidate.score;
                 if candidate.has_dict_weight and (candidate.dict_weight > effective_weight) then
                 begin
@@ -76717,7 +76930,9 @@ var
 
         procedure append_light_candidate(const text_value: string; const comment_value: string;
             const path_value: string; const score_value: Integer;
-            const path_score_hint_value: Integer);
+            const path_score_hint_value: Integer;
+            const fuzzy_cost_value: Integer = 0;
+            const fuzzy_rules_value: TncFuzzyPinyinRules = []);
         var
             candidate: TncCandidate;
             next_index: Integer;
@@ -76727,12 +76942,15 @@ var
                 Exit;
             end;
 
+            candidate := Default(TncCandidate);
             candidate.text := Trim(text_value);
             candidate.comment := Trim(comment_value);
             candidate.score := score_value;
             candidate.source := cs_rule;
             candidate.has_dict_weight := False;
             candidate.dict_weight := 0;
+            candidate.fuzzy_cost := fuzzy_cost_value;
+            candidate.fuzzy_rules := fuzzy_rules_value;
 
             next_index := Length(out_candidates);
             SetLength(out_candidates, next_index + 1);
@@ -76906,7 +77124,8 @@ var
             append_light_candidate(repaired_text, '', repaired_path,
                 repair_score, state_value.lexical_rank_score +
                 c_repair_base_bonus + Min(c_repair_max_gap_bonus,
-                total_gap * c_repair_gap_scale));
+                total_gap * c_repair_gap_scale), state_value.fuzzy_cost,
+                state_value.fuzzy_rules);
         end;
 
         procedure append_direct_exact_span_repair_candidate(
@@ -77104,7 +77323,8 @@ var
             append_light_candidate(repaired_text, '', repaired_path,
                 repair_score, state_value.lexical_rank_score + c_repair_base_bonus +
                 Min(c_repair_max_bonus, (total_weight * 3) +
-                (total_units * c_repair_unit_bonus)));
+                (total_units * c_repair_unit_bonus)), state_value.fuzzy_cost,
+                state_value.fuzzy_rules);
         end;
 
         procedure append_function_phrase_split_repairs;
@@ -77267,7 +77487,9 @@ var
                             Min(phrase_weight, 1800) + (phrase_anchor_units * 360);
                         append_light_candidate(repair_text, '', repair_path,
                             out_candidates[source_idx].score + score_bonus,
-                            out_candidates[source_idx].score + score_bonus);
+                            out_candidates[source_idx].score + score_bonus,
+                            out_candidates[source_idx].fuzzy_cost,
+                            out_candidates[source_idx].fuzzy_rules);
                     end;
                 end;
             end;
@@ -77350,7 +77572,8 @@ var
 
                     append_light_candidate(state_text, remaining_key,
                         state_value.path, state_value.score + score_bonus,
-                        state_value.lexical_rank_score + score_bonus);
+                        state_value.lexical_rank_score + score_bonus,
+                        state_value.fuzzy_cost, state_value.fuzzy_rules);
                     Inc(emitted_count);
                     if emitted_count >= c_intermediate_partial_limit then
                     begin
@@ -77641,7 +77864,8 @@ var
 
                 append_light_candidate(completed_text, '', completed_path,
                     state_value.score + c_completion_bonus,
-                    state_value.lexical_rank_score + c_completion_bonus);
+                    state_value.lexical_rank_score + c_completion_bonus,
+                    state_value.fuzzy_cost, state_value.fuzzy_rules);
                 Inc(emitted_count);
                 if emitted_count >= c_completion_limit then
                 begin
@@ -77657,6 +77881,7 @@ var
         next_pos: Integer;
         seg_key: string;
         exact_results: TncCandidateList;
+        fuzzy_results: TncCandidateList;
         lookup_results: TncCandidateList;
         exact_lookup_results: TncCandidateList;
         result_idx: Integer;
@@ -77749,6 +77974,8 @@ var
         state_map[0][0].prev_text := '';
         state_map[0][0].prev_prev_text := '';
         state_map[0][0].last_segment_syllable_count := 0;
+        state_map[0][0].fuzzy_cost := 0;
+        state_map[0][0].fuzzy_rules := [];
 
         for pos := 0 to head_syllable_count - 1 do
         begin
@@ -77765,8 +77992,16 @@ var
                         for result_idx := 0 to High(exact_lookup_results) do
                         begin
                             exact_results[result_idx] :=
-                                exact_lookup_results[result_idx];
+                            exact_lookup_results[result_idx];
                         end;
+                    end;
+                    if (seg_len <= 4) and
+                        dictionary_fuzzy_lattice_lookup_cached(seg_key,
+                        fuzzy_results) then
+                    begin
+                        exact_results := merge_candidate_lists(exact_results,
+                            fuzzy_results, 0);
+                        reserve_fuzzy_lattice_edges_local(exact_results);
                     end;
 
                     if (Length(exact_results) = 0) and
@@ -77955,6 +78190,10 @@ var
                         candidate_state.prev_prev_text := base_state.prev_text;
                         candidate_state.prev_text := candidate_text;
                         candidate_state.last_segment_syllable_count := seg_len;
+                        candidate_state.fuzzy_cost := base_state.fuzzy_cost +
+                            exact_results[result_idx].fuzzy_cost;
+                        candidate_state.fuzzy_rules := base_state.fuzzy_rules +
+                            exact_results[result_idx].fuzzy_rules;
                         add_state(state_map[next_pos], candidate_state);
                         Inc(accepted_count);
                     end;
@@ -78036,6 +78275,8 @@ var
                             candidate_state.prev_prev_text := base_state.prev_text;
                             candidate_state.prev_text := rescue_text;
                             candidate_state.last_segment_syllable_count := seg_len;
+                            candidate_state.fuzzy_cost := base_state.fuzzy_cost;
+                            candidate_state.fuzzy_rules := base_state.fuzzy_rules;
                             add_state(state_map[next_pos], candidate_state);
                         end;
                     end;
@@ -78079,7 +78320,9 @@ var
         begin
             append_light_candidate(final_states[state_idx].text, '',
                 final_states[state_idx].path, final_states[state_idx].score + 320,
-                final_states[state_idx].lexical_rank_score);
+                final_states[state_idx].lexical_rank_score,
+                final_states[state_idx].fuzzy_cost,
+                final_states[state_idx].fuzzy_rules);
             append_best_same_span_exact_segment_repair(final_states[state_idx]);
             append_direct_exact_span_repair_candidate(final_states[state_idx]);
         end;
@@ -78097,7 +78340,8 @@ var
             end;
             append_light_candidate(final_states[0].text, tail_prefix,
                 final_states[0].path, final_states[0].score + tail_partial_bonus,
-                final_states[0].lexical_rank_score);
+                final_states[0].lexical_rank_score,
+                final_states[0].fuzzy_cost, final_states[0].fuzzy_rules);
 
             tail_text := '';
             if try_predict_tail_single_char(tail_prefix, final_states[0].prev_prev_text,
@@ -78106,7 +78350,8 @@ var
                 append_light_candidate(final_states[0].text + tail_text, '',
                     final_states[0].path + c_segment_path_separator + tail_text,
                     final_states[0].score + c_light_sentence_tail_prediction_bonus,
-                    final_states[0].lexical_rank_score + c_light_sentence_tail_prediction_bonus);
+                    final_states[0].lexical_rank_score + c_light_sentence_tail_prediction_bonus,
+                    final_states[0].fuzzy_cost, final_states[0].fuzzy_rules);
             end;
         end;
 
@@ -80961,6 +81206,183 @@ var
         Result := Length(out_candidates) > 0;
     end;
 
+    function build_fuzzy_short_query_recall_candidates(
+        const query_text: string; out out_candidates: TncCandidateList): Boolean;
+    const
+        c_total_limit = 40;
+        c_full_limit = 16;
+        c_single_prefix_limit = 16;
+        c_phrase_prefix_limit = 8;
+        c_prefix_base_bonus = 220;
+        c_prefix_bonus_per_syllable = 180;
+        c_prefix_phrase_extra_bonus = 520;
+        c_prefix_short_query_phrase_bonus = 260;
+        c_prefix_remaining_penalty = 42;
+    var
+        normalized_query: string;
+        syllables_local: TncPinyinParseResult;
+        fuzzy_results: TncCandidateList;
+        seen: TDictionary<string, Byte>;
+        prefix_count: Integer;
+        syllable_idx: Integer;
+        candidate_idx: Integer;
+        accepted_for_prefix: Integer;
+        accepted_limit: Integer;
+        prefix_key: string;
+        tail_comment: string;
+        candidate: TncCandidate;
+        candidate_text: string;
+        candidate_units: Integer;
+        seen_key: string;
+
+        procedure append_candidate_local(const candidate_value: TncCandidate;
+            const comment_value: string; const expected_text_units: Integer;
+            const add_prefix_score: Boolean);
+        var
+            local_candidate: TncCandidate;
+            local_text: string;
+            local_key: string;
+        begin
+            if Length(out_candidates) >= c_total_limit then
+            begin
+                Exit;
+            end;
+
+            local_candidate := candidate_value;
+            local_text := Trim(local_candidate.text);
+            if (local_text = '') or (Trim(local_candidate.comment) <> '') or
+                (local_candidate.fuzzy_cost <= 0) or
+                (get_candidate_text_unit_count(local_text) <>
+                expected_text_units) then
+            begin
+                Exit;
+            end;
+
+            local_candidate.text := local_text;
+            local_candidate.comment := comment_value;
+            if add_prefix_score then
+            begin
+                Inc(local_candidate.score, c_prefix_base_bonus +
+                    (expected_text_units * c_prefix_bonus_per_syllable));
+                if expected_text_units >= 2 then
+                begin
+                    Inc(local_candidate.score, c_prefix_phrase_extra_bonus +
+                        c_prefix_short_query_phrase_bonus);
+                end;
+                Dec(local_candidate.score,
+                    (Length(syllables_local) - expected_text_units) *
+                    c_prefix_remaining_penalty);
+            end;
+
+            local_key := LowerCase(local_text) + #1 +
+                LowerCase(Trim(comment_value));
+            if seen.ContainsKey(local_key) then
+            begin
+                Exit;
+            end;
+
+            SetLength(out_candidates, Length(out_candidates) + 1);
+            out_candidates[High(out_candidates)] := local_candidate;
+            seen.Add(local_key, 1);
+        end;
+    begin
+        SetLength(out_candidates, 0);
+        Result := False;
+        if (m_dictionary = nil) or (not is_fuzzy_pinyin_active) then
+        begin
+            Exit;
+        end;
+
+        normalized_query := normalize_pinyin_text(query_text);
+        if (normalized_query = '') or
+            (not get_prefix_partial_syllables_for_query(query_text,
+            syllables_local)) or (Length(syllables_local) < 2) or
+            (Length(syllables_local) > 4) then
+        begin
+            Exit;
+        end;
+
+        seen := TDictionary<string, Byte>.Create;
+        try
+            if m_dictionary.lookup_fuzzy_full_pinyin_bounded(normalized_query,
+                fuzzy_results, 1, 6, 4, c_full_limit) then
+            begin
+                for candidate_idx := 0 to High(fuzzy_results) do
+                begin
+                    append_candidate_local(fuzzy_results[candidate_idx], '',
+                        Length(syllables_local), False);
+                end;
+            end;
+
+            { Explicit apostrophes carry authoritative syllable boundaries.
+              The full fuzzy exact lookup above preserves them; do not rebuild
+              prefix keys without those separators. }
+            if Pos('''', normalized_query) = 0 then
+            begin
+                for prefix_count := Length(syllables_local) - 1 downto 1 do
+                begin
+                    prefix_key := '';
+                    for syllable_idx := 0 to prefix_count - 1 do
+                    begin
+                        prefix_key := prefix_key + normalize_pinyin_text(
+                            syllables_local[syllable_idx].text);
+                    end;
+                    tail_comment := '';
+                    for syllable_idx := prefix_count to High(syllables_local) do
+                    begin
+                        tail_comment := tail_comment + normalize_pinyin_text(
+                            syllables_local[syllable_idx].text);
+                    end;
+                    if (prefix_key = '') or (tail_comment = '') or
+                        (not m_dictionary.lookup_fuzzy_full_pinyin_bounded(
+                        prefix_key, fuzzy_results, 1, 6, 4,
+                        c_single_prefix_limit)) then
+                    begin
+                        Continue;
+                    end;
+
+                    if prefix_count = 1 then
+                    begin
+                        accepted_limit := c_single_prefix_limit;
+                    end
+                    else
+                    begin
+                        accepted_limit := c_phrase_prefix_limit;
+                    end;
+                    accepted_for_prefix := 0;
+                    for candidate_idx := 0 to High(fuzzy_results) do
+                    begin
+                        if (Length(out_candidates) >= c_total_limit) or
+                            (accepted_for_prefix >= accepted_limit) then
+                        begin
+                            Break;
+                        end;
+                        candidate := fuzzy_results[candidate_idx];
+                        candidate_text := Trim(candidate.text);
+                        candidate_units := get_candidate_text_unit_count(
+                            candidate_text);
+                        seen_key := LowerCase(candidate_text) + #1 +
+                            LowerCase(tail_comment);
+                        if (candidate_text = '') or
+                            (candidate_units <> prefix_count) or
+                            seen.ContainsKey(seen_key) then
+                        begin
+                            Continue;
+                        end;
+                        append_candidate_local(candidate, tail_comment,
+                            prefix_count, True);
+                        Inc(accepted_for_prefix);
+                    end;
+                end;
+            end;
+        finally
+            seen.Free;
+        end;
+
+        sort_candidates_lightweight(out_candidates);
+        Result := Length(out_candidates) > 0;
+    end;
+
     function build_lookup_leading_prefix_partial_candidates(const query_text: string;
         out out_candidates: TncCandidateList): Boolean;
     const
@@ -83233,6 +83655,7 @@ var
                 end;
             end;
 
+            candidate := Default(TncCandidate);
             candidate.text := text_value;
             candidate.comment := '';
             candidate.score := score_value;
@@ -84557,7 +84980,8 @@ var
         candidate_idx: Integer;
     begin
         Result := False;
-        if expected_syllables <= 0 then
+        if (not is_fuzzy_pinyin_active) or
+            (expected_syllables <= 0) then
         begin
             Exit;
         end;
@@ -84576,6 +85000,104 @@ var
                 Continue;
             end;
             Exit(True);
+        end;
+    end;
+
+    function has_fuzzy_complete_candidate_for_syllable_count(
+        const candidates: TncCandidateList;
+        const expected_syllables: Integer): Boolean;
+    var
+        candidate_idx: Integer;
+    begin
+        Result := False;
+        if (not is_fuzzy_pinyin_active) or
+            (expected_syllables <= 0) then
+        begin
+            Exit;
+        end;
+
+        for candidate_idx := 0 to High(candidates) do
+        begin
+            if (candidates[candidate_idx].fuzzy_cost > 0) and
+                (Trim(candidates[candidate_idx].comment) = '') and
+                (get_candidate_text_unit_count(
+                Trim(candidates[candidate_idx].text)) = expected_syllables) then
+            begin
+                Exit(True);
+            end;
+        end;
+    end;
+
+    procedure reserve_fuzzy_complete_candidates_local(
+        var candidates: TncCandidateList; const visible_limit: Integer;
+        const reserve_count: Integer = 3);
+    var
+        prefix_limit: Integer;
+        reserve_limit: Integer;
+        fuzzy_in_prefix: Integer;
+        source_idx: Integer;
+        target_idx: Integer;
+        idx: Integer;
+        candidate_tmp: TncCandidate;
+
+        function is_fuzzy_complete_local(
+            const candidate_value: TncCandidate): Boolean;
+        begin
+            Result := (candidate_value.fuzzy_cost > 0) and
+                (Trim(candidate_value.comment) = '') and
+                (get_candidate_text_unit_count(Trim(candidate_value.text)) =
+                input_syllable_count);
+        end;
+    begin
+        if (not m_config.fuzzy_pinyin_enabled) or
+            (m_config.fuzzy_pinyin_rules = []) or
+            (visible_limit <= 0) or (reserve_count <= 0) or
+            (Length(candidates) = 0) then
+        begin
+            Exit;
+        end;
+
+        prefix_limit := Min(visible_limit, Length(candidates));
+        reserve_limit := Min(reserve_count, prefix_limit);
+        fuzzy_in_prefix := 0;
+        for idx := 0 to prefix_limit - 1 do
+        begin
+            if is_fuzzy_complete_local(candidates[idx]) then
+            begin
+                Inc(fuzzy_in_prefix);
+            end;
+        end;
+        while fuzzy_in_prefix < reserve_limit do
+        begin
+            source_idx := -1;
+            for idx := prefix_limit to High(candidates) do
+            begin
+                if is_fuzzy_complete_local(candidates[idx]) then
+                begin
+                    source_idx := idx;
+                    Break;
+                end;
+            end;
+            if source_idx < 0 then
+            begin
+                Break;
+            end;
+
+            target_idx := prefix_limit - 1;
+            while (target_idx >= 0) and
+                is_fuzzy_complete_local(candidates[target_idx]) do
+            begin
+                Dec(target_idx);
+            end;
+            if target_idx < 0 then
+            begin
+                Break;
+            end;
+
+            candidate_tmp := candidates[target_idx];
+            candidates[target_idx] := candidates[source_idx];
+            candidates[source_idx] := candidate_tmp;
+            Inc(fuzzy_in_prefix);
         end;
     end;
 
@@ -87126,6 +87648,37 @@ var
             removed_count := 0;
             for idx := 0 to High(m_candidates) do
             begin
+                { Fuzzy exacts and fuzzy lattice paths have already been
+                  validated against lexicon edges using alternate syllables. }
+                if is_fuzzy_pinyin_active and
+                    (m_candidates[idx].fuzzy_cost > 0) and
+                    is_complete_for_query_local(m_candidates[idx]) and
+                    (((m_candidates[idx].source = cs_user) or
+                    ((m_candidates[idx].source = cs_rule) and
+                    m_candidates[idx].has_dict_weight)) or
+                    segment_path_has_multi_char_segment_local(
+                    m_candidates[idx])) then
+                begin
+                    if out_idx <> idx then
+                    begin
+                        m_candidates[out_idx] := m_candidates[idx];
+                        if out_idx < Length(m_candidate_segment_paths) then
+                        begin
+                            if idx < Length(m_candidate_segment_paths) then
+                            begin
+                                m_candidate_segment_paths[out_idx] :=
+                                    m_candidate_segment_paths[idx];
+                            end
+                            else
+                            begin
+                                m_candidate_segment_paths[out_idx] := '';
+                            end;
+                        end;
+                    end;
+                    Inc(out_idx);
+                    Continue;
+                end;
+
                 if is_polluted_complete_candidate_local(m_candidates[idx]) and
                     ((not has_normal_complete) or
                     (not has_strong_prefix_single_tail_segment_path_local(
@@ -91360,7 +91913,9 @@ var
             Result := local_candidate.score;
             if Result <= 0 then
             begin
-                if local_candidate.has_dict_weight then
+                if ((not is_fuzzy_pinyin_active) or
+                    (local_candidate.fuzzy_cost <= 0)) and
+                    local_candidate.has_dict_weight then
                 begin
                     Result := local_candidate.dict_weight;
                 end
@@ -91369,7 +91924,9 @@ var
                     Result := 0;
                 end;
             end
-            else if local_candidate.has_dict_weight then
+            else if ((not is_fuzzy_pinyin_active) or
+                (local_candidate.fuzzy_cost <= 0)) and
+                local_candidate.has_dict_weight then
             begin
                 Result := Max(Result, local_candidate.dict_weight div 2);
             end;
@@ -92858,6 +93415,8 @@ var
             exact_state.prev_text := seed_prev_text;
             exact_state.prev_pinyin_text := '';
             exact_state.path_text := '';
+            exact_state.fuzzy_cost := 0;
+            exact_state.fuzzy_rules := [];
             exact_states[0].Add(exact_state);
             exact_dedup[0].Add(build_state_key(exact_state), 0);
 
@@ -93297,6 +93856,10 @@ var
 
                             exact_new_state.source := merge_source_rank(exact_state.source,
                                 exact_candidate.source);
+                            exact_new_state.fuzzy_cost := exact_state.fuzzy_cost +
+                                exact_candidate.fuzzy_cost;
+                            exact_new_state.fuzzy_rules := exact_state.fuzzy_rules +
+                                exact_candidate.fuzzy_rules;
                             exact_new_state.prev_prev_text := exact_state.prev_text;
                             exact_new_state.prev_text := exact_candidate_text;
                             exact_new_state.prev_pinyin_text := exact_segment_text;
@@ -93384,6 +93947,8 @@ var
 
                                 exact_new_state.source := merge_source_rank(exact_state.source,
                                     cs_rule);
+                                exact_new_state.fuzzy_cost := exact_state.fuzzy_cost;
+                                exact_new_state.fuzzy_rules := exact_state.fuzzy_rules;
                                 exact_new_state.prev_prev_text := exact_state.prev_text;
                                 exact_new_state.prev_text := exact_rescue_text;
                                 exact_new_state.prev_pinyin_text := exact_segment_text;
@@ -93468,6 +94033,8 @@ var
 
                                 exact_new_state.source := merge_source_rank(exact_state.source,
                                     cs_rule);
+                                exact_new_state.fuzzy_cost := exact_state.fuzzy_cost;
+                                exact_new_state.fuzzy_rules := exact_state.fuzzy_rules;
                                 exact_new_state.prev_prev_text := exact_state.prev_text;
                                 exact_new_state.prev_text := exact_rescue_text;
                                 exact_new_state.prev_pinyin_text := exact_segment_text;
@@ -93602,6 +94169,8 @@ var
                 exact_matches[High(exact_matches)].source := exact_state.source;
                 exact_matches[High(exact_matches)].has_dict_weight := False;
                 exact_matches[High(exact_matches)].dict_weight := 0;
+                exact_matches[High(exact_matches)].fuzzy_cost := exact_state.fuzzy_cost;
+                exact_matches[High(exact_matches)].fuzzy_rules := exact_state.fuzzy_rules;
                 remember_segment_path_for_candidate(exact_state.text, '',
                     exact_state.path_text, exact_matches[High(exact_matches)].score);
                 if exact_state.source <> cs_user then
@@ -93727,6 +94296,8 @@ var
                     exact_matches[High(exact_matches)].source := exact_state.source;
                     exact_matches[High(exact_matches)].has_dict_weight := False;
                     exact_matches[High(exact_matches)].dict_weight := 0;
+                    exact_matches[High(exact_matches)].fuzzy_cost := exact_state.fuzzy_cost;
+                    exact_matches[High(exact_matches)].fuzzy_rules := exact_state.fuzzy_rules;
                     remember_segment_path_for_candidate(exact_state.text,
                         exact_remaining_pinyin, exact_state.path_text, exact_partial_score);
 
@@ -105169,6 +105740,7 @@ var
                 Exit;
             end;
 
+            local_candidate := Default(TncCandidate);
             local_candidate.text := dp_texts_local[dangling_idx_local];
             local_candidate.comment := tail_comment_local;
             local_candidate.source := cs_rule;
@@ -111729,7 +112301,9 @@ var
             const candidate_local: TncCandidate): Integer;
         begin
             Result := candidate_local.score;
-            if candidate_local.has_dict_weight and
+            if ((not is_fuzzy_pinyin_active) or
+                (candidate_local.fuzzy_cost <= 0)) and
+                candidate_local.has_dict_weight and
                 (candidate_local.dict_weight > Result) then
             begin
                 Result := candidate_local.dict_weight;
@@ -112321,7 +112895,9 @@ var
             const candidate_local: TncCandidate): Integer;
         begin
             Result := candidate_local.score;
-            if candidate_local.has_dict_weight and
+            if ((not is_fuzzy_pinyin_active) or
+                (candidate_local.fuzzy_cost <= 0)) and
+                candidate_local.has_dict_weight and
                 (candidate_local.dict_weight > Result) then
             begin
                 Result := candidate_local.dict_weight;
@@ -116469,6 +117045,8 @@ begin
             is_full_pinyin_key(lookup_text) and
             (not all_initial_compact_query) and
             (not has_internal_dangling_initial) and
+            (not (m_config.fuzzy_pinyin_enabled and
+            (m_config.fuzzy_pinyin_rules <> []))) and
             (not has_strong_full_query_exact_complete_candidate_local) and
             (has_short_extendable_tail_prefix_local or
             has_extendable_same_syllable_tail_local(lookup_text,
@@ -116536,6 +117114,14 @@ begin
                 raw_candidates) then
             begin
                 m_candidates := raw_candidates;
+                if m_config.fuzzy_pinyin_enabled and
+                    (m_config.fuzzy_pinyin_rules <> []) and
+                    build_lightweight_sentence_candidates(lookup_text,
+                    lightweight_sentence_candidates) then
+                begin
+                    m_candidates := merge_candidate_lists(
+                        lightweight_sentence_candidates, m_candidates, 0);
+                end;
                 filter_single_char_partial_candidates_for_current_query(
                     m_candidates);
                 ensure_fast_prefix_single_char_partials_visible(m_candidates, 0);
@@ -116838,6 +117424,8 @@ begin
             is_full_pinyin_key(lookup_text) and
             (not all_initial_compact_query) and
             (not has_internal_dangling_initial) and
+            (not (m_config.fuzzy_pinyin_enabled and
+            (m_config.fuzzy_pinyin_rules <> []))) and
             (not has_strong_full_query_exact_complete_candidate_local) and
             (has_short_extendable_tail_prefix_local or
             has_extendable_same_syllable_tail_local(lookup_text,
@@ -118458,6 +119046,8 @@ begin
 
         if short_full_exact_query and has_raw_candidates and raw_from_dictionary and
             (input_syllable_count >= 4) and (input_syllable_count <= 6) and
+            (not (m_config.fuzzy_pinyin_enabled and
+            (m_config.fuzzy_pinyin_rules <> []))) and
             (not has_short_exact_complete_anchor(raw_candidates)) then
         begin
             m_candidates := raw_candidates;
@@ -119015,6 +119605,8 @@ begin
 
         if delayed_long_decode_mode and has_raw_candidates and
             (not ultra_long_partial_shortfast_applied) and
+            (not has_fuzzy_complete_candidate_for_syllable_count(
+            raw_candidates, input_syllable_count)) and
             (not (has_extendable_same_syllable_tail_local(lookup_text,
             input_syllable_count) and
             query_has_preferred_subspan_coverage_for_light_path_local(False))) then
@@ -119955,6 +120547,8 @@ begin
         end;
 
         if has_raw_candidates and
+            (not has_fuzzy_complete_candidate_for_syllable_count(
+            raw_candidates, input_syllable_count)) and
             (((lightweight_sentence_applied) and
             ((not delayed_long_decode_mode) or
             (not is_full_pinyin_key(lookup_text)) or
@@ -119967,6 +120561,8 @@ begin
             ultra_long_partial_shortfast_applied) then
         begin
             sort_candidates_lightweight(raw_candidates);
+            reserve_fuzzy_complete_candidates_local(raw_candidates,
+                get_candidate_limit);
             filter_non_bmp_single_char_candidates(raw_candidates);
 
             limit := get_total_candidate_limit;
@@ -120711,6 +121307,8 @@ begin
             begin
                 sort_candidates_timed(raw_candidates);
             end;
+            reserve_fuzzy_complete_candidates_local(raw_candidates,
+                get_candidate_limit);
             if should_enable_long_sentence_exact_search_local and
                 has_strong_long_sentence_prediction and
                 (input_syllable_count >= 10) then
@@ -120792,6 +121390,8 @@ begin
         end;
 
         ensure_redup_complete_candidate_visible(raw_candidates, limit);
+        reserve_fuzzy_complete_candidates_local(raw_candidates,
+            get_candidate_limit);
 
         if Length(raw_candidates) > limit then
         begin
@@ -133474,6 +134074,34 @@ begin
                         end;
                     end;
 
+                    { A raw pronunciation always owns a duplicate candidate.  If
+                      both paths are fuzzy, retain the least costly spelling so
+                      selection learning records the actual recall path. }
+                    if is_fuzzy_pinyin_active then
+                    begin
+                        if (secondary_candidates[i].fuzzy_cost = 0) and
+                            (secondary_candidates[i].has_dict_weight or
+                            (secondary_candidates[i].source = cs_user)) then
+                        begin
+                            candidate.fuzzy_cost := 0;
+                            candidate.fuzzy_rules := [];
+                        end
+                        else if (candidate.fuzzy_cost > 0) and
+                            (secondary_candidates[i].fuzzy_cost < candidate.fuzzy_cost) then
+                        begin
+                            candidate.fuzzy_cost := secondary_candidates[i].fuzzy_cost;
+                            candidate.fuzzy_rules := secondary_candidates[i].fuzzy_rules;
+                        end;
+                        if (candidate.fuzzy_cost = 0) and
+                            (secondary_candidates[i].fuzzy_cost > 0) and
+                            (not candidate.has_dict_weight) and
+                            (candidate.source <> cs_user) then
+                        begin
+                            candidate.fuzzy_cost := secondary_candidates[i].fuzzy_cost;
+                            candidate.fuzzy_rules := secondary_candidates[i].fuzzy_rules;
+                        end;
+                    end;
+
                     list[existing_index] := candidate;
                 end;
             end;
@@ -133664,6 +134292,10 @@ var
     end;
 
     function dictionary_lookup_cached(const pinyin_key: string; out out_results: TncCandidateList): Boolean;
+    var
+        build_cache_key: string;
+        local_cache_key: string;
+        fuzzy_results: TncCandidateList;
     begin
         SetLength(out_results, 0);
         if (m_dictionary = nil) or (pinyin_key = '') then
@@ -133671,8 +134303,18 @@ var
             Exit(False);
         end;
 
-        if lookup_cache.TryGetValue(pinyin_key, out_results) then
+        local_cache_key := '#fuzzy#' + pinyin_key;
+        if lookup_cache.TryGetValue(local_cache_key, out_results) then
         begin
+            Exit(Length(out_results) > 0);
+        end;
+
+        build_cache_key := '#fuzzylookup#' + pinyin_key;
+        if (m_build_lookup_cache <> nil) and
+            m_build_lookup_cache.TryGetValue(build_cache_key,
+            out_results) then
+        begin
+            lookup_cache.AddOrSetValue(local_cache_key, out_results);
             Exit(Length(out_results) > 0);
         end;
 
@@ -133680,7 +134322,24 @@ var
         begin
             SetLength(out_results, 0);
         end;
-        lookup_cache.AddOrSetValue(pinyin_key, out_results);
+        if m_config.fuzzy_pinyin_enabled and
+            (m_config.fuzzy_pinyin_rules <> []) and
+            m_dictionary.lookup_fuzzy_full_pinyin_bounded(pinyin_key,
+            fuzzy_results, 1, 6, 4, 16) then
+        begin
+            if Length(fuzzy_results) > 16 then
+            begin
+                SetLength(fuzzy_results, 16);
+            end;
+            out_results := merge_candidate_lists(out_results,
+                fuzzy_results, 0);
+        end;
+        lookup_cache.AddOrSetValue(local_cache_key, out_results);
+        if m_build_lookup_cache <> nil then
+        begin
+            m_build_lookup_cache.AddOrSetValue(build_cache_key,
+                out_results);
+        end;
         Result := Length(out_results) > 0;
     end;
 
@@ -133688,7 +134347,12 @@ var
     var
         local_units: Integer;
     begin
-        if local_candidate.has_dict_weight then
+        if is_fuzzy_pinyin_active and
+            (local_candidate.fuzzy_cost > 0) then
+        begin
+            Result := local_candidate.score;
+        end
+        else if local_candidate.has_dict_weight then
         begin
             Result := local_candidate.dict_weight;
         end
@@ -135284,7 +135948,9 @@ var
         const source: TncCandidateSource;
         const comment_override: string;
         const has_dict_weight: Boolean = False;
-        const dict_weight: Integer = 0);
+        const dict_weight: Integer = 0;
+        const fuzzy_cost: Integer = 0;
+        const fuzzy_rules: TncFuzzyPinyinRules = []);
     begin
         if text = '' then
         begin
@@ -135310,6 +135976,17 @@ var
                         item.dict_weight := dict_weight;
                     end;
                 end;
+                if fuzzy_cost = 0 then
+                begin
+                    item.fuzzy_cost := 0;
+                    item.fuzzy_rules := [];
+                end
+                else if (item.fuzzy_cost > 0) and
+                    (fuzzy_cost < item.fuzzy_cost) then
+                begin
+                    item.fuzzy_cost := fuzzy_cost;
+                    item.fuzzy_rules := fuzzy_rules;
+                end;
                 list[existing_index] := item;
             end;
             Exit;
@@ -135328,6 +136005,8 @@ var
         begin
             item.dict_weight := 0;
         end;
+        item.fuzzy_cost := fuzzy_cost;
+        item.fuzzy_rules := fuzzy_rules;
         list.Add(item);
         dedup.Add(dedup_key, list.Count - 1);
     end;
@@ -136943,6 +137622,8 @@ var
                 get_recent_path_context_seed(exact_state.prev_prev_text, exact_state.prev_text);
                 exact_state.prev_pinyin_text := '';
                 exact_state.path_text := '';
+                exact_state.fuzzy_cost := 0;
+                exact_state.fuzzy_rules := [];
                 exact_states[0].Add(exact_state);
                 exact_dedup[0].Add(build_state_key(exact_state), 0);
 
@@ -137072,6 +137753,10 @@ var
 
                                 exact_new_state.source := merge_source_rank(
                                     exact_state.source, exact_candidate.source);
+                                exact_new_state.fuzzy_cost := exact_state.fuzzy_cost +
+                                    exact_candidate.fuzzy_cost;
+                                exact_new_state.fuzzy_rules := exact_state.fuzzy_rules +
+                                    exact_candidate.fuzzy_rules;
                                 exact_new_state.prev_prev_text := exact_state.prev_text;
                                 exact_new_state.prev_text := exact_candidate_text;
                                 exact_new_state.prev_pinyin_text := exact_segment_text;
@@ -137141,7 +137826,8 @@ var
                     end;
 
                     append_candidate(exact_state.text, exact_state.score + 1200,
-                        exact_state.source, '');
+                        exact_state.source, '', False, 0,
+                        exact_state.fuzzy_cost, exact_state.fuzzy_rules);
                     remember_segment_path_for_candidate(exact_state.text, '',
                         exact_state.path_text, exact_state.score + 1200);
                     if exact_state.source <> cs_user then
@@ -137173,6 +137859,8 @@ var
                 source: TncCandidateSource;
                 segment_count: Integer;
                 multi_segment_count: Integer;
+                fuzzy_cost: Integer;
+                fuzzy_rules: TncFuzzyPinyinRules;
                 found: Boolean;
             end;
         const
@@ -137396,6 +138084,10 @@ var
                         end;
                         candidate_option.source := merge_source_rank(candidate_local.source,
                             suffix_option.source);
+                        candidate_option.fuzzy_cost := candidate_local.fuzzy_cost +
+                            suffix_option.fuzzy_cost;
+                        candidate_option.fuzzy_rules := candidate_local.fuzzy_rules +
+                            suffix_option.fuzzy_rules;
                         candidate_option.segment_count := suffix_option.segment_count + 1;
                         candidate_option.multi_segment_count := suffix_option.multi_segment_count;
                         if segment_len_local >= 2 then
@@ -137462,7 +138154,9 @@ var
                     Exit;
                 end;
 
-                append_candidate(best_option.text, best_option.score + 1200, best_option.source, '');
+                append_candidate(best_option.text, best_option.score + 1200,
+                    best_option.source, '', False, 0, best_option.fuzzy_cost,
+                    best_option.fuzzy_rules);
                 remember_segment_path_for_candidate(best_option.text, '', best_option.path_text,
                     best_option.score + 1200);
             finally
@@ -137898,7 +138592,8 @@ var
                 end;
 
                 append_candidate(fallback_state.text, fallback_score,
-                    fallback_state.source, fallback_remaining_pinyin);
+                    fallback_state.source, fallback_remaining_pinyin, False, 0,
+                    fallback_state.fuzzy_cost, fallback_state.fuzzy_rules);
                 fallback_hint := c_anchor_partial_score_hint_flag +
                     (c_anchor_partial_hint_two_plus_one *
                     c_anchor_partial_hint_kind_scale) + fallback_score;
@@ -138014,7 +138709,9 @@ var
                             Min(220, tail_two_supported_strength div c_anchor_partial_tail_bonus_scale) -
                             (2 * c_anchor_partial_remaining_penalty);
                         preferred_one_plus_two_score := anchor_score;
-                        append_candidate(anchor_state.text, anchor_score, anchor_state.source, remaining_pinyin);
+                        append_candidate(anchor_state.text, anchor_score,
+                            anchor_state.source, remaining_pinyin, False, 0,
+                            anchor_state.fuzzy_cost, anchor_state.fuzzy_rules);
                         anchor_hint := c_anchor_partial_score_hint_flag +
                             (c_anchor_partial_hint_one_plus_two * c_anchor_partial_hint_kind_scale) +
                             anchor_score;
@@ -138043,7 +138740,8 @@ var
                             Min(220, head_two_supported_strength div c_anchor_partial_tail_bonus_scale) -
                             c_anchor_partial_remaining_penalty;
                         append_candidate(anchor_state.text, anchor_score, anchor_state.source,
-                            remaining_pinyin);
+                            remaining_pinyin, False, 0, anchor_state.fuzzy_cost,
+                            anchor_state.fuzzy_rules);
                         anchor_hint := c_anchor_partial_score_hint_flag +
                             (c_anchor_partial_hint_two_plus_one * c_anchor_partial_hint_kind_scale) +
                             anchor_score;
@@ -138169,6 +138867,8 @@ var
             get_recent_path_context_seed(local_state.prev_prev_text, local_state.prev_text);
             local_state.prev_pinyin_text := '';
             local_state.path_text := '';
+            local_state.fuzzy_cost := 0;
+            local_state.fuzzy_rules := [];
             states[0].Add(local_state);
             state_dedup[0].Add(build_state_key(local_state), 0);
             SetLength(preferred_phrase_flags, Length(syllables));
@@ -138464,6 +139164,10 @@ var
                             end;
 
                             local_new_state.source := merge_source_rank(local_state.source, local_candidate.source);
+                            local_new_state.fuzzy_cost := local_state.fuzzy_cost +
+                                local_candidate.fuzzy_cost;
+                            local_new_state.fuzzy_rules := local_state.fuzzy_rules +
+                                local_candidate.fuzzy_rules;
                             local_new_state.prev_prev_text := local_state.prev_text;
                             local_new_state.prev_text := local_candidate_text;
                             local_new_state.prev_pinyin_text := local_segment_text;
@@ -138649,7 +139353,9 @@ var
                     begin
                         Continue;
                     end;
-                    append_candidate(local_state.text, local_state.score, local_state.source, '');
+                    append_candidate(local_state.text, local_state.score,
+                        local_state.source, '', False, 0,
+                        local_state.fuzzy_cost, local_state.fuzzy_rules);
                     remember_segment_path_for_candidate(local_state.text, '', local_state.path_text,
                         local_state.score);
                     if local_state.source <> cs_user then
@@ -138718,7 +139424,9 @@ var
                     Dec(score_value, c_segment_full_partial_penalty * remaining_syllables);
                     Dec(score_value, c_segment_full_partial_quadratic_penalty *
                         remaining_syllables * (remaining_syllables - 1));
-                    append_candidate(local_state.text, score_value, local_state.source, remaining_pinyin);
+                    append_candidate(local_state.text, score_value,
+                        local_state.source, remaining_pinyin, False, 0,
+                        local_state.fuzzy_cost, local_state.fuzzy_rules);
                     remember_segment_path_for_candidate(local_state.text, remaining_pinyin,
                         local_state.path_text, score_value);
 
@@ -138950,7 +139658,8 @@ begin
                     end;
 
                     append_candidate(candidate.text, score_value, candidate.source, remaining_pinyin,
-                        candidate.has_dict_weight, candidate.dict_weight);
+                        candidate.has_dict_weight, candidate.dict_weight,
+                        candidate.fuzzy_cost, candidate.fuzzy_rules);
                 end;
             end;
 
@@ -139070,7 +139779,8 @@ end;
 
 procedure TncEngine.push_confirmed_segment(const text: string; const pinyin: string;
     const input_code: string; const canonical_pinyin: string;
-    const explicit_choice: Boolean; const literal_choice: Boolean);
+    const explicit_choice: Boolean; const literal_choice: Boolean;
+    const fuzzy_choice: Boolean);
 var
     item: TncConfirmedSegment;
 begin
@@ -139090,6 +139800,7 @@ begin
     item.canonical_pinyin := canonical_pinyin;
     item.explicit_choice := explicit_choice;
     item.literal_choice := literal_choice;
+    item.fuzzy_choice := fuzzy_choice;
     m_confirmed_segments.Add(item);
     m_confirmed_text := m_confirmed_text + text;
     if Length(split_text_units(Trim(text))) = 1 then
@@ -139202,7 +139913,8 @@ end;
 procedure TncEngine.apply_partial_commit(const selected_text: string; const remaining_pinyin: string;
     const segment_path: string = ''; const explicit_choice: Boolean = False;
     const remaining_input_code: string = '';
-    const literal_choice: Boolean = False);
+    const literal_choice: Boolean = False;
+    const fuzzy_choice: Boolean = False);
 var
     normalized_pinyin: string;
     prefix_pinyin: string;
@@ -139390,7 +140102,7 @@ begin
     // Partial selections are only anchors for the current composition. Persisting
     // them as complete user words pollutes the user dictionary with fragments
     // such as "suoweikai -> 鎵€璋撳紑" from a "鎵€璋撳紑/fa" candidate.
-    if not literal_composition_choice then
+    if (not literal_composition_choice) and (not fuzzy_choice) then
     begin
         note_session_commit(selected_text);
         if prefix_pinyin <> '' then
@@ -139423,7 +140135,8 @@ begin
             selected_text, canonical_prefix_pinyin);
     end;
     push_confirmed_segment(selected_text, prefix_pinyin, prefix_input_code,
-        canonical_prefix_pinyin, explicit_choice, literal_choice);
+        canonical_prefix_pinyin, explicit_choice, literal_choice,
+        fuzzy_choice);
     m_confirmed_explicit_choice := m_confirmed_explicit_choice or explicit_choice;
 
     m_composition_text := remaining_pinyin;
@@ -139435,6 +140148,8 @@ begin
     m_pending_commit_allow_learning := True;
     m_pending_commit_explicit_choice := False;
     m_pending_commit_literal_choice := False;
+    m_pending_commit_fuzzy_choice := False;
+    m_pending_commit_fuzzy_text := '';
     m_pending_commit_segment_path := '';
     m_page_index := 0;
     build_candidates;
@@ -139444,7 +140159,9 @@ end;
 procedure TncEngine.set_pending_commit(const text: string; const remaining_pinyin: string = '';
     const allow_learning: Boolean = True; const segment_path: string = '';
     const explicit_choice: Boolean = False; const remaining_input_code: string = '';
-    const literal_choice: Boolean = False);
+    const literal_choice: Boolean = False;
+    const fuzzy_choice: Boolean = False;
+    const fuzzy_choice_text: string = '');
 var
     query_key: string;
     normalized_remaining: string;
@@ -139459,9 +140176,12 @@ begin
     end;
     m_has_pending_commit := True;
     normalized_remaining := normalize_pinyin_text(remaining_pinyin);
-    m_pending_commit_allow_learning := allow_learning and (normalized_remaining = '');
+    m_pending_commit_allow_learning := allow_learning and
+        (not fuzzy_choice) and (normalized_remaining = '');
     m_pending_commit_explicit_choice := explicit_choice;
     m_pending_commit_literal_choice := literal_choice;
+    m_pending_commit_fuzzy_choice := fuzzy_choice;
+    m_pending_commit_fuzzy_text := Trim(fuzzy_choice_text);
     m_pending_commit_segment_path := segment_path;
     query_key := normalize_pinyin_text(m_last_lookup_key);
     if query_key = '' then
@@ -139485,6 +140205,8 @@ begin
     m_pending_commit_allow_learning := True;
     m_pending_commit_explicit_choice := False;
     m_pending_commit_literal_choice := False;
+    m_pending_commit_fuzzy_choice := False;
+    m_pending_commit_fuzzy_text := '';
     m_pending_commit_segment_path := '';
     m_pending_commit_query_key := '';
 end;
@@ -141155,7 +141877,9 @@ var
             apply_partial_commit(selected.text, partial_remaining_pinyin, segment_path,
                 explicit_selection,
                 get_shuangpin_remaining_input_code_for_partial(selected.text),
-                manual_selection);
+                manual_selection and ((not is_fuzzy_pinyin_active) or
+                (selected.fuzzy_cost <= 0)),
+                is_fuzzy_pinyin_active and (selected.fuzzy_cost > 0));
             Result := True;
             Exit;
         end;
@@ -141174,7 +141898,9 @@ var
             segment_path := infer_segment_path_for_selected_text(selected.text);
         end;
 
-        allow_learning := (not generated_long_local_rerank_selection) and
+        allow_learning := ((not is_fuzzy_pinyin_active) or
+            (selected.fuzzy_cost <= 0)) and
+            (not generated_long_local_rerank_selection) and
             (not is_nonlearnable_generated_selection(selected));
         if allow_learning and is_generated_short_particle_tail_selection(selected) then
         begin
@@ -141185,7 +141911,9 @@ var
         begin
             allow_learning := False;
         end;
-        if (not allow_learning) and explicit_selection and (m_dictionary <> nil) and
+        if ((not is_fuzzy_pinyin_active) or
+            (selected.fuzzy_cost <= 0)) and (not allow_learning) and
+            explicit_selection and (m_dictionary <> nil) and
             (Trim(selected.comment) = '') and (get_candidate_text_unit_count(selected.text) = 1) and
             (m_last_lookup_key <> '') and m_dictionary.single_char_matches_pinyin(
             m_last_lookup_key, selected.text) then
@@ -141195,7 +141923,9 @@ var
             allow_learning := True;
         end;
 
-        if (m_last_lookup_key <> '') and (selected_candidate_index > 0) and
+        if ((not is_fuzzy_pinyin_active) or
+            (selected.fuzzy_cost <= 0)) and (m_last_lookup_key <> '') and
+            (selected_candidate_index > 0) and
             (Length(m_candidates) > 0) then
         begin
             top_candidate := m_candidates[0];
@@ -141239,7 +141969,10 @@ var
         end;
 
         set_pending_commit(selected.text, '', allow_learning,
-            segment_path, explicit_selection, '', manual_selection);
+            segment_path, explicit_selection, '',
+            manual_selection and ((not is_fuzzy_pinyin_active) or
+            (selected.fuzzy_cost <= 0)),
+            is_fuzzy_pinyin_active and (selected.fuzzy_cost > 0));
         Result := True;
     end;
 begin
@@ -141375,13 +142108,22 @@ begin
                             candidate.text, candidate.comment);
                         apply_partial_commit(candidate.text, remaining_pinyin,
                             selected_segment_path, False,
-                            get_shuangpin_remaining_input_code_for_partial(candidate.text));
+                            get_shuangpin_remaining_input_code_for_partial(
+                            candidate.text), False,
+                            is_fuzzy_pinyin_active and
+                            (candidate.fuzzy_cost > 0));
                         set_pending_commit(punct_text, remaining_pinyin, False);
                     end
                     else
                     begin
                         commit_text := candidate.text + punct_text;
-                        set_pending_commit(commit_text, '', not is_nonlearnable_generated_selection(candidate));
+                        set_pending_commit(commit_text, '',
+                            ((not is_fuzzy_pinyin_active) or
+                            (candidate.fuzzy_cost <= 0)) and
+                            (not is_nonlearnable_generated_selection(candidate)),
+                            selected_segment_path, False, '', False,
+                            is_fuzzy_pinyin_active and
+                            (candidate.fuzzy_cost > 0), candidate.text);
                     end;
                     Result := True;
                     Exit;
@@ -141664,6 +142406,7 @@ var
     relaxed_boundary_cache_tail_units: Integer;
     display_query_key_cache: TArray<string>;
     display_normalized_syllable_cache: TArray<string>;
+    candidate_idx: Integer;
 
     function is_short_repeated_initial_display_query_local: Boolean;
     var
@@ -141796,9 +142539,23 @@ var
     procedure initialize_display_query_context;
     var
         raw_query_text_local: string;
+        decoded_query_local: TncShuangpinDecodeResult;
+        decoded_unit_idx_local: Integer;
+        canonical_offset_local: Integer;
     begin
         normalized_pinyin := normalize_pinyin_text(m_composition_text);
-        if (m_last_lookup_key <> '') and
+        if is_shuangpin_input then
+        begin
+            decoded_query_local := nc_decode_shuangpin(
+                m_config.pinyin_input_scheme, m_composition_display_text);
+            normalized_pinyin := normalize_pinyin_text(
+                decoded_query_local.compact_pinyin);
+            if (normalized_pinyin = '') and (m_last_lookup_key <> '') then
+            begin
+                normalized_pinyin := normalize_pinyin_text(m_last_lookup_key);
+            end;
+        end
+        else if (m_last_lookup_key <> '') and
             is_full_pinyin_key(normalize_pinyin_text(m_last_lookup_key)) and
             (not is_full_pinyin_key(normalized_pinyin)) then
         begin
@@ -141812,7 +142569,24 @@ var
         end;
 
         raw_query_text_local := get_display_raw_query_text_local;
-        if Pos('''', raw_query_text_local) > 0 then
+        if is_shuangpin_input then
+        begin
+            SetLength(syllables, Length(decoded_query_local.units));
+            canonical_offset_local := 1;
+            for decoded_unit_idx_local := 0 to
+                High(decoded_query_local.units) do
+            begin
+                syllables[decoded_unit_idx_local].text :=
+                    decoded_query_local.units[decoded_unit_idx_local].pinyin;
+                syllables[decoded_unit_idx_local].start_index :=
+                    canonical_offset_local;
+                syllables[decoded_unit_idx_local].length := Length(
+                    decoded_query_local.units[decoded_unit_idx_local].pinyin);
+                Inc(canonical_offset_local,
+                    syllables[decoded_unit_idx_local].length);
+            end;
+        end
+        else if Pos('''', raw_query_text_local) > 0 then
         begin
             syllables := get_display_query_syllables_local(raw_query_text_local);
         end
@@ -143456,7 +144230,9 @@ var
         const candidate_value: TncCandidate): Integer;
     begin
         Result := candidate_value.score;
-        if candidate_value.has_dict_weight and
+        if ((not is_fuzzy_pinyin_active) or
+            (candidate_value.fuzzy_cost <= 0)) and
+            candidate_value.has_dict_weight and
             (candidate_value.dict_weight > Result) then
         begin
             Result := candidate_value.dict_weight;
@@ -143935,6 +144711,7 @@ var
         end;
     var
         exact_results: TncCandidateList;
+        fuzzy_exact_results: TncCandidateList;
         predictive_prefix_results: TncCandidateList;
         exact_weights: TDictionary<string, Integer>;
         exact_is_user: TDictionary<string, Boolean>;
@@ -143956,6 +144733,7 @@ var
         has_user_exact: Boolean;
         has_closed_particle_candidate: Boolean;
         has_exact_lookup: Boolean;
+        has_fuzzy_exact_lookup: Boolean;
         has_predictive_prefix_lookup: Boolean;
         has_particle_tail_lookup: Boolean;
         has_query_prefix_lookup: Boolean;
@@ -145888,6 +146666,7 @@ var
             local_supported_exact_pair: Boolean;
             local_predictive_prefix: Boolean;
             local_particle_tail_rule: Boolean;
+            local_fuzzy_exact: Boolean;
             local_direct_exact_rank: Integer;
 
             function is_number_unit_local(const unit_value: string): Boolean;
@@ -145984,6 +146763,9 @@ var
                 predictive_prefix_texts.ContainsKey(local_text);
             local_particle_tail_rule :=
                 particle_tail_texts.ContainsKey(local_text);
+            local_fuzzy_exact := is_fuzzy_pinyin_active and
+                (candidate_value.fuzzy_cost > 0) and
+                (local_comment = '') and (local_units = expected_units);
             local_full_complete := (local_comment = '') and
                 ((local_units = expected_units) or
                 local_particle_tail_rule or
@@ -146007,7 +146789,13 @@ var
                     item.low_frequency_medical_exact := False;
                 end;
 
-                if local_supported_exact_pair then
+                if local_fuzzy_exact then
+                begin
+                    item.category := 2;
+                    item.rank_score := display_candidate_effective_weight(
+                        candidate_value);
+                end
+                else if local_supported_exact_pair then
                 begin
                     item.category := 2;
                     item.rank_score := display_candidate_effective_weight(
@@ -146035,7 +146823,8 @@ var
                 if (not local_predictive_prefix) and
                     (not local_particle_tail_rule) and
                     (not local_direct_exact) and
-                    (not local_supported_exact_pair) then
+                    (not local_supported_exact_pair) and
+                    (not local_fuzzy_exact) then
                 begin
                     Exit;
                 end;
@@ -146294,6 +147083,12 @@ var
                 Exit;
             end;
 
+            if is_fuzzy_pinyin_active and (expected_units = 1) and
+                (m_last_lookup_syllable_count = 1) then
+            begin
+                Exit(True);
+            end;
+
             Result := False;
             if expected_units <> 2 then
             begin
@@ -146327,7 +147122,7 @@ var
     begin
         Result := False;
         if (m_dictionary = nil) or (normalized_pinyin = '') or
-            (expected_units < 2) or (expected_units > c_max_user_exact_units) or
+            (expected_units < 1) or (expected_units > c_max_user_exact_units) or
             (not confirmed_prefix_allows_short_exact_local) or
             (Pos('''', m_composition_text) > 0) or
             (Pos('''', m_last_lookup_key) > 0) or
@@ -146349,6 +147144,33 @@ var
         begin
             SetLength(exact_results, 0);
         end;
+        has_fuzzy_exact_lookup := False;
+        SetLength(fuzzy_exact_results, 0);
+        if m_config.fuzzy_pinyin_enabled and
+            (m_config.fuzzy_pinyin_rules <> []) and (m_dictionary <> nil) then
+        begin
+            if is_shuangpin_input then
+            begin
+                has_fuzzy_exact_lookup :=
+                    m_dictionary.lookup_fuzzy_full_pinyin(normalized_pinyin,
+                    fuzzy_exact_results);
+            end
+            else
+            begin
+                has_fuzzy_exact_lookup :=
+                    m_dictionary.lookup_fuzzy_full_pinyin(
+                    get_display_raw_query_text_local, fuzzy_exact_results);
+            end;
+            if has_fuzzy_exact_lookup then
+            begin
+                m_candidates := merge_candidate_lists(m_candidates,
+                    fuzzy_exact_results, 0);
+                if Length(m_candidate_segment_paths) < Length(m_candidates) then
+                begin
+                    SetLength(m_candidate_segment_paths, Length(m_candidates));
+                end;
+            end;
+        end;
         note_short_exact_phase_local('exact');
         has_predictive_prefix_lookup :=
             has_predictive_pinyin_prefix_candidate_local;
@@ -146358,7 +147180,8 @@ var
         note_short_exact_phase_local('tail');
         has_query_prefix_lookup := has_query_prefix_exact_candidate_local;
         short_exact_predictive_prefix_only_mode := False;
-        if (not has_exact_lookup) and (not has_closed_particle_candidate) and
+        if (not has_exact_lookup) and (not has_fuzzy_exact_lookup) and
+            (not has_closed_particle_candidate) and
             (not has_predictive_prefix_lookup) and
             (not has_particle_tail_lookup) and
             (not has_query_prefix_lookup) then
@@ -146439,6 +147262,7 @@ var
                 (not has_particle_tail_lookup);
 
             if ((exact_weights.Count = 0) and
+                (not has_fuzzy_exact_lookup) and
                 (not has_predictive_prefix_lookup) and
                 (not has_particle_tail_lookup) and
                 (not has_query_prefix_lookup)) or
@@ -155357,6 +156181,81 @@ var
         end;
     end;
 
+    procedure apply_single_syllable_fuzzy_exact_ranking;
+    var
+        original_candidates: TncCandidateList;
+        original_paths: TArray<string>;
+        seen_candidates: TDictionary<string, Boolean>;
+        original_idx: Integer;
+        candidate_idx_local: Integer;
+        append_idx: Integer;
+        relaxed_expected_units: Integer;
+        candidate_key: string;
+    begin
+        original_candidates := Copy(m_candidates, 0, Length(m_candidates));
+        original_paths := Copy(m_candidate_segment_paths, 0,
+            Length(m_candidate_segment_paths));
+        relaxed_expected_units := expected_units;
+
+        { A valid raw single syllable can also have a relaxed missing-apostrophe
+          split (for example le -> l/e). Rank fuzzy exacts against the raw
+          syllable first, then restore those supplemental partial candidates. }
+        expected_units := 1;
+        try
+            short_exact_query_mode :=
+                apply_short_query_exact_display_ranking;
+        finally
+            expected_units := relaxed_expected_units;
+        end;
+        if not short_exact_query_mode then
+        begin
+            Exit;
+        end;
+
+        seen_candidates := TDictionary<string, Boolean>.Create;
+        try
+            for candidate_idx_local := 0 to High(m_candidates) do
+            begin
+                candidate_key := build_candidate_identity_key(
+                    m_candidates[candidate_idx_local].text,
+                    m_candidates[candidate_idx_local].comment);
+                if candidate_key <> '' then
+                begin
+                    seen_candidates.AddOrSetValue(candidate_key, True);
+                end;
+            end;
+
+            for original_idx := 0 to High(original_candidates) do
+            begin
+                candidate_key := build_candidate_identity_key(
+                    original_candidates[original_idx].text,
+                    original_candidates[original_idx].comment);
+                if (candidate_key = '') or
+                    seen_candidates.ContainsKey(candidate_key) then
+                begin
+                    Continue;
+                end;
+
+                append_idx := Length(m_candidates);
+                SetLength(m_candidates, append_idx + 1);
+                SetLength(m_candidate_segment_paths, append_idx + 1);
+                m_candidates[append_idx] := original_candidates[original_idx];
+                if original_idx < Length(original_paths) then
+                begin
+                    m_candidate_segment_paths[append_idx] :=
+                        original_paths[original_idx];
+                end
+                else
+                begin
+                    m_candidate_segment_paths[append_idx] := '';
+                end;
+                seen_candidates.AddOrSetValue(candidate_key, True);
+            end;
+        finally
+            seen_candidates.Free;
+        end;
+    end;
+
     procedure filter_display_single_syllable_prefix_partials;
     var
         in_idx: Integer;
@@ -162043,6 +162942,11 @@ var
                 (Trim(m_candidates[idx].comment) = '') and
                 (get_candidate_text_unit_count(candidate_text_local) =
                 expected_units) and
+                (not (is_fuzzy_pinyin_active and
+                (m_candidates[idx].fuzzy_cost > 0) and
+                ((m_candidates[idx].source = cs_user) or
+                ((m_candidates[idx].source = cs_rule) and
+                m_candidates[idx].has_dict_weight)))) and
                 (not display_candidate_is_persistent_latest_choice(
                 normalized_pinyin, candidate_text_local)) and
                 (not ((m_confirmed_text <> '') and
@@ -165472,7 +166376,9 @@ var
             candidate_units_local :=
                 get_candidate_text_unit_count(candidate_text_local);
             if (candidate_tail_local <> '') and (candidate_units_local >= 2) and
-                (candidate_units_local < expected_units) then
+                (candidate_units_local < expected_units) and
+                (not (is_fuzzy_pinyin_active and
+                (m_candidates[in_idx_local].fuzzy_cost > 0))) then
             begin
                 head_key_local := build_display_query_key(0,
                     candidate_units_local);
@@ -165516,6 +166422,122 @@ var
         if Length(m_candidate_segment_paths) > out_idx_local then
         begin
             SetLength(m_candidate_segment_paths, out_idx_local);
+        end;
+    end;
+
+    procedure ensure_fuzzy_short_single_prefixes_visible_local;
+    const
+        c_max_fuzzy_single_prefix_reserve = 3;
+    var
+        page_limit_local: Integer;
+        reserve_limit_local: Integer;
+        fuzzy_in_page_local: Integer;
+        missing_local: Integer;
+        source_idx_local: Integer;
+        target_idx_local: Integer;
+        scan_idx_local: Integer;
+        candidate_tmp_local: TncCandidate;
+        path_tmp_local: string;
+
+        function is_fuzzy_single_prefix_local(
+            const candidate_value: TncCandidate): Boolean;
+        var
+            tail_units_local: Integer;
+        begin
+            Result := False;
+            if (candidate_value.fuzzy_cost <= 0) or
+                (Trim(candidate_value.comment) = '') or
+                (get_candidate_text_unit_count(Trim(candidate_value.text)) <> 1) then
+            begin
+                Exit;
+            end;
+
+            tail_units_local := get_effective_compact_pinyin_unit_count(
+                normalize_pinyin_text(Trim(candidate_value.comment)));
+            Result := tail_units_local > 0;
+            if Result and (expected_units > 0) then
+            begin
+                Result := 1 + tail_units_local = expected_units;
+            end;
+        end;
+
+        function should_keep_page_slot_local(
+            const candidate_value: TncCandidate): Boolean;
+        begin
+            Result := is_fuzzy_single_prefix_local(candidate_value) or
+                ((candidate_value.fuzzy_cost > 0) and
+                (Trim(candidate_value.comment) = ''));
+        end;
+    begin
+        if (not is_fuzzy_pinyin_active) or (expected_units < 2) or
+            (Length(m_candidates) <= 1) then
+        begin
+            Exit;
+        end;
+
+        page_limit_local := Min(get_candidate_page_size,
+            Length(m_candidates));
+        if page_limit_local <= 1 then
+        begin
+            Exit;
+        end;
+        reserve_limit_local := Min(c_max_fuzzy_single_prefix_reserve,
+            page_limit_local - 1);
+
+        fuzzy_in_page_local := 0;
+        for scan_idx_local := 0 to page_limit_local - 1 do
+        begin
+            if is_fuzzy_single_prefix_local(m_candidates[scan_idx_local]) then
+            begin
+                Inc(fuzzy_in_page_local);
+            end;
+        end;
+        missing_local := reserve_limit_local - fuzzy_in_page_local;
+        if missing_local <= 0 then
+        begin
+            Exit;
+        end;
+
+        target_idx_local := page_limit_local - missing_local;
+        while missing_local > 0 do
+        begin
+            while (target_idx_local < page_limit_local) and
+                should_keep_page_slot_local(m_candidates[target_idx_local]) do
+            begin
+                Inc(target_idx_local);
+            end;
+            if target_idx_local >= page_limit_local then
+            begin
+                Break;
+            end;
+
+            source_idx_local := -1;
+            for scan_idx_local := page_limit_local to High(m_candidates) do
+            begin
+                if is_fuzzy_single_prefix_local(m_candidates[scan_idx_local]) then
+                begin
+                    source_idx_local := scan_idx_local;
+                    Break;
+                end;
+            end;
+            if source_idx_local < 0 then
+            begin
+                Break;
+            end;
+
+            candidate_tmp_local := m_candidates[target_idx_local];
+            m_candidates[target_idx_local] := m_candidates[source_idx_local];
+            m_candidates[source_idx_local] := candidate_tmp_local;
+            if (target_idx_local < Length(m_candidate_segment_paths)) and
+                (source_idx_local < Length(m_candidate_segment_paths)) then
+            begin
+                path_tmp_local := m_candidate_segment_paths[target_idx_local];
+                m_candidate_segment_paths[target_idx_local] :=
+                    m_candidate_segment_paths[source_idx_local];
+                m_candidate_segment_paths[source_idx_local] := path_tmp_local;
+            end;
+            Inc(target_idx_local);
+            Dec(missing_local);
         end;
     end;
 
@@ -166310,6 +167332,17 @@ var
             if candidate_text_local = '' then
             begin
                 Exit;
+            end;
+
+            if is_fuzzy_pinyin_active and
+                (candidate_value.fuzzy_cost > 0) and
+                (get_candidate_text_unit_count(candidate_text_local) =
+                expected_units) and
+                ((candidate_value.source = cs_user) or
+                ((candidate_value.source = cs_rule) and
+                candidate_value.has_dict_weight)) then
+            begin
+                Exit(True);
             end;
 
             for exact_idx_local := 0 to High(protected_full_query_exacts) do
@@ -171098,6 +172131,10 @@ var
             remove_bad_fixed_tail_candidates;
         end;
         restore_short_exact_ranked_order_local;
+        if m_last_lookup_prefix_partial_fast then
+        begin
+            ensure_fuzzy_short_single_prefixes_visible_local;
+        end;
         normalize_page_and_selection;
         start_index := m_page_index * visible_page_size;
         promoted_repeated_initial_count := 0;
@@ -171569,6 +172606,16 @@ begin
     short_context_promoted_exact_text := '';
     short_context_promoted_exact_lead := 0;
     promoted_repeated_initial_count := 0;
+    if not is_fuzzy_pinyin_active then
+    begin
+        for candidate_idx := 0 to High(m_candidates) do
+        begin
+            m_candidates[candidate_idx].fuzzy_cost := 0;
+            m_candidates[candidate_idx].fuzzy_rules := [];
+        end;
+        m_forced_visible_top_candidate.fuzzy_cost := 0;
+        m_forced_visible_top_candidate.fuzzy_rules := [];
+    end;
     SetLength(Result, 0);
     page_size := get_candidate_limit;
     visible_page_size := get_candidate_page_size;
@@ -171646,25 +172693,38 @@ begin
     if m_last_lookup_syllable_count = 1 then
     begin
         expected_units := 1;
-        ensure_missing_apostrophe_display_partial;
-        relaxed_single_syllables := parse_pinyin_with_relaxed_missing_apostrophe(
-            normalized_pinyin);
-        if Length(relaxed_single_syllables) > 1 then
+        if not is_shuangpin_input then
         begin
-            expected_units := Length(relaxed_single_syllables);
-            prefer_display_relaxed_no_initial_tail_boundary;
-        end
-        else
-        begin
-            expected_units :=
-                infer_relaxed_missing_apostrophe_units_from_candidates;
-            if expected_units > 1 then
+            ensure_missing_apostrophe_display_partial;
+            relaxed_single_syllables :=
+                parse_pinyin_with_relaxed_missing_apostrophe(
+                normalized_pinyin);
+            if Length(relaxed_single_syllables) > 1 then
             begin
+                expected_units := Length(relaxed_single_syllables);
                 prefer_display_relaxed_no_initial_tail_boundary;
             end
             else
             begin
-                expected_units := 1;
+                expected_units :=
+                    infer_relaxed_missing_apostrophe_units_from_candidates;
+                if expected_units > 1 then
+                begin
+                    prefer_display_relaxed_no_initial_tail_boundary;
+                end
+                else
+                begin
+                    expected_units := 1;
+                end;
+            end;
+        end;
+        if m_config.fuzzy_pinyin_enabled and
+            (m_config.fuzzy_pinyin_rules <> []) then
+        begin
+            apply_single_syllable_fuzzy_exact_ranking;
+            if short_exact_query_mode then
+            begin
+                enforce_final_fixed_top_candidate;
             end;
         end;
         filter_display_single_syllable_prefix_partials;
@@ -172693,6 +173753,9 @@ var
     confirmed_segment_path_prefix: string;
     explicit_commit_choice: Boolean;
     literal_commit_choice: Boolean;
+    pending_fuzzy_choice: Boolean;
+    pending_fuzzy_choice_text: string;
+    fuzzy_commit_choice: Boolean;
     prev_prev_committed_text: string;
     prev_prev_committed_pinyin: string;
     previous_committed_text: string;
@@ -173156,6 +174219,9 @@ begin
     allow_learning := m_pending_commit_allow_learning;
     explicit_commit_choice := m_pending_commit_explicit_choice;
     literal_commit_choice := m_pending_commit_literal_choice;
+    pending_fuzzy_choice := m_pending_commit_fuzzy_choice;
+    pending_fuzzy_choice_text := m_pending_commit_fuzzy_text;
+    fuzzy_commit_choice := pending_fuzzy_choice;
     literal_only_commit := False;
     literal_full_pinyin := '';
     m_pending_commit_text := '';
@@ -173165,6 +174231,8 @@ begin
     m_pending_commit_allow_learning := True;
     m_pending_commit_explicit_choice := False;
     m_pending_commit_literal_choice := False;
+    m_pending_commit_fuzzy_choice := False;
+    m_pending_commit_fuzzy_text := '';
     m_pending_commit_segment_path := '';
     normalized_pinyin := m_pending_commit_query_key;
     m_pending_commit_query_key := '';
@@ -173203,7 +174271,8 @@ begin
             end;
         end;
     end;
-    if (not allow_learning) and (commit_segment_text <> '') and
+    if (not fuzzy_commit_choice) and (not allow_learning) and
+        (commit_segment_text <> '') and
         (get_candidate_text_unit_count(commit_segment_text) >= 4) and
         is_high_confidence_segment_path(effective_segment_path) and
         (not is_generated_short_particle_tail_commit(normalized_pinyin,
@@ -173217,6 +174286,7 @@ begin
     begin
         for segment in m_confirmed_segments do
         begin
+            fuzzy_commit_choice := fuzzy_commit_choice or segment.fuzzy_choice;
             full_pinyin := full_pinyin + segment.pinyin;
             append_path_segment(segment.text);
         end;
@@ -173262,7 +174332,37 @@ begin
             allow_learning := False;
         end;
     end;
-    if (m_dictionary <> nil) and (not literal_only_commit) then
+    if fuzzy_commit_choice then
+    begin
+        allow_learning := False;
+        literal_only_commit := False;
+        if m_dictionary <> nil then
+        begin
+            if m_confirmed_segments <> nil then
+            begin
+                for segment in m_confirmed_segments do
+                begin
+                    if segment.fuzzy_choice then
+                    begin
+                        m_dictionary.record_fuzzy_choice(segment.pinyin,
+                            segment.text);
+                    end;
+                end;
+            end;
+            if pending_fuzzy_choice and
+                (normalized_pinyin <> '') and (commit_segment_text <> '') then
+            begin
+                if pending_fuzzy_choice_text = '' then
+                begin
+                    pending_fuzzy_choice_text := commit_segment_text;
+                end;
+                m_dictionary.record_fuzzy_choice(normalized_pinyin,
+                    pending_fuzzy_choice_text);
+            end;
+        end;
+    end;
+    if (m_dictionary <> nil) and (not literal_only_commit) and
+        (not fuzzy_commit_choice) then
     begin
         m_dictionary.begin_learning_batch;
         try
@@ -173327,15 +174427,18 @@ begin
             raise;
         end;
     end
-    else if (m_dictionary = nil) and (not literal_only_commit) then
+    else if (m_dictionary = nil) and (not literal_only_commit) and
+        (not fuzzy_commit_choice) then
     begin
         record_context_pair(prev_left_context, out_text);
     end;
-    if (not literal_only_commit) and (commit_segment_text <> '') then
+    if (not literal_only_commit) and (not fuzzy_commit_choice) and
+        (commit_segment_text <> '') then
     begin
         note_session_commit(commit_segment_text);
     end;
-    if (not literal_only_commit) and (commit_text <> '') and
+    if (not literal_only_commit) and (not fuzzy_commit_choice) and
+        (commit_text <> '') and
         (commit_text <> commit_segment_text) then
     begin
         note_session_commit(commit_text);
@@ -173393,7 +174496,8 @@ begin
             end;
         end;
     end;
-    if (not literal_only_commit) and (commit_text <> '') then
+    if (not literal_only_commit) and (not fuzzy_commit_choice) and
+        (commit_text <> '') then
     begin
         note_output_phrase_context(commit_text);
     end;
@@ -173402,7 +174506,8 @@ begin
         note_segment_path_context(combined_segment_path);
     end;
     m_last_debug_commit_segment_path := combined_segment_path;
-    if (not literal_only_commit) and (normalized_pinyin <> '') and
+    if (not literal_only_commit) and (not fuzzy_commit_choice) and
+        (normalized_pinyin <> '') and
         (commit_text <> '') and
         (m_confirmed_text = '') and (commit_text = commit_segment_text) and
         (get_candidate_text_unit_count(commit_text) <= 4) and

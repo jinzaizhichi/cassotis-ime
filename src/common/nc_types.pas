@@ -21,6 +21,21 @@ const
     c_max_candidate_color_scheme = 5;
 
 type
+    TncFuzzyPinyinRule = (
+        fpr_z_zh,
+        fpr_c_ch,
+        fpr_s_sh,
+        fpr_l_n,
+        fpr_f_h,
+        fpr_r_l,
+        fpr_an_ang,
+        fpr_en_eng,
+        fpr_in_ing,
+        fpr_ian_iang,
+        fpr_uan_uang
+    );
+    TncFuzzyPinyinRules = set of TncFuzzyPinyinRule;
+
     TncCandidateSource = (cs_rule, cs_user);
     TncLogLevel = (ll_debug, ll_info, ll_warn, ll_error);
 
@@ -31,6 +46,8 @@ type
         source: TncCandidateSource;
         has_dict_weight: Boolean;
         dict_weight: Integer;
+        fuzzy_cost: Integer;
+        fuzzy_rules: TncFuzzyPinyinRules;
     end;
 
     TncCandidateList = array of TncCandidate;
@@ -102,6 +119,8 @@ type
     TncEngineConfig = record
         input_mode: TncInputMode;
         pinyin_input_scheme: TncPinyinInputScheme;
+        fuzzy_pinyin_enabled: Boolean;
+        fuzzy_pinyin_rules: TncFuzzyPinyinRules;
         max_candidates: Integer;
         enable_ctrl_space_toggle: Boolean;
         enable_shift_space_full_width_toggle: Boolean;

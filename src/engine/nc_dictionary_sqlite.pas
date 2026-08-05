@@ -13,6 +13,7 @@ uses
     Winapi.Windows,
     nc_types,
     nc_dictionary_intf,
+    nc_fuzzy_pinyin,
     nc_pinyin_parser,
     nc_sqlite;
 
@@ -120,6 +121,12 @@ type
         m_literal_user_entry_cache: TDictionary<string, Boolean>;
         m_admin_place_longer_prefix_cache: TDictionary<string, TArray<string>>;
         m_admin_place_query_syllable_count_cache: TDictionary<string, Integer>;
+        m_fuzzy_pinyin_enabled: Boolean;
+        m_fuzzy_pinyin_rules: TncFuzzyPinyinRules;
+        m_fuzzy_lookup_result_cache: TDictionary<string, TncCandidateList>;
+        m_fuzzy_lookup_result_cache_order: TQueue<string>;
+        m_fuzzy_choice_bonus_cache: TDictionary<string, Integer>;
+        m_fuzzy_choice_query_loaded_cache: TDictionary<string, Boolean>;
         m_debug_mode: Boolean;
         m_last_lookup_debug_hint: string;
         m_short_lookup_cache_prewarmed: Boolean;
@@ -213,6 +220,12 @@ type
         function lookup_exact_full_pinyin_internal(const pinyin: string;
             out results: TncCandidateList;
             const preserve_explicit_boundaries: Boolean): Boolean;
+        function lookup_isolated_exact_component_internal(
+            const pinyin: string; out results: TncCandidateList;
+            const use_base_preflight: Boolean): Boolean;
+        procedure load_fuzzy_choice_bonuses(const pinyin: string);
+        function get_fuzzy_choice_bonus(const pinyin: string;
+            const text: string): Integer;
     public
         constructor create(const base_db_path: string; const user_db_path: string;
             const prune_user_entries_on_open: Boolean = True);
@@ -229,6 +242,13 @@ type
             out results: TncCandidateList): Boolean; override;
         function lookup_full_pinyin_prefix(const pinyin_prefix: string;
             out results: TncCandidateList): Boolean; override;
+        function lookup_fuzzy_full_pinyin(const pinyin: string;
+            out results: TncCandidateList): Boolean; override;
+        function lookup_fuzzy_full_pinyin_bounded(const pinyin: string;
+            out results: TncCandidateList; const max_cost: Integer;
+            const max_variants: Integer;
+            const max_syllables: Integer;
+            const max_candidates_per_variant: Integer = 0): Boolean; override;
         function lookup_literal_user_words(const query: string;
             out results: TncCandidateList): Boolean; override;
         function resolve_literal_user_word_pinyin(const query: string;
@@ -243,6 +263,10 @@ type
         procedure commit_learning_batch; override;
         procedure rollback_learning_batch; override;
         procedure set_debug_mode(const enabled: Boolean); override;
+        procedure set_fuzzy_pinyin_config(const enabled: Boolean;
+            const rules: TncFuzzyPinyinRules); override;
+        procedure record_fuzzy_choice(const pinyin: string;
+            const text: string); override;
         procedure record_commit(const pinyin: string; const text: string;
             const explicit_choice: Boolean = False); override;
         procedure record_context_pair(const left_text: string; const committed_text: string); override;
@@ -303,7 +327,7 @@ const
         '    value TEXT NOT NULL' + sLineBreak +
         ');' + sLineBreak +
         sLineBreak +
-        'INSERT OR IGNORE INTO meta(key, value) VALUES(''schema_version'', ''13'');' + sLineBreak +
+        'INSERT OR IGNORE INTO meta(key, value) VALUES(''schema_version'', ''14'');' + sLineBreak +
         sLineBreak +
         'CREATE TABLE IF NOT EXISTS dict_base (' + sLineBreak +
         '    id INTEGER PRIMARY KEY AUTOINCREMENT,' + sLineBreak +
@@ -376,6 +400,17 @@ const
         sLineBreak +
         'CREATE INDEX IF NOT EXISTS idx_dict_user_stats_pinyin ON dict_user_stats(pinyin);' + sLineBreak +
         'CREATE INDEX IF NOT EXISTS idx_dict_user_stats_text ON dict_user_stats(text);' + sLineBreak +
+        sLineBreak +
+        'CREATE TABLE IF NOT EXISTS dict_user_fuzzy_choice (' + sLineBreak +
+        '    pinyin TEXT NOT NULL,' + sLineBreak +
+        '    text TEXT NOT NULL,' + sLineBreak +
+        '    commit_count INTEGER DEFAULT 0,' + sLineBreak +
+        '    last_used INTEGER DEFAULT 0,' + sLineBreak +
+        '    PRIMARY KEY(pinyin, text)' + sLineBreak +
+        ');' + sLineBreak +
+        sLineBreak +
+        'CREATE INDEX IF NOT EXISTS idx_dict_user_fuzzy_choice_pinyin ' +
+        'ON dict_user_fuzzy_choice(pinyin);' + sLineBreak +
         sLineBreak +
         'CREATE TABLE IF NOT EXISTS dict_user_query_latest (' + sLineBreak +
         '    query_pinyin TEXT NOT NULL PRIMARY KEY,' + sLineBreak +
@@ -2211,6 +2246,13 @@ begin
         TDictionary<string, TArray<string>>.Create;
     m_admin_place_query_syllable_count_cache :=
         TDictionary<string, Integer>.Create;
+    m_fuzzy_pinyin_enabled := False;
+    m_fuzzy_pinyin_rules := [];
+    m_fuzzy_lookup_result_cache :=
+        TDictionary<string, TncCandidateList>.Create;
+    m_fuzzy_lookup_result_cache_order := TQueue<string>.Create;
+    m_fuzzy_choice_bonus_cache := TDictionary<string, Integer>.Create;
+    m_fuzzy_choice_query_loaded_cache := TDictionary<string, Boolean>.Create;
     m_debug_mode := False;
     m_last_lookup_debug_hint := '';
     m_short_lookup_cache_prewarmed := False;
@@ -2225,6 +2267,26 @@ end;
 destructor TncSqliteDictionary.Destroy;
 begin
     close;
+    if m_fuzzy_lookup_result_cache_order <> nil then
+    begin
+        m_fuzzy_lookup_result_cache_order.Free;
+        m_fuzzy_lookup_result_cache_order := nil;
+    end;
+    if m_fuzzy_lookup_result_cache <> nil then
+    begin
+        m_fuzzy_lookup_result_cache.Free;
+        m_fuzzy_lookup_result_cache := nil;
+    end;
+    if m_fuzzy_choice_query_loaded_cache <> nil then
+    begin
+        m_fuzzy_choice_query_loaded_cache.Free;
+        m_fuzzy_choice_query_loaded_cache := nil;
+    end;
+    if m_fuzzy_choice_bonus_cache <> nil then
+    begin
+        m_fuzzy_choice_bonus_cache.Free;
+        m_fuzzy_choice_bonus_cache := nil;
+    end;
     if m_base_connection <> nil then
     begin
         m_base_connection.Free;
@@ -2439,6 +2501,365 @@ begin
     Result := Min(6400, (prefix_score div 16) + (contains_score div 32));
 end;
 
+procedure TncSqliteDictionary.set_fuzzy_pinyin_config(
+    const enabled: Boolean; const rules: TncFuzzyPinyinRules);
+begin
+    if (m_fuzzy_pinyin_enabled = enabled) and
+        (m_fuzzy_pinyin_rules = rules) then
+    begin
+        Exit;
+    end;
+
+    m_fuzzy_pinyin_enabled := enabled;
+    m_fuzzy_pinyin_rules := rules;
+    if m_fuzzy_lookup_result_cache <> nil then
+    begin
+        m_fuzzy_lookup_result_cache.Clear;
+    end;
+    if m_fuzzy_lookup_result_cache_order <> nil then
+    begin
+        m_fuzzy_lookup_result_cache_order.Clear;
+    end;
+end;
+
+procedure TncSqliteDictionary.load_fuzzy_choice_bonuses(
+    const pinyin: string);
+const
+    query_sql =
+        'SELECT text, commit_count FROM dict_user_fuzzy_choice ' +
+        'WHERE pinyin = ?1';
+    c_choice_bonus_per_commit = 160;
+    c_choice_bonus_cap = 640;
+var
+    query_key: string;
+    cache_key: string;
+    text_value: string;
+    commit_count: Integer;
+    stmt: Psqlite3_stmt;
+    step_result: Integer;
+begin
+    query_key := normalize_canonical_pinyin_key(pinyin);
+    if (query_key = '') or (m_fuzzy_choice_query_loaded_cache = nil) or
+        m_fuzzy_choice_query_loaded_cache.ContainsKey(query_key) then
+    begin
+        Exit;
+    end;
+
+    m_fuzzy_choice_query_loaded_cache.Add(query_key, True);
+    if (not m_user_ready) or (m_user_connection = nil) then
+    begin
+        Exit;
+    end;
+
+    stmt := nil;
+    try
+        if (not m_user_connection.prepare(query_sql, stmt)) or
+            (not m_user_connection.bind_text(stmt, 1, query_key)) then
+        begin
+            Exit;
+        end;
+
+        step_result := m_user_connection.step(stmt);
+        while step_result = SQLITE_ROW do
+        begin
+            text_value := Trim(m_user_connection.column_text(stmt, 0));
+            commit_count := m_user_connection.column_int(stmt, 1);
+            if (text_value <> '') and (commit_count > 0) and
+                (m_fuzzy_choice_bonus_cache <> nil) then
+            begin
+                cache_key := query_key + #1 + text_value;
+                m_fuzzy_choice_bonus_cache.AddOrSetValue(cache_key,
+                    Min(c_choice_bonus_cap,
+                    commit_count * c_choice_bonus_per_commit));
+            end;
+            step_result := m_user_connection.step(stmt);
+        end;
+    finally
+        if stmt <> nil then
+        begin
+            m_user_connection.finalize(stmt);
+        end;
+    end;
+end;
+
+function TncSqliteDictionary.get_fuzzy_choice_bonus(const pinyin: string;
+    const text: string): Integer;
+var
+    query_key: string;
+    cache_key: string;
+begin
+    Result := 0;
+    query_key := normalize_canonical_pinyin_key(pinyin);
+    if (query_key = '') or (Trim(text) = '') then
+    begin
+        Exit;
+    end;
+
+    load_fuzzy_choice_bonuses(query_key);
+    cache_key := query_key + #1 + Trim(text);
+    if m_fuzzy_choice_bonus_cache <> nil then
+    begin
+        m_fuzzy_choice_bonus_cache.TryGetValue(cache_key, Result);
+    end;
+end;
+
+function TncSqliteDictionary.lookup_fuzzy_full_pinyin(const pinyin: string;
+    out results: TncCandidateList): Boolean;
+begin
+    Result := lookup_fuzzy_full_pinyin_bounded(pinyin, results, 4, 16, 4, 0);
+end;
+
+function TncSqliteDictionary.lookup_fuzzy_full_pinyin_bounded(
+    const pinyin: string; out results: TncCandidateList;
+    const max_cost: Integer; const max_variants: Integer;
+    const max_syllables: Integer;
+    const max_candidates_per_variant: Integer): Boolean;
+const
+    c_fuzzy_penalty_per_cost = 480;
+    c_fuzzy_result_cache_limit = 4096;
+var
+    query_key: string;
+    cache_key: string;
+    variants: TncFuzzyPinyinQueryVariants;
+    variant_results: TncCandidateList;
+    expected_units: Integer;
+    list: TList<TncCandidate>;
+    seen: TDictionary<string, Integer>;
+    variant: TncFuzzyPinyinQueryVariant;
+    candidate: TncCandidate;
+    existing: TncCandidate;
+    candidate_idx: Integer;
+    candidate_high: Integer;
+    existing_idx: Integer;
+    output_idx: Integer;
+    key: string;
+    preserve_boundaries: Boolean;
+
+    procedure cache_results(const values: TncCandidateList);
+    var
+        evicted_cache_key: string;
+    begin
+        if m_fuzzy_lookup_result_cache = nil then
+        begin
+            Exit;
+        end;
+
+        while m_fuzzy_lookup_result_cache.Count >=
+            c_fuzzy_result_cache_limit do
+        begin
+            if (m_fuzzy_lookup_result_cache_order = nil) or
+                (m_fuzzy_lookup_result_cache_order.Count = 0) then
+            begin
+                m_fuzzy_lookup_result_cache.Clear;
+                Break;
+            end;
+            evicted_cache_key := m_fuzzy_lookup_result_cache_order.Dequeue;
+            m_fuzzy_lookup_result_cache.Remove(evicted_cache_key);
+        end;
+        m_fuzzy_lookup_result_cache.AddOrSetValue(cache_key,
+            Copy(values, 0, Length(values)));
+        if m_fuzzy_lookup_result_cache_order <> nil then
+        begin
+            m_fuzzy_lookup_result_cache_order.Enqueue(cache_key);
+        end;
+    end;
+
+begin
+    SetLength(results, 0);
+    Result := False;
+    if (not m_fuzzy_pinyin_enabled) or (m_fuzzy_pinyin_rules = []) then
+    begin
+        Exit;
+    end;
+    if (max_cost <= 0) or (max_variants <= 0) or
+        (max_syllables <= 0) then
+    begin
+        Exit;
+    end;
+
+    query_key := normalize_canonical_pinyin_key(pinyin);
+    if (query_key = '') or (not ensure_open) then
+    begin
+        Exit;
+    end;
+    cache_key := query_key + #1 + IntToStr(max_cost) + #1 +
+        IntToStr(max_variants) + #1 + IntToStr(max_syllables) + #1 +
+        IntToStr(max_candidates_per_variant);
+    if (m_fuzzy_lookup_result_cache <> nil) and
+        m_fuzzy_lookup_result_cache.TryGetValue(cache_key, results) then
+    begin
+        results := Copy(results, 0, Length(results));
+        Exit(Length(results) > 0);
+    end;
+
+    variants := nc_build_fuzzy_query_variants(query_key,
+        m_fuzzy_pinyin_rules, max_cost, max_variants, max_syllables);
+    if Length(variants) = 0 then
+    begin
+        cache_results(results);
+        Exit;
+    end;
+
+    expected_units := variants[0].syllable_count;
+    if expected_units <= 0 then
+    begin
+        Exit;
+    end;
+
+    preserve_boundaries := Pos('''', query_key) > 0;
+    list := TList<TncCandidate>.Create;
+    seen := TDictionary<string, Integer>.Create;
+    try
+        for variant in variants do
+        begin
+            if preserve_boundaries then
+            begin
+                if not lookup_exact_full_pinyin_internal(variant.text,
+                    variant_results, True) then
+                begin
+                    Continue;
+                end;
+            end
+            else if not lookup_isolated_exact_component_internal(
+                variant.text, variant_results, True) then
+            begin
+                Continue;
+            end;
+
+            candidate_high := High(variant_results);
+            if (max_candidates_per_variant > 0) and
+                (candidate_high >= max_candidates_per_variant) then
+            begin
+                candidate_high := max_candidates_per_variant - 1;
+            end;
+            for candidate_idx := 0 to candidate_high do
+            begin
+                candidate := variant_results[candidate_idx];
+                candidate.text := Trim(candidate.text);
+                if (candidate.text = '') or
+                    (Trim(candidate.comment) <> '') or
+                    (get_valid_cjk_codepoint_count(candidate.text) <>
+                    expected_units) then
+                begin
+                    Continue;
+                end;
+                if preserve_boundaries and
+                    (not strict_full_pinyin_text_alignment_valid(
+                    variant.text, candidate.text)) then
+                begin
+                    Continue;
+                end;
+
+                candidate.score := candidate.score -
+                    variant.cost * c_fuzzy_penalty_per_cost +
+                    get_fuzzy_choice_bonus(query_key, candidate.text);
+                candidate.source := cs_rule;
+                candidate.fuzzy_cost := variant.cost;
+                candidate.fuzzy_rules := variant.rules;
+                key := LowerCase(candidate.text) + #1 +
+                    LowerCase(Trim(candidate.comment));
+                if seen.TryGetValue(key, existing_idx) then
+                begin
+                    existing := list[existing_idx];
+                    if (candidate.fuzzy_cost < existing.fuzzy_cost) or
+                        ((candidate.fuzzy_cost = existing.fuzzy_cost) and
+                        (candidate.score > existing.score)) then
+                    begin
+                        list[existing_idx] := candidate;
+                    end;
+                    Continue;
+                end;
+
+                seen.Add(key, list.Count);
+                list.Add(candidate);
+            end;
+        end;
+
+        list.Sort(TComparer<TncCandidate>.Construct(
+            function(const left, right: TncCandidate): Integer
+            begin
+                Result := right.score - left.score;
+                if Result = 0 then
+                begin
+                    Result := left.fuzzy_cost - right.fuzzy_cost;
+                end;
+                if Result = 0 then
+                begin
+                    Result := CompareText(left.text, right.text);
+                end;
+            end));
+
+        SetLength(results, list.Count);
+        for output_idx := 0 to list.Count - 1 do
+        begin
+            results[output_idx] := list[output_idx];
+        end;
+    finally
+        seen.Free;
+        list.Free;
+    end;
+
+    Result := Length(results) > 0;
+    cache_results(results);
+end;
+
+procedure TncSqliteDictionary.record_fuzzy_choice(const pinyin: string;
+    const text: string);
+const
+    insert_sql =
+        'INSERT OR IGNORE INTO dict_user_fuzzy_choice' +
+        '(pinyin, text, commit_count, last_used) ' +
+        'VALUES(?1, ?2, 0, strftime(''%s'',''now''))';
+    update_sql =
+        'UPDATE dict_user_fuzzy_choice SET ' +
+        'commit_count = MIN(commit_count + 1, 1000000), ' +
+        'last_used = strftime(''%s'',''now'') ' +
+        'WHERE pinyin = ?1 AND text = ?2';
+var
+    query_key: string;
+    text_value: string;
+    stmt: Psqlite3_stmt;
+    write_ok: Boolean;
+
+    function execute_statement(const sql_text: string): Boolean;
+    begin
+        Result := False;
+        stmt := nil;
+        try
+            if (not m_user_connection.prepare(sql_text, stmt)) or
+                (not m_user_connection.bind_text(stmt, 1, query_key)) or
+                (not m_user_connection.bind_text(stmt, 2, text_value)) then
+            begin
+                Exit;
+            end;
+            Result := m_user_connection.step(stmt) = SQLITE_DONE;
+        finally
+            if stmt <> nil then
+            begin
+                m_user_connection.finalize(stmt);
+            end;
+        end;
+    end;
+begin
+    query_key := normalize_canonical_pinyin_key(pinyin);
+    text_value := Trim(text);
+    if (query_key = '') or (text_value = '') or (not ensure_open) or
+        (not m_user_ready) or (m_user_connection = nil) then
+    begin
+        Exit;
+    end;
+
+    write_ok := execute_statement(insert_sql);
+    if write_ok then
+    begin
+        write_ok := execute_statement(update_sql);
+    end;
+    if write_ok then
+    begin
+        note_user_data_changed;
+    end;
+end;
+
 function TncSqliteDictionary.lookup_full_pinyin_prefix(const pinyin_prefix: string;
     out results: TncCandidateList): Boolean;
 const
@@ -2547,6 +2968,8 @@ begin
                 item.score := item.dict_weight;
                 item.source := cs_rule;
                 item.has_dict_weight := True;
+                item.fuzzy_cost := 0;
+                item.fuzzy_rules := [];
                 SetLength(results, Length(results) + 1);
                 results[High(results)] := item;
                 step_result := m_base_connection.step(stmt);
@@ -2585,6 +3008,8 @@ begin
                         item.score := item.dict_weight;
                         item.source := cs_user;
                         item.has_dict_weight := False;
+                        item.fuzzy_cost := 0;
+                        item.fuzzy_rules := [];
                         SetLength(results, Length(results) + 1);
                         results[High(results)] := item;
                         step_result := m_user_connection.step(stmt);
@@ -3061,6 +3486,27 @@ begin
     end;
 
     if not connection.exec(
+        'CREATE TABLE IF NOT EXISTS dict_user_fuzzy_choice (' +
+        'pinyin TEXT NOT NULL,' +
+        'text TEXT NOT NULL,' +
+        'commit_count INTEGER DEFAULT 0,' +
+        'last_used INTEGER DEFAULT 0,' +
+        'PRIMARY KEY(pinyin, text)' +
+        ');') then
+    begin
+        Result := False;
+        Exit;
+    end;
+
+    if not connection.exec(
+        'CREATE INDEX IF NOT EXISTS idx_dict_user_fuzzy_choice_pinyin ' +
+        'ON dict_user_fuzzy_choice(pinyin);') then
+    begin
+        Result := False;
+        Exit;
+    end;
+
+    if not connection.exec(
         'CREATE TABLE IF NOT EXISTS dict_user_query_latest (' +
         'query_pinyin TEXT NOT NULL PRIMARY KEY,' +
         'text TEXT NOT NULL,' +
@@ -3231,7 +3677,7 @@ begin
 
     if not get_schema_version(connection, schema_version) then
     begin
-        set_schema_version(connection, 13);
+        set_schema_version(connection, 14);
         Result := True;
         Exit;
     end;
@@ -3299,6 +3745,11 @@ begin
     if schema_version < 13 then
     begin
         set_schema_version(connection, 13);
+    end;
+
+    if schema_version < 14 then
+    begin
+        set_schema_version(connection, 14);
     end;
 
     Result := True;
@@ -4045,6 +4496,8 @@ var
                 item.source := cs_user;
                 item.has_dict_weight := False;
                 item.dict_weight := 0;
+                item.fuzzy_cost := 0;
+                item.fuzzy_rules := [];
                 seen.Add(candidate_text, True);
                 list.Add(item);
                 step_result := m_user_connection.step(stmt);
@@ -7080,6 +7533,14 @@ end;
 procedure TncSqliteDictionary.clear_user_read_caches;
 begin
     clear_dictionary_lookup_caches;
+    if m_fuzzy_choice_bonus_cache <> nil then
+    begin
+        m_fuzzy_choice_bonus_cache.Clear;
+    end;
+    if m_fuzzy_choice_query_loaded_cache <> nil then
+    begin
+        m_fuzzy_choice_query_loaded_cache.Clear;
+    end;
     if m_context_bonus_cache <> nil then
     begin
         m_context_bonus_cache.Clear;
@@ -7112,6 +7573,14 @@ end;
 
 procedure TncSqliteDictionary.clear_dictionary_lookup_caches;
 begin
+    if m_fuzzy_lookup_result_cache <> nil then
+    begin
+        m_fuzzy_lookup_result_cache.Clear;
+    end;
+    if m_fuzzy_lookup_result_cache_order <> nil then
+    begin
+        m_fuzzy_lookup_result_cache_order.Clear;
+    end;
     if m_lookup_result_cache <> nil then
     begin
         m_lookup_result_cache.Clear;
@@ -7359,6 +7828,14 @@ end;
 
 function TncSqliteDictionary.lookup_isolated_exact_component(
     const pinyin: string; out results: TncCandidateList): Boolean;
+begin
+    Result := lookup_isolated_exact_component_internal(pinyin, results,
+        False);
+end;
+
+function TncSqliteDictionary.lookup_isolated_exact_component_internal(
+    const pinyin: string; out results: TncCandidateList;
+    const use_base_preflight: Boolean): Boolean;
 const
     c_component_cache_limit = 8192;
     base_sql = 'SELECT pinyin, text, comment, weight FROM dict_base WHERE pinyin = ?1 ' +
@@ -7385,6 +7862,7 @@ var
     existing_idx: Integer;
     idx: Integer;
     base_candidates_before: Integer;
+    base_may_exist: Boolean;
 
     procedure add_or_merge_local(const candidate_text: string;
         const candidate_comment: string; const candidate_weight: Integer;
@@ -7505,7 +7983,10 @@ begin
             end;
         end;
 
-        if m_base_ready then
+        base_may_exist := m_base_ready and
+            ((not use_base_preflight) or
+            base_exact_pinyin_may_exist(cache_key));
+        if base_may_exist then
         begin
             base_candidates_before := list.Count;
             if m_stmt_exact_component_base = nil then
@@ -7749,6 +8230,8 @@ var
         item.source := candidate_source;
         item.has_dict_weight := True;
         item.dict_weight := candidate_score;
+        item.fuzzy_cost := 0;
+        item.fuzzy_rules := [];
         seen.Add(key, list.Count);
         list.Add(item);
     end;
@@ -8906,6 +9389,8 @@ var
         item.source := effective_source;
         item.has_dict_weight := effective_has_dict_weight;
         item.dict_weight := effective_dict_weight;
+        item.fuzzy_cost := 0;
+        item.fuzzy_rules := [];
         list.Add(item);
         seen.Add(key, True);
         if (candidate_pinyin_key <> '') and (candidate_pinyin_map <> nil) then
@@ -13759,6 +14244,7 @@ begin
         if (not m_user_connection.exec('DELETE FROM dict_user;')) or
             (not m_user_connection.exec('DELETE FROM dict_user_literal;')) or
             (not m_user_connection.exec('DELETE FROM dict_user_stats;')) or
+            (not m_user_connection.exec('DELETE FROM dict_user_fuzzy_choice;')) or
             (not m_user_connection.exec('DELETE FROM dict_user_query_latest;')) or
             (not m_user_connection.exec('DELETE FROM dict_user_penalty;')) or
             (not m_user_connection.exec('DELETE FROM dict_user_bigram;')) or

@@ -67,12 +67,14 @@ type
         m_log_config: TncLogConfig;
         m_logger: TncLogger;
         m_last_caret_debug_tick: UInt64;
+        // Caret edit sessions normalize TSF rectangles to physical screen coordinates.
         m_last_caret_point: TPoint;
         m_has_caret_point: Boolean;
         m_last_caret_line_height: Integer;
         m_last_ipc_error: DWORD;
         m_pending_caret_update: Boolean;
         m_session_dirty: Boolean;
+        // Host caret coordinates are also stored in physical screen coordinates.
         m_last_sent_caret_point: TPoint;
         m_last_sent_has_caret: Boolean;
         m_last_sent_caret_valid: Boolean;
@@ -416,21 +418,6 @@ begin
     Result := False;
 end;
 
-function try_scale_screen_point_between_dpi(const source_point: TPoint; const monitor_rect: Winapi.Windows.TRect;
-    const source_dpi: Integer; const target_dpi: Integer; out converted_point: TPoint): Boolean;
-begin
-    converted_point := source_point;
-    if (source_dpi <= 0) or (target_dpi <= 0) or (source_dpi = target_dpi) then
-    begin
-        Result := False;
-        Exit;
-    end;
-
-    converted_point.X := monitor_rect.Left + MulDiv(source_point.X - monitor_rect.Left, target_dpi, source_dpi);
-    converted_point.Y := monitor_rect.Top + MulDiv(source_point.Y - monitor_rect.Top, target_dpi, source_dpi);
-    Result := True;
-end;
-
 function try_scale_screen_rect_between_dpi(const source_rect: Winapi.Windows.TRect; const monitor_rect: Winapi.Windows.TRect;
     const source_dpi: Integer; const target_dpi: Integer; out converted_rect: Winapi.Windows.TRect): Boolean;
 begin
@@ -446,51 +433,6 @@ begin
     converted_rect.Right := monitor_rect.Left + MulDiv(source_rect.Right - monitor_rect.Left, target_dpi, source_dpi);
     converted_rect.Bottom := monitor_rect.Top + MulDiv(source_rect.Bottom - monitor_rect.Top, target_dpi, source_dpi);
     Result := True;
-end;
-
-function try_convert_screen_point_for_monitor_dpi(const hwnd: HWND; const source_point: TPoint;
-    out converted_point: TPoint): Boolean;
-var
-    monitor: HMONITOR;
-    monitor_info: MONITORINFO;
-    monitor_dpi: Integer;
-    source_dpi: Integer;
-begin
-    converted_point := source_point;
-    if hwnd = 0 then
-    begin
-        Result := False;
-        Exit;
-    end;
-
-    monitor := MonitorFromPoint(source_point, MONITOR_DEFAULTTONEAREST);
-    if monitor = 0 then
-    begin
-        Result := False;
-        Exit;
-    end;
-
-    monitor_info.cbSize := SizeOf(monitor_info);
-    if not GetMonitorInfo(monitor, @monitor_info) then
-    begin
-        Result := False;
-        Exit;
-    end;
-
-    if not try_get_dpi_for_monitor(monitor, monitor_dpi) then
-    begin
-        Result := False;
-        Exit;
-    end;
-
-    if not try_get_logical_screen_source_dpi(hwnd, monitor_dpi, source_dpi) then
-    begin
-        Result := False;
-        Exit;
-    end;
-
-    Result := try_scale_screen_point_between_dpi(source_point, monitor_info.rcMonitor, source_dpi, monitor_dpi,
-        converted_point);
 end;
 
 function try_convert_screen_rect_for_monitor_dpi(const hwnd: HWND; const source_rect: Winapi.Windows.TRect;
@@ -540,12 +482,6 @@ begin
         converted_rect);
 end;
 
-function try_screen_point_to_physical(const hwnd: HWND; const source_point: TPoint; out converted_point: TPoint): Boolean;
-begin
-    converted_point := source_point;
-    Result := (hwnd <> 0) and try_logical_to_physical(hwnd, converted_point);
-end;
-
 function try_screen_rect_to_physical(const hwnd: HWND; const source_rect: Winapi.Windows.TRect;
     out converted_rect: Winapi.Windows.TRect): Boolean;
 var
@@ -574,22 +510,6 @@ begin
 
     converted_rect := System.Types.Rect(top_left.X, top_left.Y, bottom_right.X, bottom_right.Y);
     Result := True;
-end;
-
-function try_normalize_screen_point_for_hwnd(const hwnd: HWND; var point: TPoint): Boolean;
-var
-    converted_point: TPoint;
-begin
-    converted_point := point;
-    Result := try_convert_screen_point_for_monitor_dpi(hwnd, point, converted_point);
-    if not Result then
-    begin
-        Result := try_screen_point_to_physical(hwnd, point, converted_point);
-    end;
-    if Result then
-    begin
-        point := converted_point;
-    end;
 end;
 
 function try_normalize_screen_rect_for_hwnd(const hwnd: HWND; var rect: Winapi.Windows.TRect): Boolean;
@@ -3001,7 +2921,6 @@ var
     hwnd: Winapi.Windows.HWND;
     foreground_hwnd: Winapi.Windows.HWND;
     context_hwnd: Winapi.Windows.HWND;
-    base_anchor_hwnd: Winapi.Windows.HWND;
     tsf_point: TPoint;
     tsf_point_valid: Boolean;
     caret_point_valid: Boolean;
@@ -3366,25 +3285,6 @@ begin
         begin
             try_normalize_screen_rect_for_hwnd(foreground_hwnd, foreground_rect);
         end;
-    end;
-
-    base_anchor_hwnd := context_hwnd;
-    if base_anchor_hwnd = 0 then
-    begin
-        base_anchor_hwnd := hwnd;
-    end;
-    if base_anchor_hwnd = 0 then
-    begin
-        base_anchor_hwnd := foreground_hwnd;
-    end;
-
-    if tsf_point_valid and (base_anchor_hwnd <> 0) then
-    begin
-        try_normalize_screen_point_for_hwnd(base_anchor_hwnd, tsf_point);
-    end;
-    if m_last_sent_caret_valid and (base_anchor_hwnd <> 0) then
-    begin
-        try_normalize_screen_point_for_hwnd(base_anchor_hwnd, last_sent_point);
     end;
 
     context_class_name := get_window_class_name(context_hwnd);
