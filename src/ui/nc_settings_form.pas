@@ -2984,7 +2984,8 @@ end;
 procedure TncSettingsForm.on_candidate_preview_paint(Sender: TObject);
 const
     c_preview_preedit_text = 'nihaoshijie';
-    c_preview_texts: array[0..2] of string = ('1. 你好', '2. 言泉', '3. 输入法');
+    c_preview_texts: array[0..2] of string = ('1. 你好', '2. 提高很多', '3. 输入法');
+    c_preview_lm_compound_index = 1;
 var
     paint_box: TPaintBox;
     canvas: TCanvas;
@@ -3046,14 +3047,28 @@ var
             canvas.RoundRect(paint_item_rect.Left, paint_item_rect.Top + 1,
                 paint_item_rect.Right, paint_item_rect.Bottom - 1,
                 scale_ui_for_dpi(6, dpi), scale_ui_for_dpi(6, dpi));
-            canvas.Font.Color := theme.selected_text_color;
+            if index = c_preview_lm_compound_index then
+            begin
+                canvas.Font.Color := theme.selected_lm_compound_text_color;
+            end
+            else
+            begin
+                canvas.Font.Color := theme.selected_text_color;
+            end;
         end
         else
         begin
             canvas.Brush.Color := theme.background_color;
             canvas.Pen.Color := theme.background_color;
             canvas.FillRect(paint_item_rect);
-            canvas.Font.Color := theme.text_color;
+            if index = c_preview_lm_compound_index then
+            begin
+                canvas.Font.Color := theme.lm_compound_text_color;
+            end
+            else
+            begin
+                canvas.Font.Color := theme.text_color;
+            end;
         end;
 
         text_rect := paint_item_rect;

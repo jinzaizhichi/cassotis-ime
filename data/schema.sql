@@ -1,11 +1,11 @@
--- cassotis ime sqlite schema v13
+-- cassotis ime sqlite schema v15
 
 CREATE TABLE IF NOT EXISTS meta (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL
 );
 
-INSERT OR IGNORE INTO meta(key, value) VALUES('schema_version', '14');
+INSERT OR IGNORE INTO meta(key, value) VALUES('schema_version', '15');
 
 CREATE TABLE IF NOT EXISTS dict_base (
     id INTEGER PRIMARY KEY AUTOINCREMENT,

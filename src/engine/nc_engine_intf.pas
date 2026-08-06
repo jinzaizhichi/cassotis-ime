@@ -486,6 +486,7 @@ type
         m_pending_commit_remaining_input_code: string;
         m_has_pending_commit: Boolean;
         m_pending_commit_allow_learning: Boolean;
+        m_pending_commit_learning_locked: Boolean;
         m_pending_commit_explicit_choice: Boolean;
         m_pending_commit_literal_choice: Boolean;
         m_pending_commit_fuzzy_choice: Boolean;
@@ -762,7 +763,8 @@ type
             const explicit_choice: Boolean = False; const remaining_input_code: string = '';
             const literal_choice: Boolean = False;
             const fuzzy_choice: Boolean = False;
-            const fuzzy_choice_text: string = '');
+            const fuzzy_choice_text: string = '';
+            const learning_locked: Boolean = False);
         procedure clear_pending_commit;
         procedure update_dictionary_state;
         procedure toggle_input_mode;
@@ -1076,6 +1078,7 @@ begin
     m_pending_commit_remaining_input_code := '';
     m_has_pending_commit := False;
     m_pending_commit_allow_learning := True;
+    m_pending_commit_learning_locked := False;
     m_pending_commit_explicit_choice := False;
     m_pending_commit_literal_choice := False;
     m_pending_commit_fuzzy_choice := False;
@@ -3330,6 +3333,7 @@ begin
     m_pending_commit_remaining_input_code := '';
     m_has_pending_commit := False;
     m_pending_commit_allow_learning := True;
+    m_pending_commit_learning_locked := False;
     m_pending_commit_explicit_choice := False;
     m_pending_commit_literal_choice := False;
     m_pending_commit_fuzzy_choice := False;
@@ -3560,6 +3564,7 @@ begin
     m_pending_commit_remaining_input_code := '';
     m_has_pending_commit := False;
     m_pending_commit_allow_learning := True;
+    m_pending_commit_learning_locked := False;
     m_pending_commit_explicit_choice := False;
     m_pending_commit_literal_choice := False;
     m_pending_commit_fuzzy_choice := False;
@@ -4912,6 +4917,10 @@ var
                 local_candidate := candidates_local[existing_idx];
                 local_candidate.score := Max(local_candidate.score,
                     combined_score_local);
+                if not has_full_query_exact_local then
+                begin
+                    local_candidate.display_kind := cdk_lm_compound;
+                end;
                 candidates_local[existing_idx] := local_candidate;
             end
             else
@@ -4928,6 +4937,7 @@ var
                     local_candidate.source := cs_rule;
                     local_candidate.has_dict_weight := False;
                     local_candidate.dict_weight := 0;
+                    local_candidate.display_kind := cdk_lm_compound;
                 end;
                 local_candidate.score := combined_score_local;
                 SetLength(candidates_local, Length(candidates_local) + 1);
@@ -32035,6 +32045,8 @@ var
                     Exit(True);
                 end;
 
+                FillChar(local_partial_candidate,
+                    SizeOf(local_partial_candidate), 0);
                 local_partial_candidate.text := Trim(new_prefix_text);
                 local_partial_candidate.comment := normalize_pinyin_text(
                     Trim(new_tail_key));
@@ -39925,6 +39937,7 @@ var
             candidate_local.source := cs_rule;
             candidate_local.has_dict_weight := False;
             candidate_local.dict_weight := 0;
+            candidate_local.display_kind := cdk_lm_compound;
 
             SetLength(short_three_exact_pair_candidates,
                 accepted_idx_local + 1);
@@ -123035,6 +123048,10 @@ var
                 item.replacement_char_weight :=
                     value.replacement_char_weight;
             end;
+            if value.candidate.display_kind = cdk_lm_compound then
+            begin
+                item.candidate.display_kind := cdk_lm_compound;
+            end;
             raw_pool[existing_idx] := item;
             Exit;
         end;
@@ -123293,6 +123310,7 @@ var
                     generated.source := cs_rule;
                     generated.has_dict_weight := False;
                     generated.dict_weight := 0;
+                    generated.display_kind := cdk_lm_compound;
                     generated.score := Max(generated.score,
                         evidence_value);
                     add_candidate(generated, -1, generated_path,
@@ -140144,6 +140162,7 @@ begin
     m_pending_commit_remaining_input_code := '';
     m_has_pending_commit := False;
     m_pending_commit_allow_learning := True;
+    m_pending_commit_learning_locked := False;
     m_pending_commit_explicit_choice := False;
     m_pending_commit_literal_choice := False;
     m_pending_commit_fuzzy_choice := False;
@@ -140159,7 +140178,8 @@ procedure TncEngine.set_pending_commit(const text: string; const remaining_pinyi
     const explicit_choice: Boolean = False; const remaining_input_code: string = '';
     const literal_choice: Boolean = False;
     const fuzzy_choice: Boolean = False;
-    const fuzzy_choice_text: string = '');
+    const fuzzy_choice_text: string = '';
+    const learning_locked: Boolean = False);
 var
     query_key: string;
     normalized_remaining: string;
@@ -140176,6 +140196,7 @@ begin
     normalized_remaining := normalize_pinyin_text(remaining_pinyin);
     m_pending_commit_allow_learning := allow_learning and
         (not fuzzy_choice) and (normalized_remaining = '');
+    m_pending_commit_learning_locked := learning_locked;
     m_pending_commit_explicit_choice := explicit_choice;
     m_pending_commit_literal_choice := literal_choice;
     m_pending_commit_fuzzy_choice := fuzzy_choice;
@@ -140201,6 +140222,7 @@ begin
     m_pending_commit_remaining_input_code := '';
     m_has_pending_commit := False;
     m_pending_commit_allow_learning := True;
+    m_pending_commit_learning_locked := False;
     m_pending_commit_explicit_choice := False;
     m_pending_commit_literal_choice := False;
     m_pending_commit_fuzzy_choice := False;
@@ -141496,6 +141518,11 @@ var
         end;
     begin
         Result := False;
+        if (selected.display_kind = cdk_lm_compound) and
+            (Trim(selected.comment) = '') then
+        begin
+            Exit(True);
+        end;
         if is_generated_short_exact_pair_selection_local then
         begin
             Exit(True);
@@ -141714,6 +141741,7 @@ var
         top_segment_path: string;
         partial_remaining_pinyin: string;
         generated_long_local_rerank_selection: Boolean;
+        nonlearnable_generated_selection: Boolean;
 
         function split_encoded_path(const encoded_path: string): TArray<string>;
         var
@@ -141890,6 +141918,8 @@ var
 
         generated_long_local_rerank_selection :=
             is_generated_long_local_rerank_selection(selected);
+        nonlearnable_generated_selection :=
+            is_nonlearnable_generated_selection(selected);
         if (segment_path = '') and (selected.comment = '') and
             (not generated_long_local_rerank_selection) then
         begin
@@ -141899,7 +141929,7 @@ var
         allow_learning := ((not is_fuzzy_pinyin_active) or
             (selected.fuzzy_cost <= 0)) and
             (not generated_long_local_rerank_selection) and
-            (not is_nonlearnable_generated_selection(selected));
+            (not nonlearnable_generated_selection);
         if allow_learning and is_generated_short_particle_tail_selection(selected) then
         begin
             allow_learning := False;
@@ -141931,7 +141961,7 @@ var
                     (top_candidate.text <> '') and (selected.text <> '') and
                     (top_candidate.text <> selected.text) and
                     (not generated_long_local_rerank_selection) and
-                    (not is_nonlearnable_generated_selection(selected)) then
+                    (not nonlearnable_generated_selection) then
             begin
                 top_score := get_rank_score(top_candidate);
                 selected_score := get_rank_score(selected);
@@ -141970,7 +142000,8 @@ var
             segment_path, explicit_selection, '',
             manual_selection and ((not is_fuzzy_pinyin_active) or
             (selected.fuzzy_cost <= 0)),
-            is_fuzzy_pinyin_active and (selected.fuzzy_cost > 0));
+            is_fuzzy_pinyin_active and (selected.fuzzy_cost > 0), '',
+            nonlearnable_generated_selection);
         Result := True;
     end;
 begin
@@ -142121,7 +142152,8 @@ begin
                             (not is_nonlearnable_generated_selection(candidate)),
                             selected_segment_path, False, '', False,
                             is_fuzzy_pinyin_active and
-                            (candidate.fuzzy_cost > 0), candidate.text);
+                            (candidate.fuzzy_cost > 0), candidate.text,
+                            is_nonlearnable_generated_selection(candidate));
                     end;
                     Result := True;
                     Exit;
@@ -148940,6 +148972,17 @@ var
             end;
         end;
 
+        function should_keep_supported_pair_before_particle_local(
+            const candidate_value: TncCandidate;
+            const particle_candidate_value: TncCandidate): Boolean;
+        begin
+            Result := (Trim(candidate_value.comment) = '') and
+                is_current_short_three_exact_pair_candidate_supported(
+                normalized_pinyin, Trim(candidate_value.text)) and
+                (display_candidate_effective_weight(candidate_value) >=
+                display_candidate_effective_weight(particle_candidate_value));
+        end;
+
         function append_head_candidates(
             const candidates: TncCandidateList): Boolean;
         var
@@ -149148,6 +149191,12 @@ var
         for fixed_idx := 0 to High(fixed_candidates) do
         begin
             fixed_candidate := fixed_candidates[fixed_idx];
+            while (target_idx <= High(m_candidates)) and
+                should_keep_supported_pair_before_particle_local(
+                m_candidates[target_idx], fixed_candidate) do
+            begin
+                Inc(target_idx);
+            end;
             candidate_found := False;
             candidate_is_full_query_exact := False;
             for candidate_idx := 0 to High(m_candidates) do
@@ -167647,6 +167696,16 @@ var
                 candidate_value.text := head_text;
                 candidate_value.comment := tail_pinyin;
             end;
+            if Trim(candidate_value.comment) <> '' then
+            begin
+                candidate_value.display_kind := cdk_default;
+            end;
+            if (Trim(candidate_value.comment) = '') and
+                is_current_short_three_exact_pair_candidate_supported(
+                normalized_pinyin, Trim(candidate_value.text)) then
+            begin
+                candidate_value.display_kind := cdk_lm_compound;
+            end;
         end;
 
         function display_candidate_is_explicit_apostrophe_prefix_partial(
@@ -173742,6 +173801,7 @@ var
     effective_segment_path: string;
     inferred_segment_path: string;
     allow_learning: Boolean;
+    learning_locked: Boolean;
     path_segments: TArray<string>;
     path_idx: Integer;
     path_start: Integer;
@@ -174215,6 +174275,7 @@ begin
 
     out_text := commit_text;
     allow_learning := m_pending_commit_allow_learning;
+    learning_locked := m_pending_commit_learning_locked;
     explicit_commit_choice := m_pending_commit_explicit_choice;
     literal_commit_choice := m_pending_commit_literal_choice;
     pending_fuzzy_choice := m_pending_commit_fuzzy_choice;
@@ -174227,6 +174288,7 @@ begin
     m_pending_commit_remaining_input_code := '';
     m_has_pending_commit := False;
     m_pending_commit_allow_learning := True;
+    m_pending_commit_learning_locked := False;
     m_pending_commit_explicit_choice := False;
     m_pending_commit_literal_choice := False;
     m_pending_commit_fuzzy_choice := False;
@@ -174270,6 +174332,7 @@ begin
         end;
     end;
     if (not fuzzy_commit_choice) and (not allow_learning) and
+        (not learning_locked) and
         (commit_segment_text <> '') and
         (get_candidate_text_unit_count(commit_segment_text) >= 4) and
         is_high_confidence_segment_path(effective_segment_path) and

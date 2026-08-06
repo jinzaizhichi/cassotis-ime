@@ -37,6 +37,7 @@ type
     TncFuzzyPinyinRules = set of TncFuzzyPinyinRule;
 
     TncCandidateSource = (cs_rule, cs_user);
+    TncCandidateDisplayKind = (cdk_default, cdk_lm_compound);
     TncLogLevel = (ll_debug, ll_info, ll_warn, ll_error);
 
     TncCandidate = record
@@ -48,6 +49,7 @@ type
         dict_weight: Integer;
         fuzzy_cost: Integer;
         fuzzy_rules: TncFuzzyPinyinRules;
+        display_kind: TncCandidateDisplayKind;
     end;
 
     TncCandidateList = array of TncCandidate;

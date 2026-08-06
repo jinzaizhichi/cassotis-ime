@@ -515,7 +515,8 @@ begin
             (left_candidates[i].has_dict_weight <> right_candidates[i].has_dict_weight) or
             (left_candidates[i].dict_weight <> right_candidates[i].dict_weight) or
             (left_candidates[i].fuzzy_cost <> right_candidates[i].fuzzy_cost) or
-            (left_candidates[i].fuzzy_rules <> right_candidates[i].fuzzy_rules) then
+            (left_candidates[i].fuzzy_rules <> right_candidates[i].fuzzy_rules) or
+            (left_candidates[i].display_kind <> right_candidates[i].display_kind) then
         begin
             Result := False;
             Exit;

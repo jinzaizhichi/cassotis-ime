@@ -27,6 +27,7 @@ type
         m_candidate_lines: TStringList;
         m_candidate_weight_lines: TStringList;
         m_candidate_sources: TArray<TncCandidateSource>;
+        m_candidate_display_kinds: TArray<TncCandidateDisplayKind>;
         m_candidate_is_user: TArray<Boolean>;
         m_candidate_show_weight: TArray<Boolean>;
         m_candidate_widths: TArray<Integer>;
@@ -83,8 +84,10 @@ type
         function format_candidate_line(const index: Integer; const candidate: TncCandidate): string;
         function candidate_has_pinyin_tail(const candidate: TncCandidate): Boolean;
         function candidate_can_remove(const candidate: TncCandidate): Boolean;
-        function get_candidate_text_color(const source: TncCandidateSource): TColor;
-        function get_selected_candidate_text_color(const source: TncCandidateSource): TColor;
+        function get_candidate_text_color(const source: TncCandidateSource;
+            const display_kind: TncCandidateDisplayKind): TColor;
+        function get_selected_candidate_text_color(const source: TncCandidateSource;
+            const display_kind: TncCandidateDisplayKind): TColor;
         function canvas_font_can_render_text(const text: string): Boolean;
         procedure assign_list_font_for_text(const text: string; const font_color: TColor);
         function hit_test_candidate_index(const point: TPoint): Integer;
@@ -335,6 +338,7 @@ begin
     m_swallow_next_button_up := False;
     m_selected_index := 0;
     SetLength(m_candidate_sources, 0);
+    SetLength(m_candidate_display_kinds, 0);
     SetLength(m_candidate_is_user, 0);
     SetLength(m_candidate_show_weight, 0);
     SetLength(m_candidate_widths, 0);
@@ -776,9 +780,11 @@ var
     effective_font_name: string;
     effective_font_size: Integer;
     effective_color_scheme: Integer;
+    effective_color_theme: TncCandidateColorTheme;
 begin
     effective_font_name := resolve_candidate_font_name(font_name);
     effective_color_scheme := nc_normalize_candidate_color_scheme(color_scheme);
+    effective_color_theme := nc_candidate_color_theme(effective_color_scheme);
 
     effective_font_size := font_size;
     if effective_font_size < c_min_candidate_font_size then
@@ -791,13 +797,17 @@ begin
     end;
 
     if SameText(m_list_font.Name, effective_font_name) and (m_base_list_font_size = effective_font_size) and
-        (m_color_scheme = effective_color_scheme) then
+        (m_color_scheme = effective_color_scheme) and
+        (Color = effective_color_theme.background_color) and
+        (m_border_color = effective_color_theme.border_color) and
+        (m_list_font.Color = effective_color_theme.text_color) and
+        (m_weight_font.Color = effective_color_theme.weight_text_color) then
     begin
         Exit;
     end;
 
     m_color_scheme := effective_color_scheme;
-    m_color_theme := nc_candidate_color_theme(m_color_scheme);
+    m_color_theme := effective_color_theme;
     m_border_color := m_color_theme.border_color;
     Color := m_color_theme.background_color;
 
@@ -1029,23 +1039,37 @@ begin
         (not candidate_has_pinyin_tail(candidate));
 end;
 
-function TncCandidateWindow.get_candidate_text_color(const source: TncCandidateSource): TColor;
+function TncCandidateWindow.get_candidate_text_color(const source: TncCandidateSource;
+    const display_kind: TncCandidateDisplayKind): TColor;
 begin
-    case source of
-        cs_user:
-            Result := m_color_theme.user_text_color;
-        else
-            Result := m_color_theme.text_color;
+    if source = cs_user then
+    begin
+        Result := m_color_theme.user_text_color;
+    end
+    else if display_kind = cdk_lm_compound then
+    begin
+        Result := m_color_theme.lm_compound_text_color;
+    end
+    else
+    begin
+        Result := m_color_theme.text_color;
     end;
 end;
 
-function TncCandidateWindow.get_selected_candidate_text_color(const source: TncCandidateSource): TColor;
+function TncCandidateWindow.get_selected_candidate_text_color(const source: TncCandidateSource;
+    const display_kind: TncCandidateDisplayKind): TColor;
 begin
-    case source of
-        cs_user:
-            Result := m_color_theme.selected_user_text_color;
-        else
-            Result := m_color_theme.selected_text_color;
+    if source = cs_user then
+    begin
+        Result := m_color_theme.selected_user_text_color;
+    end
+    else if display_kind = cdk_lm_compound then
+    begin
+        Result := m_color_theme.selected_lm_compound_text_color;
+    end
+    else
+    begin
+        Result := m_color_theme.selected_text_color;
     end;
 end;
 
@@ -1309,6 +1333,7 @@ var
     candidate_right: Integer;
     line_rect: TRect;
     candidate_source: TncCandidateSource;
+    candidate_display_kind: TncCandidateDisplayKind;
     remove_rect: TRect;
     text_right: Integer;
     user_candidate: Boolean;
@@ -1390,6 +1415,11 @@ begin
         begin
             candidate_source := m_candidate_sources[i];
         end;
+        candidate_display_kind := cdk_default;
+        if i < Length(m_candidate_display_kinds) then
+        begin
+            candidate_display_kind := m_candidate_display_kinds[i];
+        end;
         user_candidate := (i < Length(m_candidate_is_user)) and m_candidate_is_user[i];
         if user_candidate then
         begin
@@ -1411,14 +1441,16 @@ begin
             Canvas.Brush.Color := m_color_theme.selected_background_color;
             Canvas.Pen.Color := m_color_theme.selected_border_color;
             Canvas.RoundRect(item_left, y + 1, item_right, y + line_height - 1, corner_radius, corner_radius);
-            Canvas.Font.Color := get_selected_candidate_text_color(candidate_source);
+            Canvas.Font.Color := get_selected_candidate_text_color(
+                candidate_source, candidate_display_kind);
             SetTextColor(Canvas.Handle, ColorToRGB(Canvas.Font.Color));
         end
         else
         begin
             Canvas.Brush.Color := Color;
             Canvas.FillRect(line_rect);
-            Canvas.Font.Color := get_candidate_text_color(candidate_source);
+            Canvas.Font.Color := get_candidate_text_color(candidate_source,
+                candidate_display_kind);
             SetTextColor(Canvas.Handle, ColorToRGB(Canvas.Font.Color));
         end;
 
@@ -1437,12 +1469,14 @@ begin
         if i = m_selected_index then
         begin
             assign_list_font_for_text(m_candidate_lines[i],
-                get_selected_candidate_text_color(candidate_source));
+                get_selected_candidate_text_color(candidate_source,
+                candidate_display_kind));
         end
         else
         begin
             assign_list_font_for_text(m_candidate_lines[i],
-                get_candidate_text_color(candidate_source));
+                get_candidate_text_color(candidate_source,
+                candidate_display_kind));
         end;
         text_rect := Rect(x, main_text_top, text_right, main_text_top + main_text_height);
         draw_canvas_text(Canvas, m_candidate_lines[i], text_rect,
@@ -1500,12 +1534,21 @@ begin
         end;
         m_show_weight_row := m_debug_mode and (count > 0);
         SetLength(m_candidate_sources, count);
+        SetLength(m_candidate_display_kinds, count);
         SetLength(m_candidate_is_user, count);
         SetLength(m_candidate_show_weight, count);
 
         for i := 0 to count - 1 do
         begin
             m_candidate_sources[i] := candidates[i].source;
+            if candidate_has_pinyin_tail(candidates[i]) then
+            begin
+                m_candidate_display_kinds[i] := cdk_default;
+            end
+            else
+            begin
+                m_candidate_display_kinds[i] := candidates[i].display_kind;
+            end;
             m_candidate_is_user[i] := candidate_can_remove(candidates[i]);
             m_candidate_show_weight[i] := m_debug_mode and candidates[i].has_dict_weight;
             if m_candidate_show_weight[i] then

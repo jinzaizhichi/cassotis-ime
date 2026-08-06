@@ -327,7 +327,7 @@ const
         '    value TEXT NOT NULL' + sLineBreak +
         ');' + sLineBreak +
         sLineBreak +
-        'INSERT OR IGNORE INTO meta(key, value) VALUES(''schema_version'', ''14'');' + sLineBreak +
+        'INSERT OR IGNORE INTO meta(key, value) VALUES(''schema_version'', ''15'');' + sLineBreak +
         sLineBreak +
         'CREATE TABLE IF NOT EXISTS dict_base (' + sLineBreak +
         '    id INTEGER PRIMARY KEY AUTOINCREMENT,' + sLineBreak +
@@ -3677,7 +3677,7 @@ begin
 
     if not get_schema_version(connection, schema_version) then
     begin
-        set_schema_version(connection, 14);
+        set_schema_version(connection, 15);
         Result := True;
         Exit;
     end;
@@ -3750,6 +3750,19 @@ begin
     if schema_version < 14 then
     begin
         set_schema_version(connection, 14);
+    end;
+
+    if schema_version < 15 then
+    begin
+        // Path penalties written by older ranking models can suppress newly
+        // introduced LM-backed paths. Preserve user words and usage stats,
+        // but reset these model-specific negative signals once on upgrade.
+        if not connection.exec('DELETE FROM dict_user_query_path_penalty;') then
+        begin
+            Result := False;
+            Exit;
+        end;
+        set_schema_version(connection, 15);
     end;
 
     Result := True;
