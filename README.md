@@ -110,7 +110,7 @@ Cassotis v1.9.0 upgrades long-sentence recall and ranking with a unified, corpus
 
 Cassotis v1.10.0 extends corpus-trained transition evidence to controlled 1+2 and 2+1 exact-word combinations for three-syllable input, while adding a conservative pairwise review of the leading complete long-sentence candidates. Both paths change results only when the learned evidence is sufficiently strong.
 
-Cassotis v1.11.0 broadens corpus-trained word-transition coverage, improving short-phrase composition and long-sentence path selection when LM evidence is strong. Generated combinations use a theme-aware accent and are not stored as user words.
+Cassotis v1.11.0 broadens corpus-trained word-transition coverage, improving short-phrase composition and long-sentence path selection when LM evidence is strong.
 
 To keep the deeper ranking pipeline responsive, search, second-stage ranking, residual comparison, and final selection reuse character-LM scores, exact dictionary lookups, path features, and context features. Expensive consensus and lookup work uses shared caches and explicit time budgets to limit long-tail latency. Exact and prefix candidate visibility remains protected, while repeated work across ranking stages is avoided.
 
@@ -123,7 +123,7 @@ Corpus: 16,300 eligible Chinese sentences from the developer's own novel [**Eleg
 
 | Version | Top1 | Top2 | Mean (ms) | P50 (ms) | P95 (ms) | Max (ms) |
 |---|---:|---:|---:|---:|---:|---:|
-| `v1.11.0` | 9760/16300 (59.88%) *9340/16300 (57.30%)* | 10990/16300 (67.42%) *10773/16300 (66.09%)* | 59.82 | 47 | 187 | 1031 |
+| `v1.11.0` | 9760/16300 (59.88%)<br>*9340/16300 (57.30%)* | 10990/16300 (67.42%)<br>*10773/16300 (66.09%)* | 59.82 | 47 | 187 | 1031 |
 | `v1.10.0` | 9279/16300 (56.93%) | 10708/16300 (65.69%) | 60.39 | 47 | 188 | 1046 |
 | `v1.9.0` | 9121/16300 (55.96%) | 10685/16300 (65.55%) | 59.65 | 47 | 187 | 1172 |
 | `v1.8.1` | 8285/16300 (50.83%) | 9067/16300 (55.63%) | 72.44 | 47 | 281 | 1594 |
@@ -156,7 +156,7 @@ See [BENCHMARK.md](BENCHMARK.md) for the shared corpus source, short-word case c
 
 | Version | Top1 | Top2 | Contested Top1 | Contested Top2 | Mean (ms) | P50 (ms) | P95 (ms) | Max (ms) |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|
-| `v1.11.0` | 61343/65000 (94.37%) *61227/65000 (94.20%)* | 63474/65000 (97.65%) *63461/65000 (97.63%)* | 9304/11728 (79.33%) *9191/11728 (78.37%)* | 10745/11728 (91.62%) *10732/11728 (91.51%)* | 4.217 | 3.284 | 9.110 | 75.503 |
+| `v1.11.0` | 61343/65000 (94.37%)<br>*61227/65000 (94.20%)* | 63474/65000 (97.65%)<br>*63461/65000 (97.63%)* | 9304/11728 (79.33%)<br>*9191/11728 (78.37%)* | 10745/11728 (91.62%)<br>*10732/11728 (91.51%)* | 4.217 | 3.284 | 9.110 | 75.503 |
 | `v1.10.0` | 61214/65000 (94.18%) | 63448/65000 (97.61%) | 9191/11728 (78.37%) | 10732/11728 (91.51%) | 4.425 | 3.446 | 9.591 | 84.68 |
 | `v1.9.0` | 61215/65000 (94.18%) | 63448/65000 (97.61%) | 9191/11728 (78.37%) | 10732/11728 (91.51%) | 4.214 | 3.268 | 9.113 | 71.004 |
 | `v1.8.1` | 61206/65000 (94.16%) | 63430/65000 (97.58%) | 9182/11728 (78.29%) | 10725/11728 (91.45%) | 4.85 | 3.721 | 10.413 | 107.714 |
