@@ -110,6 +110,8 @@ Cassotis v1.9.0 upgrades long-sentence recall and ranking with a unified, corpus
 
 Cassotis v1.10.0 extends corpus-trained transition evidence to controlled 1+2 and 2+1 exact-word combinations for three-syllable input, while adding a conservative pairwise review of the leading complete long-sentence candidates. Both paths change results only when the learned evidence is sufficiently strong.
 
+Cassotis v1.11.0 broadens corpus-trained word-transition coverage, improving short-phrase composition and long-sentence path selection when LM evidence is strong. Generated combinations use a theme-aware accent and are not stored as user words.
+
 To keep the deeper ranking pipeline responsive, search, second-stage ranking, residual comparison, and final selection reuse character-LM scores, exact dictionary lookups, path features, and context features. Expensive consensus and lookup work uses shared caches and explicit time budgets to limit long-tail latency. Exact and prefix candidate visibility remains protected, while repeated work across ranking stages is avoided.
 
 The statistical model is quantized into the local dictionary database, while the compact rerankers are exported as deterministic native Pascal parameters. Runtime scoring is local and bounded: it starts no PyTorch/ONNX environment or external model service and requires no network connection or GPU. Long-sentence and short-word ranking remain separate paths, so improvements to one do not replace the other's matching rules.
@@ -121,6 +123,7 @@ Corpus: 16,300 eligible Chinese sentences from the developer's own novel [**Eleg
 
 | Version | Top1 | Top2 | Mean (ms) | P50 (ms) | P95 (ms) | Max (ms) |
 |---|---:|---:|---:|---:|---:|---:|
+| `v1.11.0` | 9760/16300 (59.88%) *9340/16300 (57.30%)* | 10990/16300 (67.42%) *10773/16300 (66.09%)* | 59.82 | 47 | 187 | 1031 |
 | `v1.10.0` | 9279/16300 (56.93%) | 10708/16300 (65.69%) | 60.39 | 47 | 188 | 1046 |
 | `v1.9.0` | 9121/16300 (55.96%) | 10685/16300 (65.55%) | 59.65 | 47 | 187 | 1172 |
 | `v1.8.1` | 8285/16300 (50.83%) | 9067/16300 (55.63%) | 72.44 | 47 | 281 | 1594 |
@@ -140,6 +143,8 @@ Corpus: 16,300 eligible Chinese sentences from the developer's own novel [**Eleg
 | `v0.3.1` | 3845/16300 (23.59%) | 4651/16300 (28.53%) | — | — | — | — |
 | `v0.2.0` | 2671/16300 (16.39%) | 2863/16300 (17.56%) | — | — | — | — |
 
+For `v1.11.0`, regular values use the new scoring rule that treats `他` and `她` as equivalent at the same character positions. Italic values use the previous strict rule that distinguishes them. `v1.10.0` and earlier releases use the strict rule; future releases will use only the new rule and will no longer repeat or publish strict-rule results.
+
 Latency values are engine-only full-query decode times. Each complete Pinyin query is assigned at once, so these values do not represent incremental keystroke-to-display latency. `—` means that the version was not measured under this latency protocol. See [BENCHMARK.md](BENCHMARK.md) for the complete methodology.
 
 ## Short-word Context Benchmark-65000
@@ -151,6 +156,7 @@ See [BENCHMARK.md](BENCHMARK.md) for the shared corpus source, short-word case c
 
 | Version | Top1 | Top2 | Contested Top1 | Contested Top2 | Mean (ms) | P50 (ms) | P95 (ms) | Max (ms) |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|
+| `v1.11.0` | 61343/65000 (94.37%) *61227/65000 (94.20%)* | 63474/65000 (97.65%) *63461/65000 (97.63%)* | 9304/11728 (79.33%) *9191/11728 (78.37%)* | 10745/11728 (91.62%) *10732/11728 (91.51%)* | 4.217 | 3.284 | 9.110 | 75.503 |
 | `v1.10.0` | 61214/65000 (94.18%) | 63448/65000 (97.61%) | 9191/11728 (78.37%) | 10732/11728 (91.51%) | 4.425 | 3.446 | 9.591 | 84.68 |
 | `v1.9.0` | 61215/65000 (94.18%) | 63448/65000 (97.61%) | 9191/11728 (78.37%) | 10732/11728 (91.51%) | 4.214 | 3.268 | 9.113 | 71.004 |
 | `v1.8.1` | 61206/65000 (94.16%) | 63430/65000 (97.58%) | 9182/11728 (78.29%) | 10725/11728 (91.45%) | 4.85 | 3.721 | 10.413 | 107.714 |
@@ -159,6 +165,8 @@ See [BENCHMARK.md](BENCHMARK.md) for the shared corpus source, short-word case c
 | `v1.5.0` | 61045/65000 (93.92%) | 63364/65000 (97.48%) | 9159/11728 (78.10%) | 10677/11728 (91.04%) | 5.033 | 4.113 | 9.968 | 142.372 |
 | `v1.4.0` | 60676/65000 (93.35%) | 63251/65000 (97.31%) | 8993/11728 (76.68%) | 10602/11728 (90.40%) | 5.573 | 4.521 | 11.157 | 158.687 |
 | `v1.3.0` | 59078/65000 (90.89%) | 62881/65000 (96.74%) | 8326/11728 (70.99%) | 10386/11728 (88.56%) | 5.460 | 4.396 | 10.939 | 176.912 |
+
+For `v1.11.0`, regular values use the new scoring rule that treats `他` and `她` as equivalent at the same character positions. Italic values use the previous strict rule that distinguishes them. `v1.10.0` and earlier releases use the strict rule; future releases will use only the new rule and will no longer repeat or publish strict-rule results.
 
 Latency values are engine-only per-query times for the context-enabled track and do not include TSF or candidate-window rendering.
 
