@@ -8,6 +8,17 @@ Both benchmarks are derived from the developer's own novel, [**Elegance in Timel
 
 Both benchmarks use this novel text as their source. Benchmark-16300 fixes 16,300 eligible sentences, while Benchmark-65000 fixes 65,000 short-word occurrences. Benchmark cases are kept separate from the corresponding model-training data.
 
+## Shared Accuracy Equivalence Rule
+
+The following rule applies to visible-candidate accuracy metrics in both benchmark suites, including `Top1`, `Top2`, other reported `TopN` values, and the short-word `Contested` metrics:
+
+- `他` and `她` are treated as equivalent only when they occur at the same character positions, because the benchmark Pinyin query cannot distinguish them.
+- `它`, all other homophones, missing or additional characters, and every other textual difference remain distinct.
+- The rule changes only offline pass/fail scoring. It does not rewrite candidate text or alter candidate generation, ranking, latency, or user-dictionary behavior.
+- Internal raw-pool and Oracle recall diagnostics retain strict character equality so that the target label cannot influence search behavior. They are therefore not directly comparable with equivalence-aware visible `TopN` metrics.
+
+This equivalence rule applies to benchmark results starting with `v1.11.0`. Results for `v1.10.0` and earlier releases used strict character equality and should be rescored before direct comparison with `v1.11.0` or later results.
+
 ## Long Sentence Benchmark-16300
 
 ### Corpus Scale and Case Construction
@@ -22,8 +33,8 @@ Benchmark-16300 contains 16,300 eligible sentences extracted from the novel in a
 
 ### Accuracy Scoring
 
-- A case is a `Top1` pass when the first complete candidate exactly matches the original sentence.
-- A case is a `Top2` pass when either of the first two complete candidates exactly matches the original sentence.
+- A case is a `Top1` pass when the first complete candidate matches the original sentence under the shared scoring rule above.
+- A case is a `Top2` pass when either of the first two complete candidates matches the original sentence under the shared scoring rule above.
 
 ### Latency Protocol
 
@@ -53,8 +64,8 @@ The frozen set contains 55,712 cases with usable left context and 9,288 sentence
 
 ### Accuracy and Contested Scoring
 
-- A case is a `Top1` pass when the first exact candidate matches the target unit.
-- A case is a `Top2` pass when either of the first two exact candidates matches the target unit.
+- A case is a `Top1` pass when the first exact candidate matches the target unit under the shared scoring rule above.
+- A case is a `Top2` pass when either of the first two exact candidates matches the target unit under the shared scoring rule above.
 - `Contested` is the 11,728-case subset in which the same Pinyin query maps to at least two target words in the corpus. `Contested Top1` and `Contested Top2` isolate the cases where left context is most useful for disambiguation.
 - Published short-word results use the context-enabled benchmark.
 
