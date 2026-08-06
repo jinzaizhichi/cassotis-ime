@@ -11,7 +11,7 @@
   <img src="snapshot.png" alt="Cassotis IME snapshot" width="550">
 </p>
 
-English | [简体中文](README.CN.md)
+English | [简体中文](README.zh-Hans.md) | [繁體中文](README.zh-Hant.md)
 
 Cassotis IME (言泉输入法) is an experimental Chinese Pinyin input method for Windows 10/11, built primarily with Delphi on top of TSF (Text Services Framework).
 
@@ -183,7 +183,8 @@ Important options include:
 Runtime dictionary paths are fixed under `%LOCALAPPDATA%\CassotisIme\data\` and are no longer configured through the INI file.
 
 ## Documentation
-- Chinese full documentation: `README.CN.md`
+- Simplified Chinese documentation: [README.zh-Hans.md](README.zh-Hans.md)
+- Traditional Chinese documentation: [README.zh-Hant.md](README.zh-Hant.md)
 - Configuration reference: `CONFIGURE.md`
 - Build details: `BUILD.md`
 - Third-party notices: `THIRD_PARTY.md`

@@ -11,7 +11,7 @@
   <img src="snapshot.png" alt="Cassotis IME snapshot" width="550">
 </p>
 
-[English](README.md) | 简体中文
+[English](README.md) | 简体中文 | [繁體中文](README.zh-Hant.md)
 
 Cassotis IME（言泉输入法）是一个面向 Windows 10/11 的实验性中文拼音输入法项目，主要使用 Delphi，并基于 TSF（Text Services Framework）实现。
 
@@ -181,6 +181,7 @@ Cassotis v1.11.0 扩展语料训练得到的词级转移覆盖，在 LM 证据�
 
 ## 文档
 - 英文主文档：`README.md`
+- 繁体中文文档：[README.zh-Hant.md](README.zh-Hant.md)
 - 配置说明：`CONFIGURE.md`
 - 构建说明：`BUILD.md`
 - 第三方组件说明：`THIRD_PARTY.md`
