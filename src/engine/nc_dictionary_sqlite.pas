@@ -1367,6 +1367,53 @@ begin
     end;
 end;
 
+function is_single_pair_lm_transition_path(const encoded_path: string): Boolean;
+var
+    normalized_path: string;
+    separator_idx: Integer;
+    left_text: string;
+    right_text: string;
+const
+    c_segment_path_separator = #3;
+begin
+    Result := False;
+    normalized_path := Trim(encoded_path);
+    separator_idx := Pos(c_segment_path_separator, normalized_path);
+    if (separator_idx <= 1) or (separator_idx >= Length(normalized_path)) then
+    begin
+        Exit;
+    end;
+    if Pos(c_segment_path_separator,
+        Copy(normalized_path, separator_idx + 1, MaxInt)) > 0 then
+    begin
+        Exit;
+    end;
+
+    left_text := Trim(Copy(normalized_path, 1, separator_idx - 1));
+    right_text := Trim(Copy(normalized_path, separator_idx + 1, MaxInt));
+    Result := (get_text_unit_count_local(left_text) = 1) and
+        (get_text_unit_count_local(right_text) = 1);
+end;
+
+function calc_single_pair_lm_transition_bonus(const weight: Integer): Integer;
+const
+    c_single_pair_weight_floor = 410;
+    c_single_pair_bonus_cap = 48;
+begin
+    // The raw 1+1 weight is a strict short-word generation threshold. In a
+    // long sentence it should only break close path ties, not act like the
+    // much broader word-path LM weights that are scaled by calc_lm_transition_bonus.
+    Result := weight - c_single_pair_weight_floor;
+    if Result < 0 then
+    begin
+        Result := 0;
+    end;
+    if Result > c_single_pair_bonus_cap then
+    begin
+        Result := c_single_pair_bonus_cap;
+    end;
+end;
+
 function split_text_units_local(const input_text: string): TArray<string>;
 var
     idx: Integer;
@@ -3164,6 +3211,7 @@ var
     normalized_path: string;
     cache_key: string;
     weight: Integer;
+    bonus_value: Integer;
 begin
     if m_lm_transition_cache_loaded then
     begin
@@ -3198,9 +3246,17 @@ begin
             weight := m_base_connection.column_int(stmt, 2);
             if (normalized_query <> '') and (normalized_path <> '') and (weight > 0) then
             begin
+                if is_single_pair_lm_transition_path(normalized_path) then
+                begin
+                    bonus_value := calc_single_pair_lm_transition_bonus(weight);
+                end
+                else
+                begin
+                    bonus_value := calc_lm_transition_bonus(weight);
+                end;
                 cache_key := normalized_query + #1 + normalized_path;
                 m_lm_transition_bonus_cache.AddOrSetValue(
-                    cache_key, calc_lm_transition_bonus(weight));
+                    cache_key, bonus_value);
             end;
             step_result := m_base_connection.step(stmt);
         end;
