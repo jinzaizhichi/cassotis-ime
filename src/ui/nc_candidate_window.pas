@@ -1540,13 +1540,16 @@ begin
 
         for i := 0 to count - 1 do
         begin
-            m_candidate_sources[i] := candidates[i].source;
             if candidate_has_pinyin_tail(candidates[i]) then
             begin
+                // A partial candidate is only an anchor for the remaining pinyin.
+                // Do not present it as a removable user word or an LM compound.
+                m_candidate_sources[i] := cs_rule;
                 m_candidate_display_kinds[i] := cdk_default;
             end
             else
             begin
+                m_candidate_sources[i] := candidates[i].source;
                 m_candidate_display_kinds[i] := candidates[i].display_kind;
             end;
             m_candidate_is_user[i] := candidate_can_remove(candidates[i]);
