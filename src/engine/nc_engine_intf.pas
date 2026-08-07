@@ -398,6 +398,11 @@ type
         m_visible_candidates_cache_page_index: Integer;
         m_visible_candidates_cache_page_size: Integer;
         m_visible_candidates_cache_valid: Boolean;
+        m_long_visible_candidate_pool_cache: TncCandidateList;
+        m_long_visible_candidate_pool_source_indices_cache: TArray<Integer>;
+        m_long_visible_candidate_pool_cache_key: string;
+        m_long_visible_candidate_pool_source_signature: UInt64;
+        m_long_visible_candidate_pool_cache_valid: Boolean;
         m_long_local_rerank_generated_text: string;
         m_long_local_rerank_composition_text: string;
         m_long_local_rerank_lookup_key: string;
@@ -588,6 +593,15 @@ type
         procedure free_dictionary_provider(var provider: TncDictionaryProvider);
         function get_active_dictionary_path: string;
         function get_dictionary_write_time(const path: string): TDateTime;
+        function visible_candidates_cache_is_current(
+            const page_size: Integer): Boolean;
+        function get_candidate_state_signature: UInt64;
+        function get_long_visible_candidate_pool_cache_key(
+            const page_size: Integer): string;
+        function long_visible_candidate_pool_cache_is_current(
+            const page_size: Integer): Boolean;
+        function get_current_page_candidate_count(
+            const page_size: Integer): Integer;
         function get_page_count_internal(const page_size: Integer): Integer;
         procedure normalize_page_and_selection;
         function get_source_rank(const source: TncCandidateSource): Integer;
@@ -1240,6 +1254,11 @@ begin
     SetLength(m_visible_candidates_cache, 0);
     SetLength(m_visible_candidate_source_indices_cache, 0);
     m_visible_candidates_cache_valid := False;
+    SetLength(m_long_visible_candidate_pool_cache, 0);
+    SetLength(m_long_visible_candidate_pool_source_indices_cache, 0);
+    m_long_visible_candidate_pool_cache_key := '';
+    m_long_visible_candidate_pool_source_signature := 0;
+    m_long_visible_candidate_pool_cache_valid := False;
     m_long_local_rerank_generated_text := '';
     m_long_local_rerank_composition_text := '';
     m_long_local_rerank_lookup_key := '';
@@ -3384,6 +3403,11 @@ begin
     SetLength(m_visible_candidates_cache, 0);
     SetLength(m_visible_candidate_source_indices_cache, 0);
     m_visible_candidates_cache_valid := False;
+    SetLength(m_long_visible_candidate_pool_cache, 0);
+    SetLength(m_long_visible_candidate_pool_source_indices_cache, 0);
+    m_long_visible_candidate_pool_cache_key := '';
+    m_long_visible_candidate_pool_source_signature := 0;
+    m_long_visible_candidate_pool_cache_valid := False;
     m_long_local_rerank_generated_text := '';
     m_long_local_rerank_composition_text := '';
     m_long_local_rerank_lookup_key := '';
@@ -126068,6 +126092,117 @@ begin
     end;
 end;
 
+function TncEngine.visible_candidates_cache_is_current(
+    const page_size: Integer): Boolean;
+begin
+    Result := m_visible_candidates_cache_valid and
+        SameText(m_visible_candidates_cache_composition_text,
+        m_composition_text) and
+        SameText(m_visible_candidates_cache_lookup_key, m_last_lookup_key) and
+        (m_visible_candidates_cache_page_index = m_page_index) and
+        (m_visible_candidates_cache_page_size = page_size);
+end;
+
+function TncEngine.get_candidate_state_signature: UInt64;
+var
+    signature: UInt64;
+    candidate_idx: Integer;
+
+    procedure mix_value(const value: UInt64);
+    begin
+        signature := ((signature shl 7) or (signature shr 57)) xor value;
+    end;
+
+    procedure mix_text(const value: string);
+    var
+        char_idx: Integer;
+    begin
+        mix_value(Length(value));
+        for char_idx := 1 to Length(value) do
+        begin
+            mix_value(Ord(value[char_idx]));
+        end;
+    end;
+begin
+    signature := $6A09E667F3BCC909;
+    mix_value(Length(m_candidates));
+    for candidate_idx := 0 to High(m_candidates) do
+    begin
+        mix_text(m_candidates[candidate_idx].text);
+        mix_text(m_candidates[candidate_idx].comment);
+        mix_value(UInt64(Cardinal(m_candidates[candidate_idx].score)));
+        mix_value(Ord(m_candidates[candidate_idx].source));
+        mix_value(Ord(m_candidates[candidate_idx].display_kind));
+        mix_value(Ord(m_candidates[candidate_idx].has_dict_weight));
+        mix_value(UInt64(Cardinal(m_candidates[candidate_idx].dict_weight)));
+        if candidate_idx < Length(m_candidate_segment_paths) then
+        begin
+            mix_text(m_candidate_segment_paths[candidate_idx]);
+        end
+        else
+        begin
+            mix_value(0);
+        end;
+    end;
+    Result := signature;
+end;
+
+function TncEngine.get_long_visible_candidate_pool_cache_key(
+    const page_size: Integer): string;
+begin
+    Result := m_composition_text + #0 + m_composition_display_text + #0 +
+        m_last_lookup_key + #0 + m_confirmed_text + #0 +
+        m_external_left_context + #0 + m_segment_left_context + #0 +
+        IntToStr(page_size);
+end;
+
+function TncEngine.long_visible_candidate_pool_cache_is_current(
+    const page_size: Integer): Boolean;
+begin
+    Result := m_long_visible_candidate_pool_cache_valid and
+        SameText(m_long_visible_candidate_pool_cache_key,
+        get_long_visible_candidate_pool_cache_key(page_size)) and
+        (m_long_visible_candidate_pool_source_signature =
+        get_candidate_state_signature);
+end;
+
+function TncEngine.get_current_page_candidate_count(
+    const page_size: Integer): Integer;
+var
+    page_offset: Integer;
+begin
+    if visible_candidates_cache_is_current(page_size) then
+    begin
+        Exit(Length(m_visible_candidates_cache));
+    end;
+
+    if long_visible_candidate_pool_cache_is_current(page_size) then
+    begin
+        page_offset := m_page_index * page_size;
+        Result := Length(m_long_visible_candidate_pool_cache) - page_offset;
+        if Result < 0 then
+        begin
+            Result := 0;
+        end
+        else if Result > page_size then
+        begin
+            Result := page_size;
+        end;
+        Exit;
+    end;
+
+    page_offset := m_page_index * page_size;
+    Result := Length(m_candidates) - page_offset;
+    if Result < 0 then
+    begin
+        Result := 0;
+    end
+    else if Result > page_size then
+    begin
+        Result := page_size;
+    end;
+end;
+
 procedure TncEngine.normalize_page_and_selection;
 var
     page_size: Integer;
@@ -126095,6 +126230,10 @@ begin
 
     page_offset := m_page_index * page_size;
     page_items := Length(m_candidates) - page_offset;
+    if visible_candidates_cache_is_current(page_size) then
+    begin
+        page_items := Length(m_visible_candidates_cache);
+    end;
     if page_items > page_size then
     begin
         page_items := page_size;
@@ -142319,12 +142458,7 @@ begin
                     else if m_page_index > 0 then
                     begin
                         Dec(m_page_index);
-                        page_offset := m_page_index * page_size;
-                        index := Length(m_candidates) - page_offset;
-                        if index > page_size then
-                        begin
-                            index := page_size;
-                        end;
+                        index := get_current_page_candidate_count(page_size);
                         if index > 0 then
                         begin
                             m_selected_index := index - 1;
@@ -142350,12 +142484,7 @@ begin
                     end;
 
                     normalize_page_and_selection;
-                    page_offset := m_page_index * page_size;
-                    index := Length(m_candidates) - page_offset;
-                    if index > page_size then
-                    begin
-                        index := page_size;
-                    end;
+                    index := get_current_page_candidate_count(page_size);
 
                     if (index > 0) and (m_selected_index < index - 1) then
                     begin
@@ -142374,12 +142503,17 @@ begin
             begin
                 if m_composition_text <> '' then
                 begin
-                    m_selected_index := key_code - Ord('1');
-                    if (m_selected_index < get_candidate_page_size) and
-                        get_selected_candidate(candidate, True) then
+                    page_size := get_candidate_page_size;
+                    index := key_code - Ord('1');
+                    if (index < page_size) and
+                        (index < get_current_page_candidate_count(page_size)) then
                     begin
-                        Result := apply_candidate_selection(candidate, index,
-                            True, True);
+                        m_selected_index := index;
+                        if get_selected_candidate(candidate, True) then
+                        begin
+                            Result := apply_candidate_selection(candidate, index,
+                                True, True);
+                        end;
                     end
                     else
                     begin
@@ -142437,6 +142571,8 @@ var
     display_query_key_cache: TArray<string>;
     display_normalized_syllable_cache: TArray<string>;
     candidate_idx: Integer;
+    cached_pool_start: Integer;
+    cached_pool_count: Integer;
 
     function is_short_repeated_initial_display_query_local: Boolean;
     var
@@ -172159,6 +172295,470 @@ var
                 pool_index_by_text_local.Free;
             end;
         end;
+
+        procedure build_visible_long_sentence_candidate_pool_local;
+        const
+            c_short_exact_prefix_max_units = 6;
+            c_short_compound_prefix_max_units = 5;
+        var
+            pool_candidates_local: TncCandidateList;
+            pool_source_indices_local: TArray<Integer>;
+            seen_candidates_local: TDictionary<string, Boolean>;
+            long_candidate_count_local: Integer;
+            page_start_local: Integer;
+            page_count_local: Integer;
+
+            function get_partial_prefix_units_local(
+                const candidate_value_local: TncCandidate;
+                out prefix_units_local: Integer): Boolean;
+            var
+                tail_syllables_local: TncPinyinParseResult;
+                text_units_local: Integer;
+            begin
+                Result := False;
+                prefix_units_local := 0;
+                if Trim(candidate_value_local.comment) = '' then
+                begin
+                    Exit;
+                end;
+
+                tail_syllables_local := get_effective_compact_pinyin_syllables(
+                    normalize_pinyin_text(candidate_value_local.comment));
+                if Length(tail_syllables_local) <= 0 then
+                begin
+                    Exit;
+                end;
+                prefix_units_local := expected_units -
+                    Length(tail_syllables_local);
+                text_units_local := get_candidate_text_unit_count(
+                    Trim(candidate_value_local.text));
+                Result := (prefix_units_local > 0) and
+                    (prefix_units_local < expected_units) and
+                    (text_units_local = prefix_units_local);
+            end;
+
+            function candidate_is_complete_long_local(
+                const candidate_value_local: TncCandidate): Boolean;
+            var
+                text_local: string;
+            begin
+                text_local := Trim(candidate_value_local.text);
+                Result := (text_local <> '') and
+                    (Trim(candidate_value_local.comment) = '');
+            end;
+
+            function candidate_has_exact_compound_path_local(
+                const candidate_value_local: TncCandidate;
+                const source_idx_local: Integer;
+                const prefix_units_local: Integer): Boolean;
+            var
+                path_local: string;
+                path_parts_local: TArray<string>;
+                part_text_local: string;
+                part_key_local: string;
+                combined_text_local: string;
+                part_units_local: Integer;
+                consumed_units_local: Integer;
+                part_idx_local: Integer;
+                source_is_compound_local: Boolean;
+            begin
+                Result := False;
+                source_is_compound_local :=
+                    candidate_value_local.display_kind = cdk_lm_compound;
+                if (source_idx_local >= 0) and
+                    (source_idx_local < Length(m_candidates)) then
+                begin
+                    source_is_compound_local := source_is_compound_local or
+                        (m_candidates[source_idx_local].display_kind =
+                        cdk_lm_compound);
+                end;
+                if (not source_is_compound_local) or
+                    (prefix_units_local > c_short_compound_prefix_max_units)
+                then
+                begin
+                    Exit;
+                end;
+
+                path_local := get_segment_path_for_candidate(
+                    candidate_value_local, source_idx_local);
+                path_parts_local := path_local.Split(
+                    [c_segment_path_separator]);
+                if Length(path_parts_local) <> 2 then
+                begin
+                    Exit;
+                end;
+
+                consumed_units_local := 0;
+                combined_text_local := '';
+                for part_idx_local := 0 to High(path_parts_local) do
+                begin
+                    part_text_local := Trim(path_parts_local[part_idx_local]);
+                    part_units_local := get_candidate_text_unit_count(
+                        part_text_local);
+                    if (part_text_local = '') or (part_units_local <= 0) or
+                        (consumed_units_local + part_units_local >
+                        prefix_units_local) then
+                    begin
+                        Exit;
+                    end;
+                    part_key_local := build_display_query_key(
+                        consumed_units_local, part_units_local);
+                    if (part_key_local = '') or
+                        (not (display_exact_key_has_text(part_key_local,
+                        part_text_local) or
+                        ((m_dictionary <> nil) and
+                        (m_dictionary.is_base_entry(part_key_local,
+                        part_text_local) or
+                        m_dictionary.is_user_entry(part_key_local,
+                        part_text_local))))) then
+                    begin
+                        Exit;
+                    end;
+                    combined_text_local := combined_text_local +
+                        part_text_local;
+                    Inc(consumed_units_local, part_units_local);
+                end;
+
+                Result := (consumed_units_local = prefix_units_local) and
+                    SameText(combined_text_local,
+                    Trim(candidate_value_local.text));
+            end;
+
+            function candidate_is_short_prefix_local(
+                const candidate_value_local: TncCandidate;
+                const source_idx_local: Integer;
+                out prefix_units_local: Integer;
+                out highlight_compound_local: Boolean): Boolean;
+            var
+                prefix_key_local: string;
+                prefix_text_local: string;
+            begin
+                Result := False;
+                highlight_compound_local := False;
+                if not get_partial_prefix_units_local(candidate_value_local,
+                    prefix_units_local) then
+                begin
+                    Exit;
+                end;
+
+                prefix_key_local := build_display_query_key(0,
+                    prefix_units_local);
+                prefix_text_local := Trim(candidate_value_local.text);
+                if (prefix_key_local = '') or (prefix_text_local = '') then
+                begin
+                    Exit;
+                end;
+
+                if prefix_units_local = 1 then
+                begin
+                    Exit((m_dictionary <> nil) and
+                        (m_dictionary.single_char_matches_pinyin(
+                        prefix_key_local, prefix_text_local) or
+                        display_exact_key_has_text(prefix_key_local,
+                        prefix_text_local)));
+                end;
+
+                if (prefix_units_local <=
+                    c_short_exact_prefix_max_units) and
+                    (display_exact_key_has_text(prefix_key_local,
+                    prefix_text_local) or
+                    ((m_dictionary <> nil) and
+                    (m_dictionary.is_base_entry(prefix_key_local,
+                    prefix_text_local) or
+                    m_dictionary.is_user_entry(prefix_key_local,
+                    prefix_text_local))) or
+                    ((candidate_value_local.fuzzy_cost > 0) and
+                    candidate_value_local.has_dict_weight)) then
+                begin
+                    Exit(True);
+                end;
+
+                highlight_compound_local :=
+                    candidate_has_exact_compound_path_local(
+                    candidate_value_local, source_idx_local,
+                    prefix_units_local);
+                Result := highlight_compound_local;
+            end;
+
+            function candidate_is_long_partial_local(
+                const candidate_value_local: TncCandidate;
+                const source_idx_local: Integer): Boolean;
+            var
+                prefix_units_local: Integer;
+                highlight_compound_local: Boolean;
+            begin
+                Result := False;
+                if not get_partial_prefix_units_local(candidate_value_local,
+                    prefix_units_local) then
+                begin
+                    Exit;
+                end;
+                if candidate_is_short_prefix_local(candidate_value_local,
+                    source_idx_local, prefix_units_local,
+                    highlight_compound_local) then
+                begin
+                    Exit;
+                end;
+                Result := prefix_units_local >= 3;
+            end;
+
+            procedure append_pool_candidate_local(
+                const candidate_value_local: TncCandidate;
+                const source_idx_local: Integer;
+                const is_long_candidate_local: Boolean;
+                const highlight_compound_local: Boolean);
+            var
+                normalized_candidate_local: TncCandidate;
+                candidate_key_local: string;
+                out_idx_local: Integer;
+            begin
+                normalized_candidate_local := candidate_value_local;
+                normalize_display_candidate(normalized_candidate_local);
+                if is_long_candidate_local then
+                begin
+                    // The accent color denotes an explicit short transition
+                    // compound, not a sentence that happened to use LM data.
+                    normalized_candidate_local.display_kind := cdk_default;
+                end
+                else if highlight_compound_local then
+                begin
+                    normalized_candidate_local.display_kind :=
+                        cdk_lm_compound;
+                end;
+
+                candidate_key_local := LowerCase(
+                    Trim(normalized_candidate_local.text)) + #0 +
+                    LowerCase(normalize_pinyin_text(
+                    Trim(normalized_candidate_local.comment)));
+                if (Trim(normalized_candidate_local.text) = '') or
+                    seen_candidates_local.ContainsKey(candidate_key_local) then
+                begin
+                    Exit;
+                end;
+
+                out_idx_local := Length(pool_candidates_local);
+                SetLength(pool_candidates_local, out_idx_local + 1);
+                SetLength(pool_source_indices_local, out_idx_local + 1);
+                pool_candidates_local[out_idx_local] :=
+                    normalized_candidate_local;
+                pool_source_indices_local[out_idx_local] := source_idx_local;
+                seen_candidates_local.Add(candidate_key_local, True);
+            end;
+
+            procedure append_complete_candidates_from_result_local;
+            var
+                idx_local: Integer;
+            begin
+                for idx_local := 0 to High(Result) do
+                begin
+                    if long_candidate_count_local >=
+                        c_long_sentence_complete_candidate_display_limit then
+                    begin
+                        Exit;
+                    end;
+                    if not candidate_is_complete_long_local(Result[idx_local])
+                    then
+                    begin
+                        Continue;
+                    end;
+                    append_pool_candidate_local(Result[idx_local],
+                        visible_source_indices[idx_local], True, False);
+                    long_candidate_count_local :=
+                        Length(pool_candidates_local);
+                end;
+            end;
+
+            procedure append_long_partials_from_list_local(
+                const candidates_local: TncCandidateList;
+                const source_indices_local: TArray<Integer>;
+                const use_identity_source_local: Boolean);
+            var
+                idx_local: Integer;
+                source_idx_local: Integer;
+                before_count_local: Integer;
+            begin
+                for idx_local := 0 to High(candidates_local) do
+                begin
+                    if long_candidate_count_local >=
+                        c_long_sentence_complete_candidate_display_limit then
+                    begin
+                        Exit;
+                    end;
+                    if use_identity_source_local then
+                    begin
+                        source_idx_local := idx_local;
+                    end
+                    else if idx_local < Length(source_indices_local) then
+                    begin
+                        source_idx_local := source_indices_local[idx_local];
+                    end
+                    else
+                    begin
+                        source_idx_local := -1;
+                    end;
+                    if not candidate_is_long_partial_local(
+                        candidates_local[idx_local], source_idx_local) then
+                    begin
+                        Continue;
+                    end;
+                    before_count_local := Length(pool_candidates_local);
+                    append_pool_candidate_local(candidates_local[idx_local],
+                        source_idx_local, True, False);
+                    if Length(pool_candidates_local) > before_count_local then
+                    begin
+                        Inc(long_candidate_count_local);
+                    end;
+                end;
+            end;
+
+            procedure append_short_prefixes_from_list_local(
+                const candidates_local: TncCandidateList;
+                const source_indices_local: TArray<Integer>;
+                const use_identity_source_local: Boolean;
+                const append_single_local: Boolean);
+            var
+                idx_local: Integer;
+                source_idx_local: Integer;
+                prefix_units_local: Integer;
+                highlight_compound_local: Boolean;
+            begin
+                for idx_local := 0 to High(candidates_local) do
+                begin
+                    if use_identity_source_local then
+                    begin
+                        source_idx_local := idx_local;
+                    end
+                    else if idx_local < Length(source_indices_local) then
+                    begin
+                        source_idx_local := source_indices_local[idx_local];
+                    end
+                    else
+                    begin
+                        source_idx_local := -1;
+                    end;
+                    if not candidate_is_short_prefix_local(
+                        candidates_local[idx_local], source_idx_local,
+                        prefix_units_local, highlight_compound_local) then
+                    begin
+                        Continue;
+                    end;
+                    if (prefix_units_local = 1) <> append_single_local then
+                    begin
+                        Continue;
+                    end;
+                    append_pool_candidate_local(candidates_local[idx_local],
+                        source_idx_local, False, highlight_compound_local);
+                end;
+            end;
+
+            procedure append_all_first_syllable_singles_local;
+            var
+                first_key_local: string;
+                tail_key_local: string;
+                exact_singles_local: TncCandidateList;
+                single_candidate_local: TncCandidate;
+                idx_local: Integer;
+            begin
+                first_key_local := build_display_query_key(0, 1);
+                tail_key_local := build_display_query_key(1,
+                    expected_units - 1);
+                if (first_key_local = '') or (tail_key_local = '') or
+                    (not lookup_display_exact_cached(first_key_local,
+                    exact_singles_local)) then
+                begin
+                    Exit;
+                end;
+
+                for idx_local := 0 to High(exact_singles_local) do
+                begin
+                    single_candidate_local := exact_singles_local[idx_local];
+                    if (Trim(single_candidate_local.comment) <> '') or
+                        (get_candidate_text_unit_count(
+                        Trim(single_candidate_local.text)) <> 1) then
+                    begin
+                        Continue;
+                    end;
+                    single_candidate_local.comment := tail_key_local;
+                    single_candidate_local.has_dict_weight := False;
+                    single_candidate_local.dict_weight := 0;
+                    single_candidate_local.display_kind := cdk_default;
+                    append_pool_candidate_local(single_candidate_local, -1,
+                        False, False);
+                end;
+            end;
+        begin
+            if short_exact_query_mode or
+                (expected_units < c_long_sentence_full_path_min_syllables) or
+                (normalized_pinyin = '') or
+                ((expected_units <= 6) and
+                (Length(protected_full_query_exacts) > 0)) then
+            begin
+                Exit;
+            end;
+
+            SetLength(pool_candidates_local, 0);
+            SetLength(pool_source_indices_local, 0);
+            seen_candidates_local := TDictionary<string, Boolean>.Create;
+            try
+                long_candidate_count_local := 0;
+                append_complete_candidates_from_result_local;
+                if long_candidate_count_local <
+                    c_long_sentence_complete_candidate_display_limit then
+                begin
+                    append_long_partials_from_list_local(Result,
+                        visible_source_indices, False);
+                end;
+                if long_candidate_count_local <
+                    c_long_sentence_complete_candidate_display_limit then
+                begin
+                    append_long_partials_from_list_local(m_candidates,
+                        visible_source_indices, True);
+                end;
+
+                // Prefix words precede first-syllable singles, matching the
+                // short-word display categories without exposing more
+                // sentence-path variants.
+                append_short_prefixes_from_list_local(Result,
+                    visible_source_indices, False, False);
+                append_short_prefixes_from_list_local(m_candidates,
+                    visible_source_indices, True, False);
+                append_short_prefixes_from_list_local(Result,
+                    visible_source_indices, False, True);
+                append_short_prefixes_from_list_local(m_candidates,
+                    visible_source_indices, True, True);
+                append_all_first_syllable_singles_local;
+
+                m_long_visible_candidate_pool_cache := Copy(
+                    pool_candidates_local, 0, Length(pool_candidates_local));
+                m_long_visible_candidate_pool_source_indices_cache := Copy(
+                    pool_source_indices_local, 0,
+                    Length(pool_source_indices_local));
+                m_long_visible_candidate_pool_cache_key :=
+                    get_long_visible_candidate_pool_cache_key(
+                    visible_page_size);
+                m_long_visible_candidate_pool_source_signature :=
+                    get_candidate_state_signature;
+                m_long_visible_candidate_pool_cache_valid := True;
+
+                page_start_local := m_page_index * visible_page_size;
+                page_count_local := Length(pool_candidates_local) -
+                    page_start_local;
+                if page_count_local < 0 then
+                begin
+                    page_count_local := 0;
+                end
+                else if page_count_local > visible_page_size then
+                begin
+                    page_count_local := visible_page_size;
+                end;
+                Result := Copy(pool_candidates_local, page_start_local,
+                    page_count_local);
+                visible_source_indices := Copy(pool_source_indices_local,
+                    page_start_local, page_count_local);
+            finally
+                seen_candidates_local.Free;
+            end;
+        end;
     begin
         capture_short_exact_ranked_order_local;
         retain_all_full_query_exact_candidates_local;
@@ -172357,6 +172957,7 @@ var
             note_display_phase('longpool');
             promote_strong_short_four_two_exact_path_visible_local(Result,
                 visible_source_indices);
+            build_visible_long_sentence_candidate_pool_local;
             if (Length(Result) > 0) and
                 (Trim(Result[0].comment) = '') and
                 (get_candidate_text_unit_count(Trim(Result[0].text)) =
@@ -172685,6 +173286,41 @@ begin
     begin
         Result := Copy(m_visible_candidates_cache, 0,
             Length(m_visible_candidates_cache));
+        Exit;
+    end;
+    if long_visible_candidate_pool_cache_is_current(visible_page_size) then
+    begin
+        cached_pool_start := m_page_index * visible_page_size;
+        cached_pool_count := Length(m_long_visible_candidate_pool_cache) -
+            cached_pool_start;
+        if cached_pool_count < 0 then
+        begin
+            cached_pool_count := 0;
+        end
+        else if cached_pool_count > visible_page_size then
+        begin
+            cached_pool_count := visible_page_size;
+        end;
+        Result := Copy(m_long_visible_candidate_pool_cache,
+            cached_pool_start, cached_pool_count);
+        m_visible_candidate_source_indices_cache := Copy(
+            m_long_visible_candidate_pool_source_indices_cache,
+            cached_pool_start, cached_pool_count);
+        m_visible_candidates_cache := Copy(Result, 0, Length(Result));
+        m_visible_candidates_cache_composition_text := m_composition_text;
+        m_visible_candidates_cache_lookup_key := m_last_lookup_key;
+        m_visible_candidates_cache_page_index := m_page_index;
+        m_visible_candidates_cache_page_size := visible_page_size;
+        m_visible_candidates_cache_valid := True;
+        if Length(Result) <= 0 then
+        begin
+            m_selected_index := 0;
+        end
+        else if m_selected_index >= Length(Result) then
+        begin
+            m_selected_index := High(Result);
+        end;
+        note_display_phase('longvisiblecache');
         Exit;
     end;
     initialize_display_query_context;
@@ -173195,7 +173831,14 @@ function TncEngine.get_page_count_internal(const page_size: Integer): Integer;
 var
     total_count: Integer;
 begin
-    total_count := Length(m_candidates);
+    if long_visible_candidate_pool_cache_is_current(page_size) then
+    begin
+        total_count := Length(m_long_visible_candidate_pool_cache);
+    end
+    else
+    begin
+        total_count := Length(m_candidates);
+    end;
     if (page_size <= 0) or (total_count = 0) then
     begin
         Result := 0;
