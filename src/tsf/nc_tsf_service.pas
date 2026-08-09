@@ -20,6 +20,7 @@ uses
     nc_shortcut,
     nc_log,
     nc_tsf_guids,
+    nc_tsf_lifecycle,
     nc_tsf_compartments,
     nc_tsf_display_attr,
     nc_tsf_edit_session,
@@ -105,6 +106,10 @@ type
         m_chord_shortcut_key_code: Word;
         m_langbar_icon: HICON;
         procedure clear_state;
+        procedure rollback_activation;
+        function activate_core(const thread_mgr: ITfThreadMgr;
+            client_id: TfClientId): HResult;
+        procedure deactivate_core;
         procedure mark_session_dirty;
         procedure reset_session_if_needed(const force: Boolean = False);
         procedure invalidate_sent_caret;
@@ -147,6 +152,19 @@ type
         procedure toggle_dictionary_variant_by_shortcut;
         procedure open_settings_by_shortcut;
         procedure configure_system_input_mode_icon;
+        function on_test_key_down_core(const context: ITfContext; wParam: WPARAM;
+            lParam: LPARAM; out eaten: Integer): HResult;
+        function on_key_down_core(const context: ITfContext; wParam: WPARAM;
+            lParam: LPARAM; out eaten: Integer): HResult;
+        function on_test_key_up_core(const context: ITfContext; wParam: WPARAM;
+            lParam: LPARAM; out eaten: Integer): HResult;
+        function on_key_up_core(const context: ITfContext; wParam: WPARAM;
+            lParam: LPARAM; out eaten: Integer): HResult;
+        function on_end_edit_core(const pic: ITfContext; ecReadOnly: TfEditCookie;
+            const pEditRecord: ITfEditRecord): HResult;
+        function on_layout_change_core(const pic: ITfContext; lcode: TfLayoutCode;
+            const pView: ITfContextView): HResult;
+        function on_compartment_change_core(var rguid: TGUID): HResult;
         function get_candidate_point(out point: TPoint; out placement_line_height: Integer;
             out terminal_like_target: Boolean; out chosen_source: TncCaretAnchorSource;
             out chosen_score: Integer): Boolean;
@@ -564,6 +582,43 @@ begin
     Result := StringReplace(Result, #9, ' ', [rfReplaceAll]);
 end;
 
+procedure log_tsf_boundary_exception(const operation: string);
+var
+    exception_text: string;
+    process_path: array[0..MAX_PATH - 1] of Char;
+    process_name: string;
+    line: string;
+begin
+    try
+        if ExceptObject is Exception then
+        begin
+            exception_text := ExceptObject.ClassName + ': ' + Exception(ExceptObject).Message;
+        end
+        else if ExceptObject <> nil then
+        begin
+            exception_text := ExceptObject.ClassName;
+        end
+        else
+        begin
+            exception_text := 'unknown exception';
+        end;
+
+        process_name := '';
+        if GetModuleFileName(0, process_path, Length(process_path)) > 0 then
+        begin
+            process_name := ExtractFileName(process_path);
+        end;
+        line := FormatDateTime('yyyy-mm-dd hh:nn:ss.zzz', Now) +
+            Format(' [ERROR] [TSF-BOUNDARY] operation=%s process=%s pid=%d tid=%d address=0x%s error=%s',
+            [operation, process_name, GetCurrentProcessId, GetCurrentThreadId,
+            IntToHex(UInt64(NativeUInt(ExceptAddr)), SizeOf(Pointer) * 2), exception_text]) + sLineBreak;
+        OutputDebugString(PChar(TrimRight(line)));
+        append_log_line_shared(get_default_log_path, line, 1024);
+    except
+        // Exception reporting must never escape an in-proc TSF callback.
+    end;
+end;
+
 const
     TF_ES_ASYNCDONTCARE = $0;
     TF_ES_SYNC = $1;
@@ -577,33 +632,91 @@ procedure TncTextService.Initialize;
 var
     guid: TGUID;
 begin
-    inherited Initialize;
-    m_ipc_client := TncIpcClient.create(True);
-    clear_state;
-    m_active_state_lock := TCriticalSection.Create;
-    m_active_state_event := TEvent.Create(nil, False, False, '');
-    start_active_state_worker;
-    if CreateGUID(guid) = S_OK then
-    begin
-        m_session_id := GUIDToString(guid);
+    try
+        inherited Initialize;
+        clear_state;
+        m_ipc_client := TncIpcClient.create(True);
+        m_active_state_lock := TCriticalSection.Create;
+        m_active_state_event := TEvent.Create(nil, False, False, '');
+        if CreateGUID(guid) = S_OK then
+        begin
+            m_session_id := GUIDToString(guid);
+        end;
+    except
+        log_tsf_boundary_exception('Initialize');
+        if m_active_state_event <> nil then
+        begin
+            m_active_state_event.Free;
+            m_active_state_event := nil;
+        end;
+        if m_active_state_lock <> nil then
+        begin
+            m_active_state_lock.Free;
+            m_active_state_lock := nil;
+        end;
+        if m_ipc_client <> nil then
+        begin
+            m_ipc_client.Free;
+            m_ipc_client := nil;
+        end;
+        m_session_id := '';
     end;
+end;
+
+procedure TncTextService.rollback_activation;
+begin
+    try
+        if m_key_event_advised and (m_keystroke_mgr <> nil) then
+        begin
+            m_keystroke_mgr.UnadviseKeyEventSink(m_client_id);
+        end;
+    except
+        log_tsf_boundary_exception('Rollback.UnadviseKeyEventSink');
+    end;
+    m_key_event_advised := False;
+    m_keystroke_mgr := nil;
+
+    unadvise_context_sinks;
+    unadvise_compartment_sinks;
+    unadvise_thread_mgr_sink;
+    free_logger;
+    clear_state;
 end;
 
 destructor TncTextService.Destroy;
 begin
-    stop_active_state_worker;
-    free_logger;
-    reset_session_if_needed(True);
+    try
+        stop_active_state_worker;
+    except
+        log_tsf_boundary_exception('Destroy.StopWorker');
+    end;
+    try
+        reset_session_if_needed(True);
+    except
+        log_tsf_boundary_exception('Destroy.ResetSession');
+    end;
+    try
+        rollback_activation;
+    except
+        log_tsf_boundary_exception('Destroy.Rollback');
+    end;
     if m_ipc_client <> nil then
     begin
-        if (m_session_id <> '') and m_ipc_client.is_host_running then
-        begin
-            m_ipc_client.release_session(m_session_id);
+        try
+            if (m_session_id <> '') and m_ipc_client.is_host_running then
+            begin
+                m_ipc_client.release_session(m_session_id);
+            end;
+        except
+            log_tsf_boundary_exception('Destroy.ReleaseSession');
         end;
-        m_ipc_client.Free;
+        try
+            m_ipc_client.Free;
+        except
+            log_tsf_boundary_exception('Destroy.FreeIpc');
+        end;
         m_ipc_client := nil;
     end;
-    clear_state;
     inherited Destroy;
 end;
 
@@ -617,14 +730,14 @@ begin
 
     m_thread_mgr := nil;
     m_thread_mgr_source := nil;
-    m_thread_mgr_event_cookie := 0;
+    m_thread_mgr_event_cookie := c_nc_tsf_invalid_sink_cookie;
     m_compartment_mgr := nil;
     m_openclose_compartment := nil;
     m_openclose_source := nil;
-    m_openclose_cookie := 0;
+    m_openclose_cookie := c_nc_tsf_invalid_sink_cookie;
     m_conversion_compartment := nil;
     m_conversion_source := nil;
-    m_conversion_cookie := 0;
+    m_conversion_cookie := c_nc_tsf_invalid_sink_cookie;
     m_compartment_update_depth := 0;
     m_last_input_mode := im_chinese;
     m_last_full_width_mode := False;
@@ -635,8 +748,8 @@ begin
     m_key_event_advised := False;
     m_doc_mgr := nil;
     m_context_source := nil;
-    m_text_edit_cookie := 0;
-    m_text_layout_cookie := 0;
+    m_text_edit_cookie := c_nc_tsf_invalid_sink_cookie;
+    m_text_layout_cookie := c_nc_tsf_invalid_sink_cookie;
     m_context := nil;
     m_composition := nil;
     m_composition_context := nil;
@@ -733,90 +846,103 @@ begin
     m_active_state_pending := False;
     m_pending_active_session_id := '';
     m_pending_active_value := False;
-    m_active_state_thread := TThread.CreateAnonymousThread(
-        procedure
-        var
-            ipc_client: TncIpcClient;
-            session_id: string;
-            active_value: Boolean;
-            has_work: Boolean;
-            request_ok: Boolean;
-        begin
-            ipc_client := TncIpcClient.Create(True);
-            try
-                while True do
-                begin
-                    if m_active_state_event.WaitFor(INFINITE) <> wrSignaled then
-                    begin
-                        Continue;
-                    end;
-
-                    while True do
-                    begin
-                        m_active_state_lock.Acquire;
-                        try
-                            if m_active_state_shutdown then
+    try
+        m_active_state_thread := TThread.CreateAnonymousThread(
+            procedure
+            var
+                ipc_client: TncIpcClient;
+                session_id: string;
+                active_value: Boolean;
+                has_work: Boolean;
+                request_ok: Boolean;
+            begin
+                try
+                    ipc_client := TncIpcClient.Create(True);
+                    try
+                        while True do
+                        begin
+                            if m_active_state_event.WaitFor(INFINITE) <> wrSignaled then
                             begin
-                                Exit;
-                            end;
-                            has_work := m_active_state_pending and (m_pending_active_session_id <> '');
-                            session_id := m_pending_active_session_id;
-                            active_value := m_pending_active_value;
-                            m_active_state_pending := False;
-                            m_pending_active_session_id := '';
-                        finally
-                            m_active_state_lock.Release;
-                        end;
-
-                        if not has_work then
-                        begin
-                            Break;
-                        end;
-
-                        if active_value then
-                        begin
-                            request_ok := ipc_client.set_active(session_id, True);
-                        end
-                        else if ipc_client.is_host_running then
-                        begin
-                            request_ok := ipc_client.set_active(session_id, False);
-                        end
-                        else
-                        begin
-                            request_ok := True;
-                        end;
-
-                        m_active_state_lock.Acquire;
-                        try
-                            if m_active_state_shutdown then
-                            begin
-                                Exit;
+                                Continue;
                             end;
 
-                            if not m_active_state_pending then
+                            while True do
                             begin
-                                if request_ok then
+                                m_active_state_lock.Acquire;
+                                try
+                                    if m_active_state_shutdown then
+                                    begin
+                                        Exit;
+                                    end;
+                                    has_work := m_active_state_pending and (m_pending_active_session_id <> '');
+                                    session_id := m_pending_active_session_id;
+                                    active_value := m_pending_active_value;
+                                    m_active_state_pending := False;
+                                    m_pending_active_session_id := '';
+                                finally
+                                    m_active_state_lock.Release;
+                                end;
+
+                                if not has_work then
                                 begin
-                                    m_last_reported_active_session_id := session_id;
-                                    m_last_reported_active := active_value;
-                                    m_active_state_synced := True;
+                                    Break;
+                                end;
+
+                                if active_value then
+                                begin
+                                    request_ok := ipc_client.set_active(session_id, True);
+                                end
+                                else if ipc_client.is_host_running then
+                                begin
+                                    request_ok := ipc_client.set_active(session_id, False);
                                 end
                                 else
                                 begin
-                                    m_active_state_synced := False;
+                                    request_ok := True;
+                                end;
+
+                                m_active_state_lock.Acquire;
+                                try
+                                    if m_active_state_shutdown then
+                                    begin
+                                        Exit;
+                                    end;
+
+                                    if not m_active_state_pending then
+                                    begin
+                                        if request_ok then
+                                        begin
+                                            m_last_reported_active_session_id := session_id;
+                                            m_last_reported_active := active_value;
+                                            m_active_state_synced := True;
+                                        end
+                                        else
+                                        begin
+                                            m_active_state_synced := False;
+                                        end;
+                                    end;
+                                finally
+                                    m_active_state_lock.Release;
                                 end;
                             end;
-                        finally
-                            m_active_state_lock.Release;
                         end;
+                    finally
+                        ipc_client.Free;
                     end;
+                except
+                    log_tsf_boundary_exception('ActiveStateWorker');
                 end;
-            finally
-                ipc_client.Free;
-            end;
-        end);
-    m_active_state_thread.FreeOnTerminate := False;
-    m_active_state_thread.Start;
+            end);
+        m_active_state_thread.FreeOnTerminate := False;
+        m_active_state_thread.Start;
+    except
+        log_tsf_boundary_exception('StartActiveStateWorker');
+        if m_active_state_thread <> nil then
+        begin
+            m_active_state_thread.Free;
+            m_active_state_thread := nil;
+        end;
+    end;
 end;
 
 procedure TncTextService.stop_active_state_worker;
@@ -857,7 +983,12 @@ end;
 
 procedure TncTextService.queue_active_state_update(const active: Boolean);
 begin
-    if (m_active_state_lock = nil) or (m_active_state_event = nil) or (m_session_id = '') then
+    if m_active_state_thread = nil then
+    begin
+        start_active_state_worker;
+    end;
+    if (m_active_state_thread = nil) or (m_active_state_lock = nil) or
+        (m_active_state_event = nil) or (m_session_id = '') then
     begin
         Exit;
     end;
@@ -959,11 +1090,13 @@ end;
 
 procedure TncTextService.unadvise_thread_mgr_sink;
 begin
-    if (m_thread_mgr_source <> nil) and (m_thread_mgr_event_cookie <> 0) then
+    if not nc_tsf_try_unadvise_sink(m_thread_mgr_source, m_thread_mgr_event_cookie) then
     begin
-        m_thread_mgr_source.UnadviseSink(m_thread_mgr_event_cookie);
+        if m_logger <> nil then
+        begin
+            m_logger.warn('Failed to unadvise thread manager sink');
+        end;
     end;
-    m_thread_mgr_event_cookie := 0;
     m_thread_mgr_source := nil;
 end;
 
@@ -989,27 +1122,31 @@ begin
         end
         else
         begin
-            m_thread_mgr_event_cookie := 0;
+            m_thread_mgr_event_cookie := c_nc_tsf_invalid_sink_cookie;
         end;
     end;
 end;
 
 procedure TncTextService.unadvise_compartment_sinks;
 begin
-    if (m_openclose_source <> nil) and (m_openclose_cookie <> 0) then
+    if not nc_tsf_try_unadvise_sink(m_openclose_source, m_openclose_cookie) then
     begin
-        m_openclose_source.UnadviseSink(m_openclose_cookie);
+        if m_logger <> nil then
+        begin
+            m_logger.warn('Failed to unadvise open/close compartment sink');
+        end;
     end;
-    if (m_conversion_source <> nil) and (m_conversion_cookie <> 0) then
+    if not nc_tsf_try_unadvise_sink(m_conversion_source, m_conversion_cookie) then
     begin
-        m_conversion_source.UnadviseSink(m_conversion_cookie);
+        if m_logger <> nil then
+        begin
+            m_logger.warn('Failed to unadvise conversion compartment sink');
+        end;
     end;
 
-    m_openclose_cookie := 0;
     m_openclose_source := nil;
     m_openclose_compartment := nil;
 
-    m_conversion_cookie := 0;
     m_conversion_source := nil;
     m_conversion_compartment := nil;
 
@@ -1046,7 +1183,7 @@ begin
         end
         else
         begin
-            m_openclose_cookie := 0;
+            m_openclose_cookie := c_nc_tsf_invalid_sink_cookie;
         end;
     end;
 
@@ -1061,7 +1198,7 @@ begin
         end
         else
         begin
-            m_conversion_cookie := 0;
+            m_conversion_cookie := c_nc_tsf_invalid_sink_cookie;
         end;
     end;
 end;
@@ -1170,20 +1307,21 @@ end;
 
 procedure TncTextService.unadvise_context_sinks;
 begin
-    if m_context_source <> nil then
+    if not nc_tsf_try_unadvise_sink(m_context_source, m_text_edit_cookie) then
     begin
-        if m_text_edit_cookie <> 0 then
+        if m_logger <> nil then
         begin
-            m_context_source.UnadviseSink(m_text_edit_cookie);
+            m_logger.warn('Failed to unadvise text edit sink');
         end;
-        if m_text_layout_cookie <> 0 then
+    end;
+    if not nc_tsf_try_unadvise_sink(m_context_source, m_text_layout_cookie) then
+    begin
+        if m_logger <> nil then
         begin
-            m_context_source.UnadviseSink(m_text_layout_cookie);
+            m_logger.warn('Failed to unadvise text layout sink');
         end;
     end;
 
-    m_text_edit_cookie := 0;
-    m_text_layout_cookie := 0;
     m_context_source := nil;
 end;
 
@@ -1202,7 +1340,7 @@ begin
 
     if Supports(context, ITfSource, source) then
     begin
-        cookie := 0;
+        cookie := c_nc_tsf_invalid_sink_cookie;
         iid := IID_ITfTextEditSink;
         hr := source.AdviseSink(iid, Self as ITfTextEditSink, cookie);
         if hr = S_OK then
@@ -1210,7 +1348,7 @@ begin
             m_text_edit_cookie := cookie;
         end;
 
-        cookie := 0;
+        cookie := c_nc_tsf_invalid_sink_cookie;
         iid := IID_ITfTextLayoutSink;
         hr := source.AdviseSink(iid, Self as ITfTextLayoutSink, cookie);
         if hr = S_OK then
@@ -1218,7 +1356,8 @@ begin
             m_text_layout_cookie := cookie;
         end;
 
-        if (m_text_edit_cookie <> 0) or (m_text_layout_cookie <> 0) then
+        if nc_tsf_sink_cookie_is_valid(m_text_edit_cookie) or
+            nc_tsf_sink_cookie_is_valid(m_text_layout_cookie) then
         begin
             m_context_source := source;
         end;
@@ -1291,7 +1430,8 @@ begin
     advise_context_sinks(context);
 end;
 
-function TncTextService.Activate(const thread_mgr: ITfThreadMgr; client_id: TfClientId): HResult;
+function TncTextService.activate_core(const thread_mgr: ITfThreadMgr;
+    client_id: TfClientId): HResult;
 var
     keystroke_mgr: ITfKeystrokeMgr;
     hr: HRESULT;
@@ -1328,9 +1468,13 @@ begin
         end;
     end;
 
-    m_config_path := get_default_config_path;
+    m_config_path := get_default_config_path_read_only;
     load_engine_config(engine_config);
-    configure_system_input_mode_icon;
+    try
+        configure_system_input_mode_icon;
+    except
+        log_tsf_boundary_exception('ConfigureSystemInputModeIcon');
+    end;
     if m_session_id = '' then
     begin
         if CreateGUID(guid) = S_OK then
@@ -1364,7 +1508,29 @@ begin
     Result := S_OK;
 end;
 
-function TncTextService.Deactivate: HResult;
+function TncTextService.Activate(const thread_mgr: ITfThreadMgr;
+    client_id: TfClientId): HResult;
+begin
+    if thread_mgr = nil then
+    begin
+        Result := E_INVALIDARG;
+        Exit;
+    end;
+
+    try
+        Result := activate_core(thread_mgr, client_id);
+    except
+        log_tsf_boundary_exception('Activate');
+        try
+            rollback_activation;
+        except
+            log_tsf_boundary_exception('Activate.Rollback');
+        end;
+        Result := E_FAIL;
+    end;
+end;
+
+procedure TncTextService.deactivate_core;
 begin
     if m_key_event_advised and (m_keystroke_mgr <> nil) then
     begin
@@ -1390,6 +1556,20 @@ begin
     end;
     free_logger;
     clear_state;
+end;
+
+function TncTextService.Deactivate: HResult;
+begin
+    try
+        deactivate_core;
+    except
+        log_tsf_boundary_exception('Deactivate');
+        try
+            rollback_activation;
+        except
+            log_tsf_boundary_exception('Deactivate.Rollback');
+        end;
+    end;
     Result := S_OK;
 end;
 
@@ -1400,30 +1580,34 @@ end;
 
 function TncTextService.OnSetFocus(focus: Integer): HResult;
 begin
-    if focus = 0 then
-    begin
-        cancel_composition;
-        if (m_ipc_client <> nil) and (m_session_id <> '') then
-        begin
-            signal_tray_profile_event(False);
-            update_active_state(False);
-            mark_session_dirty;
-            reset_session_if_needed(True);
-        end;
-        unadvise_context_sinks;
-        m_doc_mgr := nil;
-        m_context := nil;
-        m_modifier_shortcut_pending := False;
-        m_modifier_shortcut_canceled := False;
-        m_modifier_shortcut_key_code := 0;
-        m_chord_shortcut_pending := False;
-        m_chord_shortcut_key_code := 0;
-    end;
-
     Result := S_OK;
+    try
+        if focus = 0 then
+        begin
+            cancel_composition;
+            if (m_ipc_client <> nil) and (m_session_id <> '') then
+            begin
+                signal_tray_profile_event(False);
+                update_active_state(False);
+                mark_session_dirty;
+                reset_session_if_needed(True);
+            end;
+            unadvise_context_sinks;
+            m_doc_mgr := nil;
+            m_context := nil;
+            m_modifier_shortcut_pending := False;
+            m_modifier_shortcut_canceled := False;
+            m_modifier_shortcut_key_code := 0;
+            m_chord_shortcut_pending := False;
+            m_chord_shortcut_key_code := 0;
+        end;
+    except
+        log_tsf_boundary_exception('KeyEventSink.OnSetFocus');
+    end;
 end;
 
-function TncTextService.OnTestKeyDown(const context: ITfContext; wParam: WPARAM; lParam: LPARAM; out eaten: Integer): HResult;
+function TncTextService.on_test_key_down_core(const context: ITfContext;
+    wParam: WPARAM; lParam: LPARAM; out eaten: Integer): HResult;
 const
     c_slow_test_key_ms = 8;
 var
@@ -1527,7 +1711,21 @@ begin
     Result := S_OK;
 end;
 
-function TncTextService.OnKeyDown(const context: ITfContext; wParam: WPARAM; lParam: LPARAM; out eaten: Integer): HResult;
+function TncTextService.OnTestKeyDown(const context: ITfContext;
+    wParam: WPARAM; lParam: LPARAM; out eaten: Integer): HResult;
+begin
+    eaten := 0;
+    Result := S_OK;
+    try
+        Result := on_test_key_down_core(context, wParam, lParam, eaten);
+    except
+        eaten := 0;
+        log_tsf_boundary_exception('KeyEventSink.OnTestKeyDown');
+    end;
+end;
+
+function TncTextService.on_key_down_core(const context: ITfContext;
+    wParam: WPARAM; lParam: LPARAM; out eaten: Integer): HResult;
 const
     c_slow_keydown_ms = 12;
 var
@@ -1735,7 +1933,21 @@ begin
     Result := S_OK;
 end;
 
-function TncTextService.OnTestKeyUp(const context: ITfContext; wParam: WPARAM; lParam: LPARAM; out eaten: Integer): HResult;
+function TncTextService.OnKeyDown(const context: ITfContext;
+    wParam: WPARAM; lParam: LPARAM; out eaten: Integer): HResult;
+begin
+    eaten := 0;
+    Result := S_OK;
+    try
+        Result := on_key_down_core(context, wParam, lParam, eaten);
+    except
+        eaten := 0;
+        log_tsf_boundary_exception('KeyEventSink.OnKeyDown');
+    end;
+end;
+
+function TncTextService.on_test_key_up_core(const context: ITfContext;
+    wParam: WPARAM; lParam: LPARAM; out eaten: Integer): HResult;
 var
     key_code: Word;
     normalized_key_code: Word;
@@ -1761,7 +1973,21 @@ begin
     Result := S_OK;
 end;
 
-function TncTextService.OnKeyUp(const context: ITfContext; wParam: WPARAM; lParam: LPARAM; out eaten: Integer): HResult;
+function TncTextService.OnTestKeyUp(const context: ITfContext;
+    wParam: WPARAM; lParam: LPARAM; out eaten: Integer): HResult;
+begin
+    eaten := 0;
+    Result := S_OK;
+    try
+        Result := on_test_key_up_core(context, wParam, lParam, eaten);
+    except
+        eaten := 0;
+        log_tsf_boundary_exception('KeyEventSink.OnTestKeyUp');
+    end;
+end;
+
+function TncTextService.on_key_up_core(const context: ITfContext;
+    wParam: WPARAM; lParam: LPARAM; out eaten: Integer): HResult;
 var
     key_code: Word;
     normalized_key_code: Word;
@@ -1795,6 +2021,19 @@ begin
     end;
 
     Result := S_OK;
+end;
+
+function TncTextService.OnKeyUp(const context: ITfContext;
+    wParam: WPARAM; lParam: LPARAM; out eaten: Integer): HResult;
+begin
+    eaten := 0;
+    Result := S_OK;
+    try
+        Result := on_key_up_core(context, wParam, lParam, eaten);
+    except
+        eaten := 0;
+        log_tsf_boundary_exception('KeyEventSink.OnKeyUp');
+    end;
 end;
 
 function TncTextService.commit_pending_selection_before_mode_switch: Boolean;
@@ -2049,29 +2288,36 @@ begin
     end;
 
     variant_applied := False;
-    config_manager := TncConfigManager.create(m_config_path);
+    config_manager := nil;
     try
-        engine_config := config_manager.load_engine_config;
-        if engine_config.dictionary_variant = dv_traditional then
-        begin
-            engine_config.dictionary_variant := dv_simplified;
-            variant_text := 'simplified';
-        end
-        else
-        begin
-            engine_config.dictionary_variant := dv_traditional;
-            variant_text := 'traditional';
+        try
+            config_manager := TncConfigManager.create(m_config_path, clmBestEffort);
+            engine_config := config_manager.load_engine_config;
+            if engine_config.dictionary_variant = dv_traditional then
+            begin
+                engine_config.dictionary_variant := dv_simplified;
+                variant_text := 'simplified';
+            end
+            else
+            begin
+                engine_config.dictionary_variant := dv_traditional;
+                variant_text := 'traditional';
+            end;
+            if m_ipc_client <> nil then
+            begin
+                variant_applied := m_ipc_client.set_dictionary_variant(m_session_id,
+                    engine_config.dictionary_variant);
+            end;
+            if not variant_applied then
+            begin
+                config_manager.save_dictionary_variant_config(engine_config.dictionary_variant);
+            end;
+        finally
+            config_manager.Free;
         end;
-        if m_ipc_client <> nil then
-        begin
-            variant_applied := m_ipc_client.set_dictionary_variant(m_session_id, engine_config.dictionary_variant);
-        end;
-        if not variant_applied then
-        begin
-            config_manager.save_dictionary_variant_config(engine_config.dictionary_variant);
-        end;
-    finally
-        config_manager.Free;
+    except
+        log_tsf_boundary_exception('ToggleDictionaryVariant');
+        Exit;
     end;
 
     m_last_config_write := get_config_write_time;
@@ -2148,11 +2394,7 @@ var
     display_text: WideString;
     tooltip_text: WideString;
     item_info: TF_LANGBARITEMINFO;
-    item_status: DWORD;
-    item_tooltip: WideString;
     item_info_hr: HRESULT;
-    item_status_hr: HRESULT;
-    item_tooltip_hr: HRESULT;
     set_icon_hr: HRESULT;
     set_text_hr: HRESULT;
     set_icon_mode_hr: HRESULT;
@@ -2254,72 +2496,75 @@ begin
             Break;
         end;
 
-        FillChar(item_info, SizeOf(item_info), 0);
-        item_info_hr := langbar_item.GetInfo(item_info);
-        item_status := 0;
-        item_status_hr := langbar_item.GetStatus(item_status);
-        item_tooltip := '';
-        item_tooltip_hr := langbar_item.GetTooltipString(item_tooltip);
-        set_icon_hr := E_FAIL;
-
-        if (langbar_item <> nil) and Supports(langbar_item, ITfSystemLangBarItem, system_item) then
-        begin
-            Inc(system_item_seen_count);
-            if m_langbar_icon <> 0 then
+        try
+            FillChar(item_info, SizeOf(item_info), 0);
+            item_info_hr := E_NOTIMPL;
+            if m_logger <> nil then
             begin
-                set_icon_hr := system_item.SetIcon(m_langbar_icon);
-                if not Failed(set_icon_hr) then
+                item_info_hr := langbar_item.GetInfo(item_info);
+            end;
+            set_icon_hr := E_FAIL;
+
+            if (langbar_item <> nil) and Supports(langbar_item, ITfSystemLangBarItem, system_item) then
+            begin
+                Inc(system_item_seen_count);
+                if m_langbar_icon <> 0 then
                 begin
-                    Inc(icon_applied_count);
+                    set_icon_hr := system_item.SetIcon(m_langbar_icon);
+                    if not Failed(set_icon_hr) then
+                    begin
+                        Inc(icon_applied_count);
+                    end;
                 end;
-            end;
-            if m_langbar_icon = 0 then
+                if m_langbar_icon = 0 then
+                begin
+                    set_icon_hr := HRESULT($80070002); // ERROR_FILE_NOT_FOUND mapped to HRESULT
+                end;
+                system_item.SetTooltipString(PWideChar(tooltip_text), Length(tooltip_text));
+            end
+            else
             begin
-                set_icon_hr := HRESULT($80070002); // ERROR_FILE_NOT_FOUND mapped to HRESULT
+                set_icon_hr := E_NOINTERFACE;
             end;
-            system_item.SetTooltipString(PWideChar(tooltip_text), Length(tooltip_text));
-        end
-        else
-        begin
-            set_icon_hr := E_NOINTERFACE;
-        end;
 
-        if (langbar_item <> nil) and Supports(langbar_item, ITfSystemLangBarItemText, system_text_item) then
-        begin
-            set_text_hr := system_text_item.SetItemText(PWideChar(display_text), Length(display_text));
-            if not Failed(set_text_hr) then
+            if (langbar_item <> nil) and Supports(langbar_item, ITfSystemLangBarItemText, system_text_item) then
             begin
-                Inc(text_applied_count);
-            end;
-        end
-        else
-        begin
-            set_text_hr := E_NOINTERFACE;
-        end;
-
-        if (langbar_item <> nil) and Supports(langbar_item, ITfSystemDeviceTypeLangBarItem, device_item) then
-        begin
-            Inc(icon_mode_seen_count);
-            set_icon_mode_hr := device_item.SetIconMode(TF_DTLBI_USEPROFILEICON);
-            if not Failed(set_icon_mode_hr) then
+                set_text_hr := system_text_item.SetItemText(PWideChar(display_text), Length(display_text));
+                if not Failed(set_text_hr) then
+                begin
+                    Inc(text_applied_count);
+                end;
+            end
+            else
             begin
-                Inc(icon_mode_applied_count);
+                set_text_hr := E_NOINTERFACE;
             end;
-        end
-        else
-        begin
-            set_icon_mode_hr := E_NOINTERFACE;
-        end;
 
-        if m_logger <> nil then
-        begin
-            m_logger.info(Format(
-                'LangBar item guid=%s style=0x%s info_hr=0x%s status=0x%s status_hr=0x%s tooltip_hr=0x%s set_icon=0x%s set_text=0x%s set_icon_mode=0x%s',
-                [GUIDToString(item_info.guidItem), IntToHex(item_info.dwStyle, 8),
-                IntToHex(Cardinal(item_info_hr), 8), IntToHex(item_status, 8),
-                IntToHex(Cardinal(item_status_hr), 8), IntToHex(Cardinal(item_tooltip_hr), 8),
-                IntToHex(Cardinal(set_icon_hr), 8), IntToHex(Cardinal(set_text_hr), 8),
-                IntToHex(Cardinal(set_icon_mode_hr), 8)]));
+            if (langbar_item <> nil) and Supports(langbar_item, ITfSystemDeviceTypeLangBarItem, device_item) then
+            begin
+                Inc(icon_mode_seen_count);
+                set_icon_mode_hr := device_item.SetIconMode(TF_DTLBI_USEPROFILEICON);
+                if not Failed(set_icon_mode_hr) then
+                begin
+                    Inc(icon_mode_applied_count);
+                end;
+            end
+            else
+            begin
+                set_icon_mode_hr := E_NOINTERFACE;
+            end;
+
+            if m_logger <> nil then
+            begin
+                m_logger.info(Format(
+                    'LangBar item guid=%s style=0x%s info_hr=0x%s set_icon=0x%s set_text=0x%s set_icon_mode=0x%s',
+                    [GUIDToString(item_info.guidItem), IntToHex(item_info.dwStyle, 8),
+                    IntToHex(Cardinal(item_info_hr), 8), IntToHex(Cardinal(set_icon_hr), 8),
+                    IntToHex(Cardinal(set_text_hr), 8),
+                    IntToHex(Cardinal(set_icon_mode_hr), 8)]));
+            end;
+        except
+            log_tsf_boundary_exception('ConfigureSystemInputModeIcon.Item');
         end;
     end;
 
@@ -2340,14 +2585,17 @@ end;
 
 function TncTextService.OnCompositionTerminated(ecWrite: TfEditCookie; const composition: ITfComposition): HResult;
 begin
-    m_composition := nil;
-    m_composition_context := nil;
-    m_has_caret_point := False;
-    m_pending_caret_update := False;
-    mark_session_dirty;
-    reset_session_if_needed(False);
-
     Result := S_OK;
+    try
+        m_composition := nil;
+        m_composition_context := nil;
+        m_has_caret_point := False;
+        m_pending_caret_update := False;
+        mark_session_dirty;
+        reset_session_if_needed(False);
+    except
+        log_tsf_boundary_exception('CompositionSink.OnCompositionTerminated');
+    end;
 end;
 
 function TncTextService.OnStartComposition(const composition: ITfCompositionView; out ok: Integer): HResult;
@@ -2364,25 +2612,29 @@ var
     chosen_source: TncCaretAnchorSource;
     chosen_score: Integer;
 begin
-    if m_pending_caret_update and m_has_caret_point and (m_ipc_client <> nil) and (m_session_id <> '') then
-    begin
-        if not get_candidate_point(point, placement_line_height, terminal_like_target, chosen_source,
-            chosen_score) then
-        begin
-            point := m_last_caret_point;
-            placement_line_height := m_last_caret_line_height;
-            terminal_like_target := False;
-            chosen_source := casLastSent;
-            chosen_score := -160;
-        end;
-        push_caret_to_host(point, True, placement_line_height, terminal_like_target, chosen_source, chosen_score);
-        m_pending_caret_update := False;
-        if (m_logger <> nil) and (m_logger.level <= ll_debug) then
-        begin
-            m_logger.debug(Format('Caret point deferred x=%d y=%d', [point.X, point.Y]));
-        end;
-    end;
     Result := S_OK;
+    try
+        if m_pending_caret_update and m_has_caret_point and (m_ipc_client <> nil) and (m_session_id <> '') then
+        begin
+            if not get_candidate_point(point, placement_line_height, terminal_like_target, chosen_source,
+                chosen_score) then
+            begin
+                point := m_last_caret_point;
+                placement_line_height := m_last_caret_line_height;
+                terminal_like_target := False;
+                chosen_source := casLastSent;
+                chosen_score := -160;
+            end;
+            push_caret_to_host(point, True, placement_line_height, terminal_like_target, chosen_source, chosen_score);
+            m_pending_caret_update := False;
+            if (m_logger <> nil) and (m_logger.level <= ll_debug) then
+            begin
+                m_logger.debug(Format('Caret point deferred x=%d y=%d', [point.X, point.Y]));
+            end;
+        end;
+    except
+        log_tsf_boundary_exception('CompositionSink.OnUpdateComposition');
+    end;
 end;
 
 function TncTextService.OnEndComposition(const composition: ITfCompositionView): HResult;
@@ -2397,46 +2649,58 @@ end;
 
 function TncTextService.OnUninitDocumentMgr(const pdim: ITfDocumentMgr): HResult;
 begin
-    if (pdim <> nil) and (m_doc_mgr <> nil) and (pdim = m_doc_mgr) then
-    begin
-        cancel_composition;
-        unadvise_context_sinks;
-        m_doc_mgr := nil;
-        m_context := nil;
-    end;
     Result := S_OK;
+    try
+        if (pdim <> nil) and (m_doc_mgr <> nil) and (pdim = m_doc_mgr) then
+        begin
+            cancel_composition;
+            unadvise_context_sinks;
+            m_doc_mgr := nil;
+            m_context := nil;
+        end;
+    except
+        log_tsf_boundary_exception('ThreadMgrEventSink.OnUninitDocumentMgr');
+    end;
 end;
 
 function TncTextService.thread_mgr_on_set_focus(const pdimFocus: ITfDocumentMgr;
     const pdimPrevFocus: ITfDocumentMgr): HResult;
 begin
-    if pdimFocus <> m_doc_mgr then
-    begin
-        cancel_composition;
-        unadvise_context_sinks;
-        m_doc_mgr := pdimFocus;
-        m_context := nil;
-        if (m_doc_mgr <> nil) and (m_doc_mgr.GetTop(m_context) = S_OK) then
-        begin
-            advise_context_sinks(m_context);
-        end;
-    end;
-    // Keep active state aligned to document focus changes.
-    // We do not use OnSetFocus callback for active toggles to avoid per-key
-    // focus jitter in some apps.
-    update_active_state(pdimFocus <> nil);
-    if (pdimFocus <> nil) and (m_context <> nil) then
-    begin
-        m_last_surrounding_request_tick := 0;
-        m_surrounding_needs_refresh := True;
-    end;
     Result := S_OK;
+    try
+        if pdimFocus <> m_doc_mgr then
+        begin
+            cancel_composition;
+            unadvise_context_sinks;
+            m_doc_mgr := pdimFocus;
+            m_context := nil;
+            if (m_doc_mgr <> nil) and (m_doc_mgr.GetTop(m_context) = S_OK) then
+            begin
+                advise_context_sinks(m_context);
+            end;
+        end;
+        // Keep active state aligned to document focus changes.
+        // We do not use OnSetFocus callback for active toggles to avoid per-key
+        // focus jitter in some apps.
+        update_active_state(pdimFocus <> nil);
+        if (pdimFocus <> nil) and (m_context <> nil) then
+        begin
+            m_last_surrounding_request_tick := 0;
+            m_surrounding_needs_refresh := True;
+        end;
+    except
+        log_tsf_boundary_exception('ThreadMgrEventSink.OnSetFocus');
+    end;
 end;
 
 function TncTextService.OnPushContext(const pic: ITfContext): HResult;
 begin
-    ensure_active_context(pic);
     Result := S_OK;
+    try
+        ensure_active_context(pic);
+    except
+        log_tsf_boundary_exception('ThreadMgrEventSink.OnPushContext');
+    end;
 end;
 
 function TncTextService.OnPopContext(const pic: ITfContext): HResult;
@@ -2444,20 +2708,25 @@ var
     focus_doc: ITfDocumentMgr;
     next_context: ITfContext;
 begin
-    focus_doc := nil;
-    next_context := nil;
-    if (m_thread_mgr <> nil) and (m_thread_mgr.GetFocus(focus_doc) = S_OK) and (focus_doc <> nil) then
-    begin
-        m_doc_mgr := focus_doc;
-        if focus_doc.GetTop(next_context) = S_OK then
-        begin
-            ensure_active_context(next_context);
-        end;
-    end;
     Result := S_OK;
+    try
+        focus_doc := nil;
+        next_context := nil;
+        if (m_thread_mgr <> nil) and (m_thread_mgr.GetFocus(focus_doc) = S_OK) and (focus_doc <> nil) then
+        begin
+            m_doc_mgr := focus_doc;
+            if focus_doc.GetTop(next_context) = S_OK then
+            begin
+                ensure_active_context(next_context);
+            end;
+        end;
+    except
+        log_tsf_boundary_exception('ThreadMgrEventSink.OnPopContext');
+    end;
 end;
 
-function TncTextService.OnEndEdit(const pic: ITfContext; ecReadOnly: TfEditCookie; const pEditRecord: ITfEditRecord): HResult;
+function TncTextService.on_end_edit_core(const pic: ITfContext;
+    ecReadOnly: TfEditCookie; const pEditRecord: ITfEditRecord): HResult;
 var
     selection_changed: Integer;
     selection: TF_SELECTION;
@@ -2546,7 +2815,19 @@ begin
     end;
 end;
 
-function TncTextService.OnLayoutChange(const pic: ITfContext; lcode: TfLayoutCode; const pView: ITfContextView): HResult;
+function TncTextService.OnEndEdit(const pic: ITfContext;
+    ecReadOnly: TfEditCookie; const pEditRecord: ITfEditRecord): HResult;
+begin
+    Result := S_OK;
+    try
+        Result := on_end_edit_core(pic, ecReadOnly, pEditRecord);
+    except
+        log_tsf_boundary_exception('TextEditSink.OnEndEdit');
+    end;
+end;
+
+function TncTextService.on_layout_change_core(const pic: ITfContext;
+    lcode: TfLayoutCode; const pView: ITfContextView): HResult;
 var
     point: TPoint;
     placement_line_height: Integer;
@@ -2573,7 +2854,18 @@ begin
     end;
 end;
 
-function TncTextService.OnChange(var rguid: TGUID): HResult;
+function TncTextService.OnLayoutChange(const pic: ITfContext;
+    lcode: TfLayoutCode; const pView: ITfContextView): HResult;
+begin
+    Result := S_OK;
+    try
+        Result := on_layout_change_core(pic, lcode, pView);
+    except
+        log_tsf_boundary_exception('TextLayoutSink.OnLayoutChange');
+    end;
+end;
+
+function TncTextService.on_compartment_change_core(var rguid: TGUID): HResult;
 var
     openclose_value: DWORD;
     conversion_value: DWORD;
@@ -2656,28 +2948,44 @@ begin
     Result := S_OK;
 end;
 
+function TncTextService.OnChange(var rguid: TGUID): HResult;
+begin
+    Result := S_OK;
+    try
+        Result := on_compartment_change_core(rguid);
+    except
+        log_tsf_boundary_exception('CompartmentEventSink.OnChange');
+    end;
+end;
+
 function TncTextService.EnumDisplayAttributeInfo(out ppenum: IEnumTfDisplayAttributeInfo): HResult;
 begin
-    if m_display_attribute_provider = nil then
-    begin
+    ppenum := nil;
+    Result := E_FAIL;
+    try
+        if m_display_attribute_provider <> nil then
+        begin
+            Result := m_display_attribute_provider.EnumDisplayAttributeInfo(ppenum);
+        end;
+    except
         ppenum := nil;
-        Result := E_FAIL;
-        Exit;
+        log_tsf_boundary_exception('DisplayAttributeProvider.EnumDisplayAttributeInfo');
     end;
-
-    Result := m_display_attribute_provider.EnumDisplayAttributeInfo(ppenum);
 end;
 
 function TncTextService.GetDisplayAttributeInfo(var GUID: TGUID; out ppInfo: ITfDisplayAttributeInfo): HResult;
 begin
-    if m_display_attribute_provider = nil then
-    begin
+    ppInfo := nil;
+    Result := E_FAIL;
+    try
+        if m_display_attribute_provider <> nil then
+        begin
+            Result := m_display_attribute_provider.GetDisplayAttributeInfo(GUID, ppInfo);
+        end;
+    except
         ppInfo := nil;
-        Result := E_FAIL;
-        Exit;
+        log_tsf_boundary_exception('DisplayAttributeProvider.GetDisplayAttributeInfo');
     end;
-
-    Result := m_display_attribute_provider.GetDisplayAttributeInfo(GUID, ppInfo);
 end;
 
 function TncTextService.build_key_state: TncKeyState;
@@ -2708,9 +3016,13 @@ end;
 function TncTextService.get_config_write_time: TDateTime;
 begin
     Result := 0;
-    if (m_config_path <> '') and FileExists(m_config_path) then
-    begin
-        Result := TFile.GetLastWriteTime(m_config_path);
+    try
+        if (m_config_path <> '') and FileExists(m_config_path) then
+        begin
+            Result := TFile.GetLastWriteTime(m_config_path);
+        end;
+    except
+        Result := 0;
     end;
 end;
 
@@ -2718,19 +3030,37 @@ procedure TncTextService.load_engine_config(out config: TncEngineConfig);
 var
     config_manager: TncConfigManager;
 begin
-    config_manager := TncConfigManager.create(m_config_path);
+    config := nc_default_engine_config;
+    config_manager := nil;
     try
-        config := config_manager.load_engine_config;
-        m_shortcut_config := config.shortcuts;
-        nc_normalize_shortcut_config(m_shortcut_config);
-        m_log_config := config_manager.load_log_config;
-    finally
-        config_manager.Free;
+        try
+            // TSF runs in arbitrary client processes, including sandboxed ones.
+            // Reading config must not create a named kernel object or rewrite files.
+            config_manager := TncConfigManager.create(m_config_path, clmReadOnly);
+            config := config_manager.load_engine_config;
+            m_log_config := config_manager.load_log_config;
+        finally
+            config_manager.Free;
+        end;
+    except
+        log_tsf_boundary_exception('LoadEngineConfig');
+        config := nc_default_engine_config;
+        m_log_config.enabled := False;
+        m_log_config.level := ll_info;
+        m_log_config.max_size_kb := 1024;
+        m_log_config.log_path := '';
     end;
 
+    m_shortcut_config := config.shortcuts;
+    nc_normalize_shortcut_config(m_shortcut_config);
     m_last_config_write := get_config_write_time;
     m_last_config_check_tick := GetTickCount64;
-    apply_log_config;
+    try
+        apply_log_config;
+    except
+        log_tsf_boundary_exception('ApplyLogConfig');
+        free_logger;
+    end;
 end;
 
 procedure TncTextService.apply_log_config;
@@ -2803,21 +3133,28 @@ begin
         Exit;
     end;
 
-    config_manager := TncConfigManager.create(m_config_path);
+    config_manager := nil;
     try
-        engine_config := config_manager.load_engine_config;
-        changed := (engine_config.input_mode <> input_mode) or (engine_config.full_width_mode <> full_width_mode) or
-            (engine_config.punctuation_full_width <> punctuation_full_width);
-        if changed then
-        begin
-            engine_config.input_mode := input_mode;
-            engine_config.full_width_mode := full_width_mode;
-            engine_config.punctuation_full_width := punctuation_full_width;
-            config_manager.save_engine_state_config(input_mode, full_width_mode, punctuation_full_width);
-            m_last_config_write := get_config_write_time;
+        try
+            config_manager := TncConfigManager.create(m_config_path, clmBestEffort);
+            engine_config := config_manager.load_engine_config;
+            changed := (engine_config.input_mode <> input_mode) or
+                (engine_config.full_width_mode <> full_width_mode) or
+                (engine_config.punctuation_full_width <> punctuation_full_width);
+            if changed then
+            begin
+                engine_config.input_mode := input_mode;
+                engine_config.full_width_mode := full_width_mode;
+                engine_config.punctuation_full_width := punctuation_full_width;
+                config_manager.save_engine_state_config(input_mode, full_width_mode,
+                    punctuation_full_width);
+                m_last_config_write := get_config_write_time;
+            end;
+        finally
+            config_manager.Free;
         end;
-    finally
-        config_manager.Free;
+    except
+        log_tsf_boundary_exception('SaveEngineState');
     end;
 end;
 

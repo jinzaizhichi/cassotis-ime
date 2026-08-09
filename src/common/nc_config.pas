@@ -16,18 +16,23 @@ uses
     nc_log;
 
 type
+    TncConfigLockMode = (clmRequired, clmBestEffort, clmReadOnly);
+
     TncConfigManager = class
     private
         m_config_path: string;
         m_config_mutex: THandle;
         m_config_mutex_owned: Boolean;
+        m_lock_mode: TncConfigLockMode;
         procedure acquire_config_mutex;
         procedure release_config_mutex;
+        function create_ini_for_read: TMemIniFile;
         procedure ensure_config_directory;
         procedure write_config_version(const ini: TMemIniFile;
             const candidate_font_size_migrated: Boolean = False);
     public
-        constructor create(const config_path: string);
+        constructor create(const config_path: string;
+            const lock_mode: TncConfigLockMode = clmRequired);
         destructor Destroy; override;
         function load_engine_config: TncEngineConfig;
         function load_log_config: TncLogConfig;
@@ -40,10 +45,12 @@ type
     end;
 
 function get_default_config_path: string;
+function get_default_config_path_read_only: string;
 function get_runtime_data_directory: string;
 function get_default_dictionary_path_simplified: string;
 function get_default_dictionary_path_traditional: string;
 function get_default_user_dictionary_path: string;
+function nc_default_engine_config: TncEngineConfig;
 function nc_create_utf8_ini_file(const config_path: string): TMemIniFile;
 function nc_fuzzy_pinyin_rules_to_text(
     const rules: TncFuzzyPinyinRules): string;
@@ -860,11 +867,37 @@ begin
     Result.log_path := get_default_log_path;
 end;
 
-constructor TncConfigManager.create(const config_path: string);
+function nc_default_engine_config: TncEngineConfig;
+begin
+    Result.input_mode := im_chinese;
+    Result.pinyin_input_scheme := pis_full_pinyin;
+    Result.fuzzy_pinyin_enabled := False;
+    Result.fuzzy_pinyin_rules := [];
+    Result.max_candidates := 9;
+    Result.enable_ctrl_space_toggle := False;
+    Result.enable_shift_space_full_width_toggle := True;
+    Result.enable_ctrl_period_punct_toggle := True;
+    Result.full_width_mode := False;
+    Result.punctuation_full_width := True;
+    Result.enable_segment_candidates := True;
+    Result.segment_head_only_multi_syllable := True;
+    Result.candidate_font_name := c_default_candidate_font_name;
+    Result.candidate_font_size := c_default_candidate_font_size;
+    Result.candidate_page_size := c_default_candidate_page_size;
+    Result.candidate_page_key_scheme := cpks_minus_plus;
+    Result.candidate_color_scheme := c_default_candidate_color_scheme;
+    Result.debug_mode := False;
+    Result.dictionary_variant := dv_simplified;
+    Result.shortcuts := nc_default_shortcut_config;
+end;
+
+constructor TncConfigManager.create(const config_path: string;
+    const lock_mode: TncConfigLockMode);
 begin
     inherited create;
     m_config_mutex := 0;
     m_config_mutex_owned := False;
+    m_lock_mode := lock_mode;
     if config_path = '' then
     begin
         m_config_path := get_default_config_path;
@@ -873,7 +906,10 @@ begin
     begin
         m_config_path := config_path;
     end;
-    acquire_config_mutex;
+    if m_lock_mode <> clmReadOnly then
+    begin
+        acquire_config_mutex;
+    end;
 end;
 
 destructor TncConfigManager.Destroy;
@@ -885,26 +921,46 @@ end;
 procedure TncConfigManager.acquire_config_mutex;
 var
     wait_result: DWORD;
+    error_code: DWORD;
+    timeout_ms: DWORD;
 begin
     m_config_mutex := CreateMutex(nil, False, c_config_mutex_name);
     if m_config_mutex = 0 then
     begin
-        RaiseLastOSError;
+        if m_lock_mode = clmRequired then
+        begin
+            RaiseLastOSError;
+        end;
+        Exit;
     end;
 
-    wait_result := WaitForSingleObject(m_config_mutex, c_config_mutex_timeout_ms);
+    if m_lock_mode = clmRequired then
+    begin
+        timeout_ms := c_config_mutex_timeout_ms;
+    end
+    else
+    begin
+        timeout_ms := 0;
+    end;
+    wait_result := WaitForSingleObject(m_config_mutex, timeout_ms);
     if (wait_result = WAIT_OBJECT_0) or (wait_result = WAIT_ABANDONED) then
     begin
         m_config_mutex_owned := True;
         Exit;
     end;
 
+    error_code := GetLastError;
     CloseHandle(m_config_mutex);
     m_config_mutex := 0;
+    if m_lock_mode <> clmRequired then
+    begin
+        Exit;
+    end;
     if wait_result = WAIT_TIMEOUT then
     begin
         raise Exception.Create('Timed out waiting for the Cassotis IME configuration lock');
     end;
+    SetLastError(error_code);
     RaiseLastOSError;
 end;
 
@@ -919,6 +975,26 @@ begin
     begin
         CloseHandle(m_config_mutex);
         m_config_mutex := 0;
+    end;
+end;
+
+function TncConfigManager.create_ini_for_read: TMemIniFile;
+begin
+    if m_config_mutex_owned then
+    begin
+        Result := nc_create_utf8_ini_file(m_config_path);
+        Exit;
+    end;
+
+    Result := nil;
+    if m_config_path = '' then
+    begin
+        Exit;
+    end;
+    try
+        Result := TMemIniFile.Create(m_config_path, TEncoding.UTF8);
+    except
+        Result := nil;
     end;
 end;
 
@@ -970,26 +1046,7 @@ var
         nc_set_shortcut_for_action(Result.shortcuts, action, shortcut_value);
     end;
 begin
-    Result.input_mode := im_chinese;
-    Result.pinyin_input_scheme := pis_full_pinyin;
-    Result.fuzzy_pinyin_enabled := False;
-    Result.fuzzy_pinyin_rules := [];
-    Result.max_candidates := 9;
-    Result.enable_ctrl_space_toggle := False;
-    Result.enable_shift_space_full_width_toggle := True;
-    Result.enable_ctrl_period_punct_toggle := True;
-    Result.full_width_mode := False;
-    Result.punctuation_full_width := True;
-    Result.enable_segment_candidates := True;
-    Result.segment_head_only_multi_syllable := True;
-    Result.candidate_font_name := c_default_candidate_font_name;
-    Result.candidate_font_size := c_default_candidate_font_size;
-    Result.candidate_page_size := c_default_candidate_page_size;
-    Result.candidate_page_key_scheme := cpks_minus_plus;
-    Result.candidate_color_scheme := c_default_candidate_color_scheme;
-    Result.debug_mode := False;
-    Result.dictionary_variant := dv_simplified;
-    Result.shortcuts := nc_default_shortcut_config;
+    Result := nc_default_engine_config;
 
     if m_config_path = '' then
     begin
@@ -998,17 +1055,28 @@ begin
 
     if not FileExists(m_config_path) then
     begin
-        migrate_runtime_dictionary_file(get_legacy_dictionary_path_simplified, get_default_dictionary_path_simplified, False);
-        migrate_runtime_dictionary_file(get_legacy_dictionary_path_traditional, get_default_dictionary_path_traditional, False);
-        migrate_runtime_dictionary_file(get_legacy_user_dictionary_path, get_default_user_dictionary_path, True);
-        migrate_runtime_dictionary_file(resolve_runtime_path('config\user_dict.db'), get_default_user_dictionary_path, True);
-        save_engine_config(Result);
-        save_log_config(get_default_log_config);
+        if m_config_mutex_owned then
+        begin
+            migrate_runtime_dictionary_file(get_legacy_dictionary_path_simplified,
+                get_default_dictionary_path_simplified, False);
+            migrate_runtime_dictionary_file(get_legacy_dictionary_path_traditional,
+                get_default_dictionary_path_traditional, False);
+            migrate_runtime_dictionary_file(get_legacy_user_dictionary_path,
+                get_default_user_dictionary_path, True);
+            migrate_runtime_dictionary_file(resolve_runtime_path('config\user_dict.db'),
+                get_default_user_dictionary_path, True);
+            save_engine_config(Result);
+            save_log_config(get_default_log_config);
+        end;
         Exit;
     end;
 
-    needs_full_write := normalize_duplicate_ini_keys(m_config_path);
-    ini := nc_create_utf8_ini_file(m_config_path);
+    needs_full_write := False;
+    if m_config_mutex_owned then
+    begin
+        needs_full_write := normalize_duplicate_ini_keys(m_config_path);
+    end;
+    ini := create_ini_for_read;
     try
         config_version := safe_ini_read_integer(ini, 'meta', 'version', 0);
         candidate_font_size_version := safe_ini_read_integer(ini, 'meta',
@@ -1149,17 +1217,21 @@ begin
     legacy_sc_path := resolve_runtime_path(legacy_sc_path);
     legacy_tc_path := resolve_runtime_path(legacy_tc_path);
     legacy_user_path := resolve_runtime_path(legacy_user_path);
-    migrate_runtime_dictionary_file(legacy_sc_path, get_default_dictionary_path_simplified, False);
-    migrate_runtime_dictionary_file(legacy_tc_path, get_default_dictionary_path_traditional, False);
-    migrate_runtime_dictionary_file(legacy_user_path, get_default_user_dictionary_path, True);
-    migrate_runtime_dictionary_file(resolve_runtime_path('config\user_dict.db'), get_default_user_dictionary_path, True);
-
-    if (config_version < c_config_version) or
-        (candidate_font_size_version < c_candidate_font_size_config_version) or needs_full_write then
+    if m_config_mutex_owned then
     begin
-        log_config := load_log_config;
-        save_engine_config(Result);
-        save_log_config(log_config);
+        migrate_runtime_dictionary_file(legacy_sc_path, get_default_dictionary_path_simplified, False);
+        migrate_runtime_dictionary_file(legacy_tc_path, get_default_dictionary_path_traditional, False);
+        migrate_runtime_dictionary_file(legacy_user_path, get_default_user_dictionary_path, True);
+        migrate_runtime_dictionary_file(resolve_runtime_path('config\user_dict.db'),
+            get_default_user_dictionary_path, True);
+
+        if (config_version < c_config_version) or
+            (candidate_font_size_version < c_candidate_font_size_config_version) or needs_full_write then
+        begin
+            log_config := load_log_config;
+            save_engine_config(Result);
+            save_log_config(log_config);
+        end;
     end;
 end;
 
@@ -1185,7 +1257,7 @@ var
     candidate_font_name: string;
     shortcut_config: TncShortcutConfig;
 begin
-    if m_config_path = '' then
+    if (m_config_path = '') or (not m_config_mutex_owned) then
     begin
         Exit;
     end;
@@ -1254,7 +1326,7 @@ var
     debug_mode: Boolean;
     pinyin_input_scheme: TncPinyinInputScheme;
 begin
-    if m_config_path = '' then
+    if (m_config_path = '') or (not m_config_mutex_owned) then
     begin
         Exit;
     end;
@@ -1289,7 +1361,7 @@ procedure TncConfigManager.save_dictionary_variant_config(const variant: TncDict
 var
     ini: TMemIniFile;
 begin
-    if m_config_path = '' then
+    if (m_config_path = '') or (not m_config_mutex_owned) then
     begin
         Exit;
     end;
@@ -1325,12 +1397,18 @@ begin
 
     if not FileExists(m_config_path) then
     begin
-        save_log_config(Result);
+        if m_config_mutex_owned then
+        begin
+            save_log_config(Result);
+        end;
         Exit;
     end;
 
-    normalize_duplicate_ini_keys(m_config_path);
-    ini := nc_create_utf8_ini_file(m_config_path);
+    if m_config_mutex_owned then
+    begin
+        normalize_duplicate_ini_keys(m_config_path);
+    end;
+    ini := create_ini_for_read;
     try
         Result.enabled := safe_ini_read_bool(ini, 'log', 'enabled', Result.enabled);
         level_value := safe_ini_read_integer(ini, 'log', 'level', Ord(Result.level));
@@ -1350,7 +1428,7 @@ procedure TncConfigManager.save_log_config(const config: TncLogConfig);
 var
     ini: TMemIniFile;
 begin
-    if m_config_path = '' then
+    if (m_config_path = '') or (not m_config_mutex_owned) then
     begin
         Exit;
     end;
@@ -1377,6 +1455,14 @@ end;
 function get_default_config_path: string;
 begin
     Result := IncludeTrailingPathDelimiter(get_runtime_root_directory) + 'cassotis_ime.ini';
+end;
+
+function get_default_config_path_read_only: string;
+begin
+    // A TSF DLL can run inside sandboxed or otherwise restricted clients.
+    // Resolve the shared path without attempting any filesystem mutation.
+    Result := IncludeTrailingPathDelimiter(get_local_app_data_directory) +
+        'CassotisIme\cassotis_ime.ini';
 end;
 
 function get_default_dictionary_path_simplified: string;
