@@ -60,6 +60,7 @@ type
         constructor create(const owner: TncEngineHost; const session_id: string; const instance_id: UInt64;
             const config: TncEngineConfig);
         destructor Destroy; override;
+        procedure adopt_session_id(const session_id: string);
         procedure touch;
         procedure reactivate;
         procedure request_release;
@@ -104,6 +105,8 @@ type
         m_session_prewarm_queue: TQueue<string>;
         m_session_prewarm_pending: TDictionary<string, Byte>;
         m_lock: TCriticalSection;
+        m_session_create_lock: TCriticalSection;
+        m_standby_session: TncHostSession;
         m_maintenance_wakeup: TEvent;
         m_active_state_event: TEvent;
         m_inactive_state_event: TEvent;
@@ -130,6 +133,7 @@ type
         function has_active_session: Boolean;
         procedure queue_session_prewarm(const session_id: string);
         procedure perform_session_prewarm;
+        procedure ensure_standby_session;
         procedure reclaim_inactive_sessions;
         function reclaim_session_on_ui_thread(const session_id: string; const instance_id: UInt64;
             const expected_activity_tick: UInt64; const reason: string): Boolean;
@@ -707,6 +711,13 @@ begin
     inherited Destroy;
 end;
 
+procedure TncHostSession.adopt_session_id(const session_id: string);
+begin
+    m_session_id := session_id;
+    m_last_activity_tick := GetTickCount64;
+    m_release_requested := False;
+end;
+
 procedure TncHostSession.ensure_candidate_window;
 begin
     if m_candidate_window = nil then
@@ -1141,6 +1152,8 @@ begin
     m_session_prewarm_queue := TQueue<string>.Create;
     m_session_prewarm_pending := TDictionary<string, Byte>.Create;
     m_lock := TCriticalSection.Create;
+    m_session_create_lock := TCriticalSection.Create;
+    m_standby_session := nil;
     m_maintenance_wakeup := TEvent.Create(nil, False, False, '');
     m_active_state_event := TEvent.Create(nil, False, False, get_nc_active_event);
     m_inactive_state_event := TEvent.Create(nil, False, False, get_nc_inactive_event);
@@ -1163,6 +1176,7 @@ begin
     m_last_config_write := get_config_write_time;
     m_last_config_check_tick := GetTickCount64;
     m_maintenance_thread := TncMaintenanceThread.create(Self);
+    m_maintenance_wakeup.SetEvent;
 end;
 
 destructor TncEngineHost.Destroy;
@@ -1186,6 +1200,16 @@ begin
             m_maintenance_thread.FreeOnTerminate := True;
             m_maintenance_thread := nil;
         end;
+    end;
+    if m_standby_session <> nil then
+    begin
+        m_standby_session.Free;
+        m_standby_session := nil;
+    end;
+    if m_session_create_lock <> nil then
+    begin
+        m_session_create_lock.Free;
+        m_session_create_lock := nil;
     end;
     if m_lock <> nil then
     begin
@@ -1327,6 +1351,10 @@ begin
     begin
         session.update_config(config);
     end;
+    if m_standby_session <> nil then
+    begin
+        m_standby_session.update_config(config);
+    end;
 end;
 
 procedure TncEngineHost.sync_session_config_locked(const session: TncHostSession);
@@ -1343,46 +1371,95 @@ var
     config_snapshot: TncEngineConfig;
     created_session: TncHostSession;
     added_session: Boolean;
+    adopted_standby: Boolean;
     instance_id: UInt64;
 begin
+    Result := nil;
+    created_session := nil;
+    instance_id := 0;
     m_lock.Acquire;
     try
+        config_snapshot := m_config;
         if m_sessions.TryGetValue(session_id, Result) then
         begin
             Result.touch;
             Exit;
         end;
-        config_snapshot := m_config;
-        Inc(m_next_session_instance_id);
-        instance_id := m_next_session_instance_id;
     finally
         m_lock.Release;
     end;
 
-    created_session := TncHostSession.create(Self, session_id, instance_id, config_snapshot);
-    added_session := False;
+    // SET_ACTIVE and the first key can arrive on different pipe workers. Keep
+    // cold engine construction single-flight so they never build and discard
+    // duplicate dictionary/LM instances for the same session.
+    m_session_create_lock.Acquire;
     try
+        added_session := False;
+        adopted_standby := False;
+
         m_lock.Acquire;
         try
-            if not m_sessions.TryGetValue(session_id, Result) then
+            if m_sessions.TryGetValue(session_id, Result) then
             begin
+                Result.touch;
+                Exit;
+            end;
+
+            if m_standby_session <> nil then
+            begin
+                Result := m_standby_session;
+                m_standby_session := nil;
+                Result.adopt_session_id(session_id);
+                sync_session_config_locked(Result);
+                m_sessions.Add(session_id, Result);
+                added_session := True;
+                adopted_standby := True;
+            end
+            else
+            begin
+                config_snapshot := m_config;
+                Inc(m_next_session_instance_id);
+                instance_id := m_next_session_instance_id;
+            end;
+        finally
+            m_lock.Release;
+        end;
+
+        if not added_session then
+        begin
+            created_session := TncHostSession.create(Self, session_id, instance_id, config_snapshot);
+            m_lock.Acquire;
+            try
                 created_session.update_config(m_config);
                 m_sessions.Add(session_id, created_session);
                 Result := created_session;
                 created_session := nil;
                 added_session := True;
+            finally
+                m_lock.Release;
             end;
-            Result.touch;
-        finally
-            m_lock.Release;
         end;
 
-        if added_session then
+        Result.touch;
+        if added_session and host_log_enabled_for(ll_info) then
         begin
-            host_log('Dictionary ' + Result.engine.get_dictionary_debug_info);
+            if adopted_standby then
+            begin
+                host_log('Dictionary standby adopted ' + Result.engine.get_dictionary_debug_info);
+            end
+            else
+            begin
+                host_log('Dictionary ' + Result.engine.get_dictionary_debug_info);
+            end;
         end;
     finally
         created_session.Free;
+        m_session_create_lock.Release;
+    end;
+
+    if m_maintenance_wakeup <> nil then
+    begin
+        m_maintenance_wakeup.SetEvent;
     end;
 end;
 
@@ -1696,7 +1773,6 @@ begin
             begin
                 instance_id := session.instance_id;
                 session.engine.reload_dictionary_if_needed;
-                session.engine.prewarm_dictionary_caches;
             end
             else
             begin
@@ -1747,6 +1823,73 @@ begin
         finally
             m_lock.Release;
         end;
+    end;
+end;
+
+procedure TncEngineHost.ensure_standby_session;
+var
+    config_snapshot: TncEngineConfig;
+    created_session: TncHostSession;
+    instance_id: UInt64;
+    create_start_tick: UInt64;
+    create_elapsed_ms: Int64;
+    installed: Boolean;
+begin
+    if (m_session_create_lock = nil) or (m_lock = nil) then
+    begin
+        Exit;
+    end;
+
+    // Standby creation is best-effort background work. Do not queue another
+    // standby builder while foreground session creation owns this lock.
+    if not m_session_create_lock.TryEnter then
+    begin
+        Exit;
+    end;
+
+    created_session := nil;
+    installed := False;
+    create_start_tick := GetTickCount64;
+    try
+        m_lock.Acquire;
+        try
+            if (m_standby_session <> nil) or
+                (m_sessions.Count >= c_session_cache_limit) then
+            begin
+                Exit;
+            end;
+            config_snapshot := m_config;
+            Inc(m_next_session_instance_id);
+            instance_id := m_next_session_instance_id;
+        finally
+            m_lock.Release;
+        end;
+
+        created_session := TncHostSession.create(Self, '', instance_id, config_snapshot);
+        created_session.engine.prewarm_dictionary_caches;
+        m_lock.Acquire;
+        try
+            if (m_standby_session = nil) and
+                (m_sessions.Count < c_session_cache_limit) then
+            begin
+                created_session.update_config(m_config);
+                m_standby_session := created_session;
+                created_session := nil;
+                installed := True;
+            end;
+        finally
+            m_lock.Release;
+        end;
+    finally
+        created_session.Free;
+        m_session_create_lock.Release;
+    end;
+
+    create_elapsed_ms := Int64(GetTickCount64 - create_start_tick);
+    if installed and host_log_enabled_for(ll_debug) then
+    begin
+        host_log_debug(Format('[DEBUG] standby session ready create=%d',
+            [create_elapsed_ms]));
     end;
 end;
 
@@ -3121,6 +3264,7 @@ begin
             begin
                 Break;
             end;
+            host.ensure_standby_session;
             host.perform_session_prewarm;
             host.reclaim_inactive_sessions;
             host.maybe_checkpoint_user_dictionary;

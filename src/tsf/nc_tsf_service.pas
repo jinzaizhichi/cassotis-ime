@@ -1486,8 +1486,6 @@ begin
     begin
         signal_tray_profile_event(True);
         update_active_state(True);
-        mark_session_dirty;
-        reset_session_if_needed(True);
         m_last_surrounding_request_tick := 0;
         m_surrounding_needs_refresh := True;
     end;
@@ -3184,67 +3182,13 @@ begin
 end;
 
 procedure TncTextService.update_active_state(const active: Boolean);
-var
-    request_ok: Boolean;
 begin
     if (m_ipc_client = nil) or (m_session_id = '') then
     begin
         Exit;
     end;
-
-    request_ok := False;
-
-    if m_active_state_lock <> nil then
-    begin
-        m_active_state_lock.Acquire;
-        try
-            if m_active_state_shutdown then
-            begin
-                Exit;
-            end;
-            m_active_state_pending := False;
-            m_pending_active_session_id := '';
-            m_pending_active_value := False;
-            m_active_state_synced := False;
-        finally
-            m_active_state_lock.Release;
-        end;
-    end;
-
-    if m_ipc_client.is_host_running then
-    begin
-        request_ok := m_ipc_client.set_active(m_session_id, active);
-    end
-    else if not active then
-    begin
-        request_ok := True;
-    end;
-
-    if m_active_state_lock <> nil then
-    begin
-        m_active_state_lock.Acquire;
-        try
-            m_last_reported_active_session_id := m_session_id;
-            m_last_reported_active := active;
-            m_active_state_synced := request_ok;
-        finally
-            m_active_state_lock.Release;
-        end;
-    end;
-
-    if request_ok then
-    begin
-        Exit;
-    end;
-
-    if not active then
-    begin
-        if not m_ipc_client.is_host_running then
-        begin
-            Exit;
-        end;
-    end;
-
+    // SET_ACTIVE creates and prewarms a cold host session. Never perform that
+    // work on the application's TSF activation/focus callback thread.
     queue_active_state_update(active);
 end;
 
