@@ -12,14 +12,15 @@ uses
     nc_sqlite in '..\src\common\nc_sqlite.pas';
 
 type
-    TncImportMode = (imBaseDict, imQueryPathPrior, imLmTransition, imCharLm);
+    TncImportMode = (imBaseDict, imQueryPathPrior, imLmTransition, imCharLm,
+        imCharReverseLm);
 
 const
     c_segment_path_separator = #3;
 
 procedure print_usage;
 begin
-    Writeln('Usage: cassotis_ime_dict_init <db_path> <schema_path> [import_path] [base|query_path|lm_transition|char_lm]');
+    Writeln('Usage: cassotis_ime_dict_init <db_path> <schema_path> [import_path] [base|query_path|lm_transition|char_lm|char_reverse_lm]');
     Writeln('       cassotis_ime_dict_init <db_path> <schema_path> --build-contains-index');
 end;
 
@@ -220,6 +221,10 @@ begin
         begin
             Exit(imLmTransition);
         end;
+        if Pos('char_reverse_lm', normalized) > 0 then
+        begin
+            Exit(imCharReverseLm);
+        end;
         if Pos('char_lm', normalized) > 0 then
         begin
             Exit(imCharLm);
@@ -243,6 +248,14 @@ begin
         (normalized = 'character_lm') or (normalized = 'character-lm') then
     begin
         Exit(imCharLm);
+    end;
+
+    if (normalized = 'char_reverse_lm') or
+        (normalized = 'char-reverse-lm') or
+        (normalized = 'character_reverse_lm') or
+        (normalized = 'character-reverse-lm') then
+    begin
+        Exit(imCharReverseLm);
     end;
 
     Result := imBaseDict;
@@ -423,6 +436,8 @@ const
         'INSERT OR REPLACE INTO dict_base_lm_transition(query_pinyin, path_text, weight) VALUES (?1, ?2, ?3);';
     insert_char_lm_sql =
         'INSERT OR REPLACE INTO dict_base_char_lm(ngram, score, backoff) VALUES (?1, ?2, ?3);';
+    insert_char_reverse_lm_sql =
+        'INSERT OR REPLACE INTO dict_base_char_reverse_lm(ngram, score, backoff) VALUES (?1, ?2, ?3);';
 var
     reader: TStreamReader;
     stmt_base: Psqlite3_stmt;
@@ -494,6 +509,14 @@ begin
                 Exit;
             end;
         end
+        else if import_mode = imCharReverseLm then
+        begin
+            if not conn.prepare(insert_char_reverse_lm_sql,
+                stmt_query_path) then
+            begin
+                Exit;
+            end;
+        end
         else if not conn.prepare(insert_base_sql, stmt_base) or
             (not conn.prepare(insert_jianpin_sql, stmt_jianpin)) or
             (not conn.prepare(insert_alias_sql, stmt_alias)) or
@@ -506,7 +529,7 @@ begin
         begin
             line := reader.ReadLine;
             Inc(line_count);
-            if import_mode <> imCharLm then
+            if not (import_mode in [imCharLm, imCharReverseLm]) then
             begin
                 line := Trim(line);
             end;
@@ -515,12 +538,13 @@ begin
                 Continue;
             end;
 
-            if (import_mode <> imCharLm) and (line[1] = '#') then
+            if (not (import_mode in [imCharLm, imCharReverseLm])) and
+                (line[1] = '#') then
             begin
                 Continue;
             end;
 
-            if import_mode = imCharLm then
+            if import_mode in [imCharLm, imCharReverseLm] then
             begin
                 if not split_char_lm_line(line, text, weight, backoff) then
                 begin
@@ -753,6 +777,12 @@ begin
         else if import_mode = imCharLm then
         begin
             Writeln(Format('Imported %d character LM rows from %d lines.',
+                [inserted_char_lm, line_count]));
+        end
+        else if import_mode = imCharReverseLm then
+        begin
+            Writeln(Format(
+                'Imported %d reverse character LM rows from %d lines.',
                 [inserted_char_lm, line_count]));
         end
         else

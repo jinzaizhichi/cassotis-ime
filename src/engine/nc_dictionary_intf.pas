@@ -61,6 +61,8 @@ type
             out scores: TArray<Integer>): Boolean; virtual;
         function get_char_lm_suffix_scores(const texts: TArray<string>;
             out scores: TArray<Integer>): Boolean; virtual;
+        function get_char_reverse_lm_suffix_scores(const texts: TArray<string>;
+            out scores: TArray<Integer>): Boolean; virtual;
         function get_char_lm_cached_span_scores(const texts: TArray<string>;
             out scores: TArray<Integer>): Boolean; virtual;
         function get_char_lm_continuation_scores(const left_context: string;
@@ -280,6 +282,13 @@ begin
     { Test and alternate providers can keep implementing the sentence scorer.
       SQLite overrides this to omit the false sentence-start context. }
     Result := get_char_lm_text_scores(texts, scores);
+end;
+
+function TncDictionaryProvider.get_char_reverse_lm_suffix_scores(
+    const texts: TArray<string>; out scores: TArray<Integer>): Boolean;
+begin
+    SetLength(scores, 0);
+    Result := False;
 end;
 
 function TncDictionaryProvider.get_char_lm_cached_span_scores(

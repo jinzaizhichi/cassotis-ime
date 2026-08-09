@@ -248,6 +248,14 @@ type
         complete_pool_original: Boolean;
         complete_pool_substitutions: Integer;
         complete_pool_changed_position: Integer;
+        complete_pool_anchor_present: Boolean;
+        complete_pool_anchor_start: Integer;
+        complete_pool_anchor_units: Integer;
+        complete_pool_anchor_exact_rank: Integer;
+        complete_pool_anchor_source_weight: Integer;
+        complete_pool_anchor_replacement_weight: Integer;
+        complete_pool_anchor_top_weight: Integer;
+        complete_pool_anchor_weight_gain: Integer;
         complete_pool_pair_evidence: Integer;
         complete_pool_proper_name_confidence: Integer;
         complete_pool_signature_support: Integer;
@@ -268,6 +276,12 @@ type
         top2_pairwise_score: Int64;
         top2_pairwise_eligible: Boolean;
         top2_pairwise_swapped: Boolean;
+        exact_anchor_pairwise_score: Int64;
+        exact_anchor_pairwise_eligible: Boolean;
+        exact_anchor_pairwise_moved: Boolean;
+        exact_anchor_pairwise_target_rank: Integer;
+        exact_anchor_top_local_word_lm: array[0..8] of Integer;
+        exact_anchor_candidate_local_word_lm: array[0..8] of Integer;
         local_difference_score: Int64;
         local_difference_promoted: Boolean;
         local_difference_current_rank: Integer;
@@ -348,6 +362,11 @@ type
         changed_position: Integer;
         source_char_weight: Integer;
         replacement_char_weight: Integer;
+        anchor_start: Integer;
+        anchor_units: Integer;
+        anchor_exact_rank: Integer;
+        anchor_top_weight: Integer;
+        edge_retention_score: Integer;
         char_lm_score: Integer;
         char_lm_suffix_score: Integer;
         char_lm_context_score: Integer;
@@ -858,6 +877,12 @@ function apply_long_top2_pairwise_index_swap(
     const eligible: Boolean;
     const score: Int64;
     const threshold: Int64): Boolean;
+function apply_long_exact_anchor_pairwise_index_move(
+    var ordered_indices: TArray<Integer>;
+    const anchor_position: Integer;
+    const score: Double;
+    const strict_threshold: Double;
+    const second_threshold: Double): Integer;
 
 implementation
 
@@ -872,6 +897,9 @@ uses
     nc_long_top2_pairwise_swap_model,
     nc_long_top2_pairwise_text_model,
     nc_long_top2_pairwise_difference_model,
+    nc_long_exact_anchor_pairwise_model,
+    nc_long_bidirectional_difference_model,
+    nc_long_second_slot_bidirectional_model,
     nc_long_visible_pairwise_residual_model,
     nc_long_local_difference_residual_model,
     nc_long_local_pairwise_pool_model,
@@ -938,6 +966,49 @@ begin
     first_index := ordered_indices[0];
     ordered_indices[0] := ordered_indices[second_position];
     ordered_indices[second_position] := first_index;
+end;
+
+function apply_long_exact_anchor_pairwise_index_move(
+    var ordered_indices: TArray<Integer>;
+    const anchor_position: Integer;
+    const score: Double;
+    const strict_threshold: Double;
+    const second_threshold: Double): Integer;
+var
+    target_position: Integer;
+    candidate_index: Integer;
+    position: Integer;
+begin
+    Result := -1;
+    if (Length(ordered_indices) < 2) or (anchor_position <= 0) or
+        (anchor_position >= Length(ordered_indices)) then
+    begin
+        Exit;
+    end;
+    if score >= strict_threshold then
+    begin
+        target_position := 0;
+    end
+    else if score >= second_threshold then
+    begin
+        target_position := 1;
+    end
+    else
+    begin
+        Exit;
+    end;
+    if anchor_position <= target_position then
+    begin
+        Exit;
+    end;
+
+    candidate_index := ordered_indices[anchor_position];
+    for position := anchor_position downto target_position + 1 do
+    begin
+        ordered_indices[position] := ordered_indices[position - 1];
+    end;
+    ordered_indices[target_position] := candidate_index;
+    Result := target_position;
 end;
 
 type
@@ -122691,6 +122762,13 @@ const
     c_exact_lattice_single_option_limit = 8;
     c_exact_lattice_max_segment_units = 5;
     c_exact_lattice_signature_limit = 3;
+    c_exact_anchor_candidate_limit = 32;
+    c_exact_anchor_best_candidate_limit = 24;
+    c_exact_anchor_seed_limit = 2;
+    c_exact_anchor_options_per_position = 4;
+    c_exact_anchor_word_option_limit = 4;
+    c_exact_dual_anchor_candidate_limit = 12;
+    c_exact_dual_anchor_pair_pool_limit = 36;
     c_single_option_limit = 6;
     c_signature_soft_limit = 4;
     c_chain_reserved = 6;
@@ -122719,6 +122797,40 @@ type
     end;
     TncCompletePoolLatticeStateArray =
         TArray<TncCompletePoolLatticeState>;
+    TncCompletePoolAnchorProposal = record
+        valid: Boolean;
+        span_units: Integer;
+        exact_rank: Integer;
+        source_weight: Integer;
+        top_weight: Integer;
+        confidence: Int64;
+        candidate: TncCandidate;
+    end;
+    TncCompletePoolAnchorProposalArray =
+        TArray<TncCompletePoolAnchorProposal>;
+    TncCompletePoolAnchorProposalMatrix =
+        TArray<TncCompletePoolAnchorProposalArray>;
+    TncCompletePoolDualAnchorProposal = record
+        valid: Boolean;
+        left_position: Integer;
+        right_position: Integer;
+        confidence: Int64;
+        left_anchor: TncCompletePoolAnchorProposal;
+        right_anchor: TncCompletePoolAnchorProposal;
+    end;
+    TncCompletePoolDualAnchorProposalArray =
+        TArray<TncCompletePoolDualAnchorProposal>;
+    TncExactSubpathState = record
+        valid: Boolean;
+        score: Int64;
+        segment_count: Integer;
+        text: string;
+        path_text: string;
+    end;
+    TncExactSubpathStateArray = TArray<TncExactSubpathState>;
+    TncExactSubpathStateMatrix = TArray<TncExactSubpathStateArray>;
+    TncBooleanArray = TArray<Boolean>;
+    TncBooleanMatrix = TArray<TncBooleanArray>;
 var
     raw_pool: TncLongCompletePoolRuntimeCandidateArray;
     raw_index_by_text: TDictionary<string, Integer>;
@@ -123068,6 +123180,63 @@ var
             SameText(reconstructed, Trim(candidate_text));
     end;
 
+    function decode_trusted_exact_path(const candidate_text: string;
+        const encoded_path: string; out signature: string;
+        out name_confidence: Integer): Boolean;
+    var
+        parts: TArray<string>;
+        part_units: TArray<string>;
+        reconstructed: string;
+        part_idx: Integer;
+        unit_cursor: Integer;
+        part_length: Integer;
+        first_unit: string;
+    begin
+        Result := False;
+        signature := '';
+        name_confidence := 0;
+        reconstructed := '';
+        unit_cursor := 0;
+        if Trim(encoded_path) = '' then
+        begin
+            Exit;
+        end;
+        parts := encoded_path.Split([c_segment_path_separator]);
+        if Length(parts) <= 0 then
+        begin
+            Exit;
+        end;
+        for part_idx := 0 to High(parts) do
+        begin
+            parts[part_idx] := Trim(parts[part_idx]);
+            part_units := split_text_units(parts[part_idx]);
+            part_length := Length(part_units);
+            if (part_length <= 0) or
+                (unit_cursor + part_length > expected_units) then
+            begin
+                Exit;
+            end;
+            if signature <> '' then
+            begin
+                signature := signature + '-';
+            end;
+            signature := signature + IntToStr(part_length);
+            reconstructed := reconstructed + parts[part_idx];
+            if part_length in [2, 3] then
+            begin
+                first_unit := part_units[0];
+                if is_common_surname_text(first_unit) then
+                begin
+                    name_confidence := Max(name_confidence,
+                        620 + part_length * 80);
+                end;
+            end;
+            Inc(unit_cursor, part_length);
+        end;
+        Result := (unit_cursor = expected_units) and
+            SameText(reconstructed, Trim(candidate_text));
+    end;
+
     function resolve_candidate_path(const value: TncCandidate;
         const candidate_source_index: Integer; const preferred_path: string;
         out resolved_path: string; out signature: string;
@@ -123126,7 +123295,10 @@ var
         const original: Boolean; const substitutions: Integer;
         const changed_position: Integer; const source_char_weight: Integer;
         const replacement_char_weight: Integer;
-        const pair_evidence: Integer); forward;
+        const pair_evidence: Integer; const anchor_start: Integer;
+        const anchor_units: Integer;
+        const anchor_exact_rank: Integer;
+        const anchor_top_weight: Integer); forward;
 
     function cached_lm_transition_bonus(const query_value: string;
         const path_value: string): Integer;
@@ -123455,7 +123627,8 @@ var
             generated.dict_weight := 0;
             add_candidate(generated, -1, source_states[state_idx].path,
                 lcps_exact_lattice, state_idx + 1, -1, False, 0, -1,
-                0, 0, source_states[state_idx].transition_support);
+                0, 0, source_states[state_idx].transition_support,
+                -1, 0, 0, 0);
         end;
     end;
 
@@ -123516,6 +123689,11 @@ var
                 item.source_char_weight := value.source_char_weight;
                 item.replacement_char_weight :=
                     value.replacement_char_weight;
+                item.anchor_start := value.anchor_start;
+                item.anchor_units := value.anchor_units;
+                item.anchor_exact_rank := value.anchor_exact_rank;
+                item.anchor_top_weight := value.anchor_top_weight;
+                item.edge_retention_score := value.edge_retention_score;
             end;
             if value.candidate.display_kind = cdk_lm_compound then
             begin
@@ -123541,7 +123719,10 @@ var
         const original: Boolean; const substitutions: Integer;
         const changed_position: Integer; const source_char_weight: Integer;
         const replacement_char_weight: Integer;
-        const pair_evidence: Integer);
+        const pair_evidence: Integer; const anchor_start: Integer;
+        const anchor_units: Integer;
+        const anchor_exact_rank: Integer;
+        const anchor_top_weight: Integer);
     var
         item: TncLongCompletePoolRuntimeCandidate;
         resolved_path: string;
@@ -123552,7 +123733,13 @@ var
         begin
             Exit;
         end;
-        if not resolve_candidate_path(value, candidate_source_index,
+        if (source_kind = lcps_exact_lattice) and (anchor_units > 0) and
+            decode_trusted_exact_path(Trim(value.text), preferred_path,
+            signature, name_confidence) then
+        begin
+            resolved_path := Trim(preferred_path);
+        end
+        else if not resolve_candidate_path(value, candidate_source_index,
             preferred_path, resolved_path, signature, name_confidence) then
         begin
             Exit;
@@ -123571,6 +123758,10 @@ var
         item.changed_position := changed_position;
         item.source_char_weight := source_char_weight;
         item.replacement_char_weight := replacement_char_weight;
+        item.anchor_start := anchor_start;
+        item.anchor_units := anchor_units;
+        item.anchor_exact_rank := anchor_exact_rank;
+        item.anchor_top_weight := anchor_top_weight;
         item.pair_evidence := pair_evidence;
         item.proper_name_confidence := name_confidence;
         item.local_pairwise_insert_rank := -1;
@@ -123600,6 +123791,1149 @@ var
                 Result := Result + c_segment_path_separator;
             end;
             Result := Result + Trim(parts[part_idx]);
+        end;
+    end;
+
+    procedure build_best_exact_anchor_subpaths(
+        out prefix_states: TncExactSubpathStateArray;
+        out suffix_states: TncExactSubpathStateArray);
+    var
+        boundary_idx: Integer;
+        unit_count: Integer;
+        candidate_state: TncExactSubpathState;
+        exact_candidates: TncCandidateList;
+        segment_text: string;
+        query_key: string;
+        candidate_idx: Integer;
+        segment_units: Integer;
+        source_idx: Integer;
+        next_idx: Integer;
+
+        function candidate_is_usable(const value: TncCandidate;
+            const expected_segment_units: Integer): Boolean;
+        begin
+            Result := (Trim(value.comment) = '') and
+                (get_candidate_text_unit_count(Trim(value.text)) =
+                expected_segment_units) and
+                long_exact_chunk_weight_is_eligible(value.dict_weight,
+                value.has_dict_weight);
+        end;
+
+        function state_is_better(const candidate_value: TncExactSubpathState;
+            const current_value: TncExactSubpathState): Boolean;
+        begin
+            Result := (not current_value.valid) or
+                (candidate_value.score > current_value.score) or
+                ((candidate_value.score = current_value.score) and
+                (candidate_value.segment_count <
+                current_value.segment_count));
+        end;
+
+    begin
+        unit_count := expected_units;
+        SetLength(prefix_states, unit_count + 1);
+        SetLength(suffix_states, unit_count + 1);
+
+        prefix_states[0].valid := True;
+        for boundary_idx := 1 to unit_count do
+        begin
+            prefix_states[boundary_idx].valid := False;
+            for segment_units := 1 to Min(
+                c_exact_lattice_max_segment_units, boundary_idx) do
+            begin
+                source_idx := boundary_idx - segment_units;
+                if not prefix_states[source_idx].valid then
+                begin
+                    Continue;
+                end;
+                query_key := build_span_key(source_idx, segment_units);
+                if (query_key = '') or
+                    (not load_exact_candidates(query_key, exact_candidates)) then
+                begin
+                    Continue;
+                end;
+                for candidate_idx := 0 to High(exact_candidates) do
+                begin
+                    if not candidate_is_usable(exact_candidates[candidate_idx],
+                        segment_units) then
+                    begin
+                        Continue;
+                    end;
+                    segment_text := Trim(exact_candidates[candidate_idx].text);
+                    candidate_state.valid := True;
+                    candidate_state.score := prefix_states[source_idx].score +
+                        candidate_raw_weight(exact_candidates[candidate_idx]) +
+                        Int64(segment_units * segment_units) * 1200;
+                    candidate_state.segment_count :=
+                        prefix_states[source_idx].segment_count + 1;
+                    candidate_state.text := prefix_states[source_idx].text +
+                        segment_text;
+                    candidate_state.path_text :=
+                        prefix_states[source_idx].path_text;
+                    if candidate_state.path_text <> '' then
+                    begin
+                        candidate_state.path_text :=
+                            candidate_state.path_text +
+                            c_segment_path_separator;
+                    end;
+                    candidate_state.path_text := candidate_state.path_text +
+                        segment_text;
+                    if state_is_better(candidate_state,
+                        prefix_states[boundary_idx]) then
+                    begin
+                        prefix_states[boundary_idx] := candidate_state;
+                    end;
+                    Break;
+                end;
+            end;
+        end;
+
+        suffix_states[unit_count].valid := True;
+        for boundary_idx := unit_count - 1 downto 0 do
+        begin
+            suffix_states[boundary_idx].valid := False;
+            for segment_units := 1 to Min(
+                c_exact_lattice_max_segment_units,
+                unit_count - boundary_idx) do
+            begin
+                next_idx := boundary_idx + segment_units;
+                if not suffix_states[next_idx].valid then
+                begin
+                    Continue;
+                end;
+                query_key := build_span_key(boundary_idx, segment_units);
+                if (query_key = '') or
+                    (not load_exact_candidates(query_key, exact_candidates)) then
+                begin
+                    Continue;
+                end;
+                for candidate_idx := 0 to High(exact_candidates) do
+                begin
+                    if not candidate_is_usable(exact_candidates[candidate_idx],
+                        segment_units) then
+                    begin
+                        Continue;
+                    end;
+                    segment_text := Trim(exact_candidates[candidate_idx].text);
+                    candidate_state.valid := True;
+                    candidate_state.score := suffix_states[next_idx].score +
+                        candidate_raw_weight(exact_candidates[candidate_idx]) +
+                        Int64(segment_units * segment_units) * 1200;
+                    candidate_state.segment_count :=
+                        suffix_states[next_idx].segment_count + 1;
+                    candidate_state.text := segment_text +
+                        suffix_states[next_idx].text;
+                    candidate_state.path_text := segment_text;
+                    if suffix_states[next_idx].path_text <> '' then
+                    begin
+                        candidate_state.path_text :=
+                            candidate_state.path_text +
+                            c_segment_path_separator +
+                            suffix_states[next_idx].path_text;
+                    end;
+                    if state_is_better(candidate_state,
+                        suffix_states[boundary_idx]) then
+                    begin
+                        suffix_states[boundary_idx] := candidate_state;
+                    end;
+                    Break;
+                end;
+            end;
+        end;
+    end;
+
+    procedure build_exact_anchor_subpaths(const units: TArray<string>;
+        out prefix_states: TncExactSubpathStateArray;
+        out suffix_states: TncExactSubpathStateArray);
+    var
+        boundary_idx: Integer;
+        unit_count: Integer;
+        candidate_state: TncExactSubpathState;
+        exact_candidate: TncCandidate;
+        segment_text: string;
+        query_key: string;
+        text_idx: Integer;
+        segment_units: Integer;
+        source_idx: Integer;
+        next_idx: Integer;
+    begin
+        unit_count := Length(units);
+        SetLength(prefix_states, unit_count + 1);
+        SetLength(suffix_states, unit_count + 1);
+
+        prefix_states[0].valid := True;
+        for boundary_idx := 1 to unit_count do
+        begin
+            prefix_states[boundary_idx].valid := False;
+            for segment_units := 1 to Min(
+                c_exact_lattice_max_segment_units, boundary_idx) do
+            begin
+                source_idx := boundary_idx - segment_units;
+                if not prefix_states[source_idx].valid then
+                begin
+                    Continue;
+                end;
+                segment_text := '';
+                for text_idx := source_idx to boundary_idx - 1 do
+                begin
+                    segment_text := segment_text + units[text_idx];
+                end;
+                query_key := build_span_key(source_idx, segment_units);
+                if (query_key = '') or (not find_exact_candidate(query_key,
+                    segment_text, segment_units, exact_candidate)) then
+                begin
+                    Continue;
+                end;
+                candidate_state.valid := True;
+                candidate_state.score := prefix_states[source_idx].score +
+                    candidate_raw_weight(exact_candidate) +
+                    Int64(segment_units * segment_units) * 1200;
+                candidate_state.segment_count :=
+                    prefix_states[source_idx].segment_count + 1;
+                candidate_state.text := prefix_states[source_idx].text +
+                    segment_text;
+                candidate_state.path_text :=
+                    prefix_states[source_idx].path_text;
+                if candidate_state.path_text <> '' then
+                begin
+                    candidate_state.path_text := candidate_state.path_text +
+                        c_segment_path_separator;
+                end;
+                candidate_state.path_text := candidate_state.path_text +
+                    segment_text;
+                if (not prefix_states[boundary_idx].valid) or
+                    (candidate_state.score >
+                    prefix_states[boundary_idx].score) or
+                    ((candidate_state.score =
+                    prefix_states[boundary_idx].score) and
+                    (candidate_state.segment_count <
+                    prefix_states[boundary_idx].segment_count)) then
+                begin
+                    prefix_states[boundary_idx] := candidate_state;
+                end;
+            end;
+        end;
+
+        suffix_states[unit_count].valid := True;
+        for boundary_idx := unit_count - 1 downto 0 do
+        begin
+            suffix_states[boundary_idx].valid := False;
+            for segment_units := 1 to Min(
+                c_exact_lattice_max_segment_units,
+                unit_count - boundary_idx) do
+            begin
+                next_idx := boundary_idx + segment_units;
+                if not suffix_states[next_idx].valid then
+                begin
+                    Continue;
+                end;
+                segment_text := '';
+                for text_idx := boundary_idx to next_idx - 1 do
+                begin
+                    segment_text := segment_text + units[text_idx];
+                end;
+                query_key := build_span_key(boundary_idx, segment_units);
+                if (query_key = '') or (not find_exact_candidate(query_key,
+                    segment_text, segment_units, exact_candidate)) then
+                begin
+                    Continue;
+                end;
+                candidate_state.valid := True;
+                candidate_state.score := suffix_states[next_idx].score +
+                    candidate_raw_weight(exact_candidate) +
+                    Int64(segment_units * segment_units) * 1200;
+                candidate_state.segment_count :=
+                    suffix_states[next_idx].segment_count + 1;
+                candidate_state.text := segment_text +
+                    suffix_states[next_idx].text;
+                candidate_state.path_text := segment_text;
+                if suffix_states[next_idx].path_text <> '' then
+                begin
+                    candidate_state.path_text := candidate_state.path_text +
+                        c_segment_path_separator +
+                        suffix_states[next_idx].path_text;
+                end;
+                if (not suffix_states[boundary_idx].valid) or
+                    (candidate_state.score >
+                    suffix_states[boundary_idx].score) or
+                    ((candidate_state.score =
+                    suffix_states[boundary_idx].score) and
+                    (candidate_state.segment_count <
+                    suffix_states[boundary_idx].segment_count)) then
+                begin
+                    suffix_states[boundary_idx] := candidate_state;
+                end;
+            end;
+        end;
+    end;
+
+    procedure generate_exact_anchor_candidates(const use_best_subpaths: Boolean;
+        const candidate_limit: Integer);
+    var
+        seed_item: TncLongCompletePoolRuntimeCandidate;
+        seed_idx: Integer;
+        seed_units: TArray<string>;
+        generated_units: TArray<string>;
+        anchor_units: TArray<string>;
+        proposals: TncCompletePoolAnchorProposalMatrix;
+        proposal: TncCompletePoolAnchorProposal;
+        exact_candidates: TncCandidateList;
+        generated: TncCandidate;
+        prefix_path: string;
+        suffix_path: string;
+        prefix_states: TncExactSubpathStateArray;
+        suffix_states: TncExactSubpathStateArray;
+        generated_path: string;
+        seed_span_text: string;
+        generated_text: string;
+        query_key: string;
+        position: Integer;
+        span_units: Integer;
+        destination: Integer;
+        candidate_idx: Integer;
+        valid_rank: Integer;
+        proposal_idx: Integer;
+        unit_idx: Integer;
+        anchor_idx: Integer;
+        difference_count: Integer;
+        changed_position: Integer;
+        generated_count: Integer;
+        raw_count_before: Integer;
+        raw_weight: Integer;
+        seed_span_weight: Integer;
+        top_anchor_weight: Integer;
+        prefix_score: Int64;
+        suffix_score: Int64;
+
+        function proposal_is_better(
+            const left_value: TncCompletePoolAnchorProposal;
+            const right_value: TncCompletePoolAnchorProposal): Boolean;
+        begin
+            if not right_value.valid then
+            begin
+                Exit(left_value.valid);
+            end;
+            if left_value.confidence <> right_value.confidence then
+            begin
+                Exit(left_value.confidence > right_value.confidence);
+            end;
+            if left_value.span_units <> right_value.span_units then
+            begin
+                Exit(left_value.span_units > right_value.span_units);
+            end;
+            Result := CompareText(Trim(left_value.candidate.text),
+                Trim(right_value.candidate.text)) < 0;
+        end;
+
+        procedure retain_proposal(const position_value: Integer;
+        const value: TncCompletePoolAnchorProposal);
+        var
+            existing_idx: Integer;
+            proposal_insert_idx: Integer;
+        begin
+            for existing_idx := 0 to High(proposals[position_value]) do
+            begin
+                if proposals[position_value][existing_idx].valid and
+                    (proposals[position_value][existing_idx].span_units =
+                    value.span_units) and SameText(Trim(
+                    proposals[position_value][existing_idx].candidate.text),
+                    Trim(value.candidate.text)) then
+                begin
+                    Exit;
+                end;
+            end;
+            for proposal_insert_idx := 0 to
+                High(proposals[position_value]) do
+            begin
+                if proposal_is_better(value,
+                    proposals[position_value][proposal_insert_idx]) then
+                begin
+                    for existing_idx := High(proposals[position_value])
+                        downto proposal_insert_idx + 1 do
+                    begin
+                        proposals[position_value][existing_idx] :=
+                            proposals[position_value][existing_idx - 1];
+                    end;
+                    proposals[position_value][proposal_insert_idx] := value;
+                    Exit;
+                end;
+            end;
+        end;
+    begin
+        if (raw_original_count <= 0) or (candidate_limit <= 0) then
+        begin
+            Exit;
+        end;
+        generated_count := 0;
+        if use_best_subpaths then
+        begin
+            build_best_exact_anchor_subpaths(prefix_states, suffix_states);
+        end;
+        for seed_idx := 0 to Min(c_exact_anchor_seed_limit - 1,
+            raw_original_count - 1) do
+        begin
+            seed_item := raw_pool[seed_idx];
+            seed_units := split_text_units(Trim(seed_item.candidate.text));
+            if Length(seed_units) <> expected_units then
+            begin
+                Continue;
+            end;
+            if not use_best_subpaths then
+            begin
+                build_exact_anchor_subpaths(seed_units, prefix_states,
+                    suffix_states);
+            end;
+            SetLength(proposals, expected_units);
+        for position := 0 to expected_units - 2 do
+        begin
+            SetLength(proposals[position],
+                c_exact_anchor_options_per_position);
+            for span_units := 2 to Min(
+                c_exact_lattice_max_segment_units,
+                expected_units - position) do
+            begin
+                query_key := build_span_key(position, span_units);
+                if (query_key = '') or (not load_exact_candidates(query_key,
+                    exact_candidates)) then
+                begin
+                    Continue;
+                end;
+                seed_span_text := '';
+                for unit_idx := position to position + span_units - 1 do
+                begin
+                    seed_span_text := seed_span_text + seed_units[unit_idx];
+                end;
+                seed_span_weight := 0;
+                for candidate_idx := 0 to High(exact_candidates) do
+                begin
+                    if (Trim(exact_candidates[candidate_idx].comment) = '') and
+                        SameText(seed_span_text,
+                        Trim(exact_candidates[candidate_idx].text)) then
+                    begin
+                        seed_span_weight := candidate_raw_weight(
+                            exact_candidates[candidate_idx]);
+                        Break;
+                    end;
+                end;
+                valid_rank := 0;
+                top_anchor_weight := 0;
+                for candidate_idx := 0 to High(exact_candidates) do
+                begin
+                    if (Trim(exact_candidates[candidate_idx].comment) <> '') or
+                        (get_candidate_text_unit_count(Trim(
+                        exact_candidates[candidate_idx].text)) <> span_units) or
+                        (not long_exact_chunk_weight_is_eligible(
+                        exact_candidates[candidate_idx].dict_weight,
+                        exact_candidates[candidate_idx].has_dict_weight)) then
+                    begin
+                        Continue;
+                    end;
+                    Inc(valid_rank);
+                    if valid_rank = 1 then
+                    begin
+                        top_anchor_weight := candidate_raw_weight(
+                            exact_candidates[candidate_idx]);
+                    end;
+                    if valid_rank > c_exact_anchor_word_option_limit then
+                    begin
+                        Break;
+                    end;
+                    if (not use_best_subpaths) and SameText(seed_span_text,
+                        Trim(exact_candidates[candidate_idx].text)) then
+                    begin
+                        Continue;
+                    end;
+                    raw_weight := candidate_raw_weight(
+                        exact_candidates[candidate_idx]);
+                    if ((valid_rank = 2) and (raw_weight < 240)) or
+                        ((valid_rank >= 3) and (raw_weight < 420)) then
+                    begin
+                        Continue;
+                    end;
+                    proposal := Default(TncCompletePoolAnchorProposal);
+                    proposal.valid := True;
+                    proposal.span_units := span_units;
+                    proposal.exact_rank := valid_rank;
+                    proposal.source_weight := seed_span_weight;
+                    proposal.top_weight := top_anchor_weight;
+                    proposal.candidate := exact_candidates[candidate_idx];
+                    proposal.confidence := Int64(span_units) * 10000 +
+                        Int64(raw_weight) * 10 -
+                        Int64(valid_rank - 1) * 2500;
+                    retain_proposal(position, proposal);
+                end;
+            end;
+        end;
+
+        for proposal_idx := 0 to
+            c_exact_anchor_options_per_position - 1 do
+        begin
+            for position := 0 to expected_units - 2 do
+            begin
+                if generated_count >= candidate_limit then
+                begin
+                    Exit;
+                end;
+                proposal := proposals[position][proposal_idx];
+                if not proposal.valid then
+                begin
+                    Continue;
+                end;
+                destination := position + proposal.span_units;
+                anchor_units := split_text_units(
+                    Trim(proposal.candidate.text));
+                if Length(anchor_units) <> proposal.span_units then
+                begin
+                    Continue;
+                end;
+                if (not prefix_states[position].valid) or
+                    (not suffix_states[destination].valid) then
+                begin
+                    Continue;
+                end;
+                    difference_count := 0;
+                    changed_position := -1;
+                    if use_best_subpaths then
+                    begin
+                        generated_text := prefix_states[position].text +
+                            Trim(proposal.candidate.text) +
+                            suffix_states[destination].text;
+                        generated_units := split_text_units(generated_text);
+                        if Length(generated_units) <> expected_units then
+                        begin
+                            Continue;
+                        end;
+                        for unit_idx := 0 to High(generated_units) do
+                        begin
+                            if not SameText(generated_units[unit_idx],
+                                seed_units[unit_idx]) then
+                            begin
+                                Inc(difference_count);
+                                if changed_position < 0 then
+                                begin
+                                    changed_position := unit_idx;
+                                end;
+                            end;
+                        end;
+                    end;
+                    if not use_best_subpaths then
+                    begin
+                        generated_units := Copy(seed_units, 0,
+                            Length(seed_units));
+                        for anchor_idx := 0 to High(anchor_units) do
+                        begin
+                            if not SameText(
+                                generated_units[position + anchor_idx],
+                                anchor_units[anchor_idx]) then
+                            begin
+                                Inc(difference_count);
+                                if changed_position < 0 then
+                                begin
+                                    changed_position := position + anchor_idx;
+                                end;
+                            end;
+                            generated_units[position + anchor_idx] :=
+                                anchor_units[anchor_idx];
+                        end;
+                        generated_text := '';
+                        for unit_idx := 0 to High(generated_units) do
+                        begin
+                            generated_text := generated_text +
+                                generated_units[unit_idx];
+                        end;
+                    end;
+                    prefix_path := prefix_states[position].path_text;
+                    prefix_score := prefix_states[position].score;
+                    suffix_path := suffix_states[destination].path_text;
+                    suffix_score := suffix_states[destination].score;
+                    generated_path := prefix_path;
+                    if generated_path <> '' then
+                    begin
+                        generated_path := generated_path +
+                            c_segment_path_separator;
+                    end;
+                    generated_path := generated_path +
+                        Trim(proposal.candidate.text);
+                    if suffix_path <> '' then
+                    begin
+                        generated_path := generated_path +
+                            c_segment_path_separator + suffix_path;
+                    end;
+                    if difference_count <= 0 then
+                    begin
+                        Continue;
+                    end;
+                    generated := seed_item.candidate;
+                    generated.text := generated_text;
+                    generated.comment := '';
+                    generated.source := cs_rule;
+                    generated.has_dict_weight := False;
+                    generated.dict_weight := 0;
+                    generated.score := clamp_int64_to_integer(prefix_score +
+                        suffix_score + proposal.confidence);
+                    raw_count_before := Length(raw_pool);
+                    add_candidate(generated, -1, generated_path,
+                        lcps_exact_lattice, seed_item.seed_rank,
+                        seed_item.seed_visible_index, False, difference_count,
+                        changed_position, proposal.source_weight,
+                        candidate_raw_weight(proposal.candidate), 0, position,
+                        proposal.span_units, proposal.exact_rank,
+                        proposal.top_weight);
+                    if Length(raw_pool) > raw_count_before then
+                    begin
+                        Inc(generated_count);
+                    end;
+            end;
+        end;
+        end;
+    end;
+
+    procedure generate_exact_dual_anchor_candidates;
+    var
+        seed_item: TncLongCompletePoolRuntimeCandidate;
+        seed_units: TArray<string>;
+        generated_units: TArray<string>;
+        left_units: TArray<string>;
+        right_units: TArray<string>;
+        proposals: TncCompletePoolAnchorProposalMatrix;
+        proposal: TncCompletePoolAnchorProposal;
+        dual_pairs: TncCompletePoolDualAnchorProposalArray;
+        dual_pair: TncCompletePoolDualAnchorProposal;
+        exact_candidates: TncCandidateList;
+        prefix_states: TncExactSubpathStateArray;
+        suffix_states: TncExactSubpathStateArray;
+        gap_states: TncExactSubpathStateMatrix;
+        gap_computed: TncBooleanMatrix;
+        gap_state: TncExactSubpathState;
+        generated: TncCandidate;
+        query_key: string;
+        seed_span_text: string;
+        generated_text: string;
+        generated_path: string;
+        segment_text: string;
+        left_text: string;
+        right_text: string;
+        seed_idx: Integer;
+        position: Integer;
+        span_units: Integer;
+        candidate_idx: Integer;
+        valid_rank: Integer;
+        proposal_idx: Integer;
+        left_position: Integer;
+        right_position: Integer;
+        left_idx: Integer;
+        right_idx: Integer;
+        left_destination: Integer;
+        right_destination: Integer;
+        segment_idx: Integer;
+        unit_idx: Integer;
+        difference_count: Integer;
+        changed_position: Integer;
+        raw_count_before: Integer;
+        raw_weight: Integer;
+        seed_span_weight: Integer;
+        top_anchor_weight: Integer;
+        dual_generated_count: Integer;
+        candidate_state: TncExactSubpathState;
+        interval_states: TncExactSubpathStateArray;
+        exact_candidate: TncCandidate;
+
+        function proposal_is_better(
+            const left_value: TncCompletePoolAnchorProposal;
+            const right_value: TncCompletePoolAnchorProposal): Boolean;
+        begin
+            if not right_value.valid then
+            begin
+                Exit(left_value.valid);
+            end;
+            if left_value.confidence <> right_value.confidence then
+            begin
+                Exit(left_value.confidence > right_value.confidence);
+            end;
+            if left_value.span_units <> right_value.span_units then
+            begin
+                Exit(left_value.span_units > right_value.span_units);
+            end;
+            Result := CompareText(Trim(left_value.candidate.text),
+                Trim(right_value.candidate.text)) < 0;
+        end;
+
+        procedure retain_proposal(const position_value: Integer;
+            const value: TncCompletePoolAnchorProposal);
+        var
+            existing_idx: Integer;
+            insert_idx: Integer;
+        begin
+            for existing_idx := 0 to High(proposals[position_value]) do
+            begin
+                if proposals[position_value][existing_idx].valid and
+                    (proposals[position_value][existing_idx].span_units =
+                    value.span_units) and SameText(Trim(
+                    proposals[position_value][existing_idx].candidate.text),
+                    Trim(value.candidate.text)) then
+                begin
+                    Exit;
+                end;
+            end;
+            for insert_idx := 0 to High(proposals[position_value]) do
+            begin
+                if proposal_is_better(value,
+                    proposals[position_value][insert_idx]) then
+                begin
+                    for existing_idx := High(proposals[position_value])
+                        downto insert_idx + 1 do
+                    begin
+                        proposals[position_value][existing_idx] :=
+                            proposals[position_value][existing_idx - 1];
+                    end;
+                    proposals[position_value][insert_idx] := value;
+                    Exit;
+                end;
+            end;
+        end;
+
+        function dual_pair_is_better(
+            const left_value: TncCompletePoolDualAnchorProposal;
+            const right_value: TncCompletePoolDualAnchorProposal): Boolean;
+        var
+            left_rank_sum: Integer;
+            right_rank_sum: Integer;
+        begin
+            if not right_value.valid then
+            begin
+                Exit(left_value.valid);
+            end;
+            if left_value.confidence <> right_value.confidence then
+            begin
+                Exit(left_value.confidence > right_value.confidence);
+            end;
+            left_rank_sum := left_value.left_anchor.exact_rank +
+                left_value.right_anchor.exact_rank;
+            right_rank_sum := right_value.left_anchor.exact_rank +
+                right_value.right_anchor.exact_rank;
+            if left_rank_sum <> right_rank_sum then
+            begin
+                Exit(left_rank_sum < right_rank_sum);
+            end;
+            if left_value.left_position <> right_value.left_position then
+            begin
+                Exit(left_value.left_position < right_value.left_position);
+            end;
+            Result := left_value.right_position < right_value.right_position;
+        end;
+
+        procedure retain_dual_pair(
+            const value: TncCompletePoolDualAnchorProposal);
+        var
+            existing_idx: Integer;
+            insert_idx: Integer;
+        begin
+            for insert_idx := 0 to High(dual_pairs) do
+            begin
+                if dual_pair_is_better(value, dual_pairs[insert_idx]) then
+                begin
+                    for existing_idx := High(dual_pairs) downto
+                        insert_idx + 1 do
+                    begin
+                        dual_pairs[existing_idx] := dual_pairs[existing_idx - 1];
+                    end;
+                    dual_pairs[insert_idx] := value;
+                    Exit;
+                end;
+            end;
+        end;
+
+        function seed_text_for_span(const start_position: Integer;
+            const span_length: Integer): string;
+        var
+            text_idx: Integer;
+        begin
+            Result := '';
+            for text_idx := start_position to
+                start_position + span_length - 1 do
+            begin
+                Result := Result + seed_units[text_idx];
+            end;
+        end;
+
+        function get_gap_state(const start_position: Integer;
+            const end_position: Integer;
+            out value: TncExactSubpathState): Boolean;
+        var
+            interval_length: Integer;
+            interval_boundary_idx: Integer;
+            interval_span_units: Integer;
+            interval_segment_start: Integer;
+        begin
+            value := Default(TncExactSubpathState);
+            if start_position = end_position then
+            begin
+                value.valid := True;
+                Exit(True);
+            end;
+            if (start_position < 0) or (end_position > expected_units) or
+                (start_position > end_position) then
+            begin
+                Exit(False);
+            end;
+            if gap_computed[start_position][end_position] then
+            begin
+                value := gap_states[start_position][end_position];
+                Exit(value.valid);
+            end;
+            gap_computed[start_position][end_position] := True;
+            interval_length := end_position - start_position;
+            SetLength(interval_states, interval_length + 1);
+            interval_states[0].valid := True;
+            for interval_boundary_idx := 1 to interval_length do
+            begin
+                interval_states[interval_boundary_idx].valid := False;
+                for interval_span_units := 1 to Min(
+                    c_exact_lattice_max_segment_units,
+                    interval_boundary_idx) do
+                begin
+                    interval_segment_start := start_position +
+                        interval_boundary_idx - interval_span_units;
+                    if not interval_states[interval_boundary_idx -
+                        interval_span_units].valid then
+                    begin
+                        Continue;
+                    end;
+                    segment_text := seed_text_for_span(interval_segment_start,
+                        interval_span_units);
+                    query_key := build_span_key(interval_segment_start,
+                        interval_span_units);
+                    if (query_key = '') or (not find_exact_candidate(query_key,
+                        segment_text, interval_span_units, exact_candidate)) then
+                    begin
+                        Continue;
+                    end;
+                    candidate_state.valid := True;
+                    candidate_state.score :=
+                        interval_states[interval_boundary_idx -
+                        interval_span_units].score +
+                        candidate_raw_weight(exact_candidate) +
+                        Int64(interval_span_units * interval_span_units) * 1200;
+                    candidate_state.segment_count :=
+                        interval_states[interval_boundary_idx -
+                        interval_span_units].segment_count + 1;
+                    candidate_state.text :=
+                        interval_states[interval_boundary_idx -
+                        interval_span_units].text +
+                        segment_text;
+                    candidate_state.path_text :=
+                        interval_states[interval_boundary_idx -
+                        interval_span_units].path_text;
+                    if candidate_state.path_text <> '' then
+                    begin
+                        candidate_state.path_text :=
+                            candidate_state.path_text +
+                            c_segment_path_separator;
+                    end;
+                    candidate_state.path_text := candidate_state.path_text +
+                        segment_text;
+                    if (not interval_states[interval_boundary_idx].valid) or
+                        (candidate_state.score >
+                        interval_states[interval_boundary_idx].score) or
+                        ((candidate_state.score =
+                        interval_states[interval_boundary_idx].score) and
+                        (candidate_state.segment_count <
+                        interval_states[
+                        interval_boundary_idx].segment_count)) then
+                    begin
+                        interval_states[interval_boundary_idx] := candidate_state;
+                    end;
+                end;
+            end;
+            value := interval_states[interval_length];
+            gap_states[start_position][end_position] := value;
+            Result := value.valid;
+        end;
+
+        procedure append_path(var path_value: string;
+            const segment_value: string);
+        begin
+            if segment_value = '' then
+            begin
+                Exit;
+            end;
+            if path_value <> '' then
+            begin
+                path_value := path_value + c_segment_path_separator;
+            end;
+            path_value := path_value + segment_value;
+        end;
+    begin
+        if raw_original_count <= 0 then
+        begin
+            Exit;
+        end;
+        dual_generated_count := 0;
+        for seed_idx := 0 to Min(c_exact_anchor_seed_limit - 1,
+            raw_original_count - 1) do
+        begin
+            if dual_generated_count >= c_exact_dual_anchor_candidate_limit then
+            begin
+                Break;
+            end;
+            seed_item := raw_pool[seed_idx];
+            seed_units := split_text_units(Trim(seed_item.candidate.text));
+            if Length(seed_units) <> expected_units then
+            begin
+                Continue;
+            end;
+            build_exact_anchor_subpaths(seed_units, prefix_states,
+                suffix_states);
+            SetLength(proposals, expected_units);
+            SetLength(gap_states, expected_units + 1);
+            SetLength(gap_computed, expected_units + 1);
+            for position := 0 to expected_units do
+            begin
+                SetLength(gap_states[position], expected_units + 1);
+                SetLength(gap_computed[position], expected_units + 1);
+            end;
+            for position := 0 to expected_units - 2 do
+            begin
+                SetLength(proposals[position],
+                    c_exact_anchor_options_per_position);
+                for span_units := 2 to Min(
+                    c_exact_lattice_max_segment_units,
+                    expected_units - position) do
+                begin
+                    query_key := build_span_key(position, span_units);
+                    if (query_key = '') or (not load_exact_candidates(query_key,
+                        exact_candidates)) then
+                    begin
+                        Continue;
+                    end;
+                    seed_span_text := seed_text_for_span(position, span_units);
+                    seed_span_weight := 0;
+                    for candidate_idx := 0 to High(exact_candidates) do
+                    begin
+                        if (Trim(exact_candidates[candidate_idx].comment) = '') and
+                            SameText(seed_span_text,
+                            Trim(exact_candidates[candidate_idx].text)) then
+                        begin
+                            seed_span_weight := candidate_raw_weight(
+                                exact_candidates[candidate_idx]);
+                            Break;
+                        end;
+                    end;
+                    valid_rank := 0;
+                    top_anchor_weight := 0;
+                    for candidate_idx := 0 to High(exact_candidates) do
+                    begin
+                        if (Trim(exact_candidates[candidate_idx].comment) <> '') or
+                            (get_candidate_text_unit_count(Trim(
+                            exact_candidates[candidate_idx].text)) <> span_units) or
+                            (not long_exact_chunk_weight_is_eligible(
+                            exact_candidates[candidate_idx].dict_weight,
+                            exact_candidates[candidate_idx].has_dict_weight)) then
+                        begin
+                            Continue;
+                        end;
+                        Inc(valid_rank);
+                        if valid_rank = 1 then
+                        begin
+                            top_anchor_weight := candidate_raw_weight(
+                                exact_candidates[candidate_idx]);
+                        end;
+                        if valid_rank > c_exact_anchor_word_option_limit then
+                        begin
+                            Break;
+                        end;
+                        if SameText(seed_span_text,
+                            Trim(exact_candidates[candidate_idx].text)) then
+                        begin
+                            Continue;
+                        end;
+                        raw_weight := candidate_raw_weight(
+                            exact_candidates[candidate_idx]);
+                        if ((valid_rank = 2) and (raw_weight < 240)) or
+                            ((valid_rank >= 3) and (raw_weight < 420)) then
+                        begin
+                            Continue;
+                        end;
+                        proposal := Default(TncCompletePoolAnchorProposal);
+                        proposal.valid := True;
+                        proposal.span_units := span_units;
+                        proposal.exact_rank := valid_rank;
+                        proposal.source_weight := seed_span_weight;
+                        proposal.top_weight := top_anchor_weight;
+                        proposal.candidate := exact_candidates[candidate_idx];
+                        proposal.confidence := Int64(span_units) * 10000 +
+                            Int64(raw_weight) * 10 -
+                            Int64(valid_rank - 1) * 2500;
+                        retain_proposal(position, proposal);
+                    end;
+                end;
+            end;
+
+            SetLength(dual_pairs, c_exact_dual_anchor_pair_pool_limit);
+            for left_position := 0 to expected_units - 2 do
+            begin
+                for left_idx := 0 to
+                    c_exact_anchor_options_per_position - 1 do
+                begin
+                    if not proposals[left_position][left_idx].valid then
+                    begin
+                        Continue;
+                    end;
+                    left_destination := left_position +
+                        proposals[left_position][left_idx].span_units;
+                    for right_position := left_destination to
+                        expected_units - 2 do
+                    begin
+                        for right_idx := 0 to
+                            c_exact_anchor_options_per_position - 1 do
+                        begin
+                            if not proposals[right_position][right_idx].valid then
+                            begin
+                                Continue;
+                            end;
+                            right_destination := right_position +
+                                proposals[right_position][right_idx].span_units;
+                            if right_destination > expected_units then
+                            begin
+                                Continue;
+                            end;
+                            dual_pair := Default(
+                                TncCompletePoolDualAnchorProposal);
+                            dual_pair.valid := True;
+                            dual_pair.left_position := left_position;
+                            dual_pair.right_position := right_position;
+                            dual_pair.left_anchor :=
+                                proposals[left_position][left_idx];
+                            dual_pair.right_anchor :=
+                                proposals[right_position][right_idx];
+                            dual_pair.confidence :=
+                                dual_pair.left_anchor.confidence +
+                                dual_pair.right_anchor.confidence;
+                            retain_dual_pair(dual_pair);
+                        end;
+                    end;
+                end;
+            end;
+
+            for proposal_idx := 0 to High(dual_pairs) do
+            begin
+                if dual_generated_count >=
+                    c_exact_dual_anchor_candidate_limit then
+                begin
+                    Break;
+                end;
+                dual_pair := dual_pairs[proposal_idx];
+                if not dual_pair.valid then
+                begin
+                    Break;
+                end;
+                left_destination := dual_pair.left_position +
+                    dual_pair.left_anchor.span_units;
+                right_destination := dual_pair.right_position +
+                    dual_pair.right_anchor.span_units;
+                if (not prefix_states[dual_pair.left_position].valid) or
+                    (not suffix_states[right_destination].valid) or
+                    (not get_gap_state(left_destination,
+                    dual_pair.right_position, gap_state)) then
+                begin
+                    Continue;
+                end;
+                generated_units := Copy(seed_units, 0, Length(seed_units));
+                left_text := Trim(dual_pair.left_anchor.candidate.text);
+                right_text := Trim(dual_pair.right_anchor.candidate.text);
+                left_units := split_text_units(left_text);
+                right_units := split_text_units(right_text);
+                if (Length(left_units) <>
+                    dual_pair.left_anchor.span_units) or
+                    (Length(right_units) <>
+                    dual_pair.right_anchor.span_units) then
+                begin
+                    Continue;
+                end;
+                difference_count := 0;
+                changed_position := -1;
+                for segment_idx := 0 to
+                    dual_pair.left_anchor.span_units - 1 do
+                begin
+                    if not SameText(generated_units[
+                        dual_pair.left_position + segment_idx],
+                        left_units[segment_idx]) then
+                    begin
+                        Inc(difference_count);
+                        if changed_position < 0 then
+                        begin
+                            changed_position := dual_pair.left_position +
+                                segment_idx;
+                        end;
+                    end;
+                    generated_units[dual_pair.left_position + segment_idx] :=
+                        left_units[segment_idx];
+                end;
+                for segment_idx := 0 to
+                    dual_pair.right_anchor.span_units - 1 do
+                begin
+                    if not SameText(generated_units[
+                        dual_pair.right_position + segment_idx],
+                        right_units[segment_idx]) then
+                    begin
+                        Inc(difference_count);
+                        if changed_position < 0 then
+                        begin
+                            changed_position := dual_pair.right_position +
+                                segment_idx;
+                        end;
+                    end;
+                    generated_units[dual_pair.right_position + segment_idx] :=
+                        right_units[segment_idx];
+                end;
+                if difference_count <= 0 then
+                begin
+                    Continue;
+                end;
+                generated_text := '';
+                for unit_idx := 0 to High(generated_units) do
+                begin
+                    generated_text := generated_text + generated_units[unit_idx];
+                end;
+                generated_path := '';
+                append_path(generated_path,
+                    prefix_states[dual_pair.left_position].path_text);
+                append_path(generated_path, left_text);
+                append_path(generated_path, gap_state.path_text);
+                append_path(generated_path, right_text);
+                append_path(generated_path,
+                    suffix_states[right_destination].path_text);
+                generated := seed_item.candidate;
+                generated.text := generated_text;
+                generated.comment := '';
+                generated.source := cs_rule;
+                generated.has_dict_weight := False;
+                generated.dict_weight := 0;
+                generated.score := clamp_int64_to_integer(
+                    prefix_states[dual_pair.left_position].score +
+                    gap_state.score + suffix_states[right_destination].score +
+                    dual_pair.confidence);
+                raw_count_before := Length(raw_pool);
+                add_candidate(generated, -1, generated_path,
+                    lcps_exact_lattice, seed_item.seed_rank,
+                    seed_item.seed_visible_index, False, difference_count,
+                    changed_position,
+                    dual_pair.left_anchor.source_weight +
+                    dual_pair.right_anchor.source_weight,
+                    candidate_raw_weight(dual_pair.left_anchor.candidate) +
+                    candidate_raw_weight(dual_pair.right_anchor.candidate),
+                    0, dual_pair.left_position,
+                    dual_pair.left_anchor.span_units +
+                    dual_pair.right_anchor.span_units,
+                    Max(dual_pair.left_anchor.exact_rank,
+                    dual_pair.right_anchor.exact_rank),
+                    Max(dual_pair.left_anchor.top_weight,
+                    dual_pair.right_anchor.top_weight));
+                if Length(raw_pool) > raw_count_before then
+                begin
+                    Inc(dual_generated_count);
+                end;
+            end;
         end;
     end;
 
@@ -123785,7 +125119,7 @@ var
                     add_candidate(generated, -1, generated_path,
                         lcps_exact_pair, seed_item.seed_rank,
                         seed_item.seed_visible_index, False, 1,
-                        window_start, 0, 0, evidence_value);
+                        window_start, 0, 0, evidence_value, -1, 0, 0, 0);
                     Inc(pair_candidate_count);
                     if pair_candidate_count >= c_pair_candidate_limit then
                     begin
@@ -123930,7 +125264,8 @@ var
                     lcps_local_repair, seed_item.seed_rank,
                     seed_item.seed_visible_index, False, 1, unit_idx,
                     source_weight,
-                    candidate_raw_weight(single_options[option_idx]), 0);
+                    candidate_raw_weight(single_options[option_idx]), 0,
+                    -1, 0, 0, 0);
             end;
         end;
     end;
@@ -124349,6 +125684,11 @@ var
         window_texts: TArray<string>;
         window_scores: TArray<Integer>;
         window_offsets: TArray<Integer>;
+        difference_starts: TArray<Integer>;
+        difference_ends: TArray<Integer>;
+        difference_counts: TArray<Integer>;
+        difference_runs: TArray<Integer>;
+        difference_max_runs: TArray<Integer>;
         window_count: Integer;
         radius: Integer;
         window_start: Integer;
@@ -124360,6 +125700,45 @@ var
         candidate_lm: TncLongLocalPoolLmScores;
         model_features: TncLongLocalPairwisePoolFeatures;
         score: Double;
+
+        procedure measure_relation(const left_units: TArray<string>;
+            const right_units: TArray<string>; out first_difference: Integer;
+            out difference_end: Integer; out different_count: Integer;
+            out run_count: Integer; out max_run: Integer);
+        var
+            relation_idx: Integer;
+            current_run: Integer;
+        begin
+            first_difference := Length(left_units);
+            difference_end := Length(left_units);
+            different_count := 0;
+            run_count := 0;
+            max_run := 0;
+            current_run := 0;
+            for relation_idx := 0 to High(left_units) do
+            begin
+                if not SameText(left_units[relation_idx],
+                    right_units[relation_idx]) then
+                begin
+                    if different_count = 0 then
+                    begin
+                        first_difference := relation_idx;
+                    end;
+                    difference_end := relation_idx + 1;
+                    Inc(different_count);
+                    Inc(current_run);
+                    if current_run = 1 then
+                    begin
+                        Inc(run_count);
+                    end;
+                    max_run := Max(max_run, current_run);
+                end
+                else
+                begin
+                    current_run := 0;
+                end;
+            end;
+        end;
 
         procedure fill_candidate_features(const item:
             TncLongCompletePoolRuntimeCandidate;
@@ -124458,6 +125837,11 @@ var
             Exit;
         end;
         SetLength(window_offsets, challenger_count);
+        SetLength(difference_starts, challenger_count);
+        SetLength(difference_ends, challenger_count);
+        SetLength(difference_counts, challenger_count);
+        SetLength(difference_runs, challenger_count);
+        SetLength(difference_max_runs, challenger_count);
         SetLength(window_texts, challenger_count * 8);
         window_count := 0;
         for challenger_idx := 0 to challenger_count - 1 do
@@ -124469,15 +125853,23 @@ var
             begin
                 Exit;
             end;
+            measure_relation(baseline_units, candidate_units,
+                difference_starts[challenger_idx],
+                difference_ends[challenger_idx],
+                difference_counts[challenger_idx],
+                difference_runs[challenger_idx],
+                difference_max_runs[challenger_idx]);
+            if difference_counts[challenger_idx] <= 0 then
+            begin
+                Continue;
+            end;
             window_offsets[challenger_idx] := window_count;
             for radius := 0 to 3 do
             begin
                 window_start := Max(0,
-                    m_runtime_long_complete_pool_candidates[candidate_idx].changed_position -
-                    radius);
+                    difference_starts[challenger_idx] - radius);
                 window_end := Min(expected_units - 1,
-                    m_runtime_long_complete_pool_candidates[candidate_idx].changed_position +
-                    radius);
+                    difference_ends[challenger_idx] + radius - 1);
                 window_texts[window_count] := join_units(baseline_units,
                     window_start, window_end);
                 Inc(window_count);
@@ -124503,14 +125895,19 @@ var
                 m_runtime_long_complete_pool_candidates[candidate_idx],
                 candidate_features);
             relation_features := Default(TncLongLocalPoolRelationFeatures);
-            relation_features.different_units := 1.0;
-            relation_features.different_runs := 1.0;
-            relation_features.max_different_run := 1.0;
+            relation_features.different_units :=
+                difference_counts[challenger_idx];
+            relation_features.different_runs :=
+                difference_runs[challenger_idx];
+            relation_features.max_different_run :=
+                difference_max_runs[challenger_idx];
             relation_features.same_prefix_units :=
-                m_runtime_long_complete_pool_candidates[candidate_idx].changed_position;
+                difference_starts[challenger_idx];
             relation_features.same_suffix_units := expected_units -
-                m_runtime_long_complete_pool_candidates[candidate_idx].changed_position - 1;
-            relation_features.difference_span_units := 1.0;
+                difference_ends[challenger_idx];
+            relation_features.difference_span_units :=
+                difference_ends[challenger_idx] -
+                difference_starts[challenger_idx];
             for radius := 0 to 3 do
             begin
                 top_lm[radius] := window_scores[
@@ -124678,7 +126075,8 @@ begin
                 source_idx := original_source_indices[idx];
             end;
             add_candidate(original_candidates[idx], source_idx, '',
-                lcps_visible, idx + 1, idx, True, 0, -1, 0, 0, 0);
+                lcps_visible, idx + 1, idx, True, 0, -1, 0, 0, 0,
+                -1, 0, 0, 0);
         end;
 
         for chain_idx := 0 to High(m_runtime_long_chain_candidates) do
@@ -124709,14 +126107,14 @@ begin
                 m_runtime_long_chain_candidates[chain_idx].segment_path,
                 lcps_chain,
                 m_runtime_long_chain_candidates[chain_idx].rank,
-                -1, True, 0, -1, 0, 0, 0);
+                -1, True, 0, -1, 0, 0, 0, -1, 0, 0, 0);
         end;
 
         for idx := 0 to Min(c_existing_probe_limit - 1,
             High(m_candidates)) do
         begin
             add_candidate(m_candidates[idx], idx, '', lcps_existing,
-                idx + 1, -1, True, 0, -1, 0, 0, 0);
+                idx + 1, -1, True, 0, -1, 0, 0, 0, -1, 0, 0, 0);
         end;
         raw_original_count := Length(raw_pool);
         note_pool_phase('seed');
@@ -124729,6 +126127,11 @@ begin
 
         generate_exact_lattice_candidates;
         note_pool_phase('lattice');
+        generate_exact_anchor_candidates(False,
+            c_exact_anchor_candidate_limit);
+        generate_exact_anchor_candidates(True,
+            c_exact_anchor_best_candidate_limit);
+        note_pool_phase('anchor');
         generate_exact_pair_candidates;
         note_pool_phase('pair');
         generate_local_repair_candidates;
@@ -124841,10 +126244,18 @@ begin
                 char_suffix_scores[raw_idx];
             raw_pool[raw_idx].char_lm_context_score :=
                 char_context_scores[raw_idx];
-            signature_totals.TryGetValue(
-                raw_pool[raw_idx].segmentation_signature, idx);
+            { Rank 4+ exact anchors are isolated recall probes. Counting them
+              as independent support changes the learned features of every
+              established candidate that shares their segmentation, even
+              when the probe itself never reaches the visible ranks. }
+            if (raw_pool[raw_idx].anchor_units <= 0) or
+                (raw_pool[raw_idx].anchor_exact_rank < 4) then
+            begin
+                signature_totals.TryGetValue(
+                    raw_pool[raw_idx].segmentation_signature, idx);
                 signature_totals.AddOrSetValue(
-                raw_pool[raw_idx].segmentation_signature, idx + 1);
+                    raw_pool[raw_idx].segmentation_signature, idx + 1);
+            end;
         end;
         note_pool_phase('charlm');
         populate_word_lm_features;
@@ -125152,6 +126563,15 @@ var
     top2_query_parts: TncPinyinParseResult;
     top2_query_syllables: TncLongTop2DifferencePinyinSyllables;
     top2_query_idx: Integer;
+    exact_anchor_pairwise_debug_scores: TArray<Int64>;
+    exact_anchor_pairwise_current_rank_debug: TArray<Integer>;
+    exact_anchor_top_local_word_lm_debug:
+        TArray<TncLongExactAnchorLocalWordLmScores>;
+    exact_anchor_candidate_local_word_lm_debug:
+        TArray<TncLongExactAnchorLocalWordLmScores>;
+    exact_anchor_pairwise_moved_index: Integer;
+    exact_anchor_pairwise_target_rank: Integer;
+    bidirectional_top1_swapped: Boolean;
 
     function find_chain_candidate_index(const candidate_text: string): Integer;
     var
@@ -125350,6 +126770,675 @@ var
         end;
     end;
 
+    procedure apply_exact_anchor_pairwise_ranking;
+    var
+        top_index_local: Integer;
+        candidate_index_local: Integer;
+        candidate_position_local: Integer;
+        best_position_local: Integer;
+        best_score_local: Double;
+        score_local: Double;
+        strict_threshold_local: Double;
+        move_result_local: Integer;
+        relation_local: TncLongExactAnchorRelationFeatures;
+        relations_local: TArray<TncLongExactAnchorRelationFeatures>;
+        relation_valid_local: TArray<Boolean>;
+        window_score_offsets_local: TArray<Integer>;
+        window_texts_local: TArray<string>;
+        window_scores_local: TArray<Integer>;
+        top_scores_local: TArray<Integer>;
+        candidate_scores_local: TArray<Integer>;
+        top_word_scores_local: TncLongExactAnchorLocalWordLmScores;
+        candidate_word_scores_local: TncLongExactAnchorLocalWordLmScores;
+        query_parts_local: TncPinyinParseResult;
+        top_units_local: TArray<string>;
+        candidate_units_local: TArray<string>;
+        window_count_local: Integer;
+        window_start_local: Integer;
+        window_end_local: Integer;
+        radius_local: Integer;
+        unit_index_local: Integer;
+        top_window_local: string;
+        candidate_window_local: string;
+        features_local: TncLongExactAnchorPairwiseFeatures;
+
+        procedure get_local_word_lm_scores(const encoded_path: string;
+            const relation: TncLongExactAnchorRelationFeatures;
+            out scores: TncLongExactAnchorLocalWordLmScores);
+        const
+            c_strong_word_lm_bonus = 360;
+        var
+            parts_local: TArray<string>;
+            part_starts_local: TArray<Integer>;
+            part_units_local: TArray<Integer>;
+            boundary_idx_local: Integer;
+            part_idx_local: Integer;
+            syllable_idx_local: Integer;
+            cursor_local: Integer;
+            left_start_local: Integer;
+            left_end_local: Integer;
+            right_start_local: Integer;
+            right_end_local: Integer;
+            difference_start_local: Integer;
+            difference_end_local: Integer;
+            query_local: string;
+            path_local: string;
+            bigram_local: Integer;
+            trigram_local: Integer;
+            value_local: Integer;
+        begin
+            FillChar(scores, SizeOf(scores), 0);
+            if (m_dictionary = nil) or (Trim(encoded_path) = '') or
+                (Length(query_parts_local) = 0) then
+            begin
+                Exit;
+            end;
+            parts_local := encoded_path.Split([c_segment_path_separator]);
+            if Length(parts_local) < 2 then
+            begin
+                Exit;
+            end;
+            SetLength(part_starts_local, Length(parts_local));
+            SetLength(part_units_local, Length(parts_local));
+            cursor_local := 0;
+            for part_idx_local := 0 to High(parts_local) do
+            begin
+                parts_local[part_idx_local] := Trim(parts_local[part_idx_local]);
+                part_starts_local[part_idx_local] := cursor_local;
+                part_units_local[part_idx_local] :=
+                    get_candidate_text_unit_count(parts_local[part_idx_local]);
+                if part_units_local[part_idx_local] <= 0 then
+                begin
+                    Exit;
+                end;
+                Inc(cursor_local, part_units_local[part_idx_local]);
+            end;
+            if cursor_local <> Length(query_parts_local) then
+            begin
+                Exit;
+            end;
+
+            difference_start_local := relation.same_prefix_units;
+            difference_end_local := Length(query_parts_local) -
+                relation.same_suffix_units;
+            scores[2] := MaxInt;
+            for boundary_idx_local := 1 to High(parts_local) do
+            begin
+                left_start_local := part_starts_local[boundary_idx_local - 1];
+                left_end_local := part_starts_local[boundary_idx_local];
+                right_start_local := left_end_local;
+                right_end_local := right_start_local +
+                    part_units_local[boundary_idx_local];
+                if not (((left_start_local < difference_end_local) and
+                    (left_end_local > difference_start_local)) or
+                    ((right_start_local < difference_end_local) and
+                    (right_end_local > difference_start_local))) then
+                begin
+                    Continue;
+                end;
+
+                query_local := '';
+                for syllable_idx_local := left_start_local to
+                    right_end_local - 1 do
+                begin
+                    query_local := query_local + normalize_pinyin_text(
+                        query_parts_local[syllable_idx_local].text);
+                end;
+                path_local := parts_local[boundary_idx_local - 1] +
+                    c_segment_path_separator + parts_local[boundary_idx_local];
+                bigram_local := m_dictionary.get_lm_transition_bonus(
+                    query_local, path_local);
+                trigram_local := 0;
+                if boundary_idx_local >= 2 then
+                begin
+                    left_start_local := part_starts_local[
+                        boundary_idx_local - 2];
+                    query_local := '';
+                    for syllable_idx_local := left_start_local to
+                        right_end_local - 1 do
+                    begin
+                        query_local := query_local + normalize_pinyin_text(
+                            query_parts_local[syllable_idx_local].text);
+                    end;
+                    path_local := parts_local[boundary_idx_local - 2] +
+                        c_segment_path_separator +
+                        parts_local[boundary_idx_local - 1] +
+                        c_segment_path_separator +
+                        parts_local[boundary_idx_local];
+                    trigram_local := m_dictionary.get_lm_transition_bonus(
+                        query_local, path_local);
+                end;
+                value_local := Max(bigram_local, trigram_local);
+                Inc(scores[0]);
+                Inc(scores[1], value_local);
+                scores[2] := Min(scores[2], value_local);
+                scores[3] := Max(scores[3], value_local);
+                if scores[0] = 1 then
+                begin
+                    scores[4] := value_local;
+                end;
+                scores[5] := value_local;
+                if value_local > 0 then
+                begin
+                    Inc(scores[6]);
+                end;
+                if value_local >= c_strong_word_lm_bonus then
+                begin
+                    Inc(scores[7]);
+                end;
+                if (trigram_local > 0) and
+                    (trigram_local >= bigram_local) then
+                begin
+                    Inc(scores[8]);
+                end;
+            end;
+            if scores[0] = 0 then
+            begin
+                scores[2] := 0;
+            end;
+        end;
+    begin
+        exact_anchor_pairwise_moved_index := -1;
+        exact_anchor_pairwise_target_rank := 0;
+        SetLength(exact_anchor_pairwise_debug_scores, candidate_count);
+        SetLength(exact_anchor_pairwise_current_rank_debug,
+            candidate_count);
+        SetLength(exact_anchor_top_local_word_lm_debug, candidate_count);
+        SetLength(exact_anchor_candidate_local_word_lm_debug,
+            candidate_count);
+        for candidate_position_local := 0 to candidate_count - 1 do
+        begin
+            candidate_index_local :=
+                ordered_indices[candidate_position_local];
+            exact_anchor_pairwise_debug_scores[candidate_index_local] :=
+                Low(Int64);
+            exact_anchor_pairwise_current_rank_debug[
+                candidate_index_local] := candidate_position_local + 1;
+        end;
+        if (not unified_pool_final) or (candidate_count < 2) then
+        begin
+            Exit;
+        end;
+
+        top_index_local := ordered_indices[0];
+        if (not rank_features[top_index_local].complete_match) or
+            rank_features[top_index_local].source_user or
+            rank_features[top_index_local].complete_user or
+            rank_features[top_index_local].latest_query_choice or
+            (rank_features[top_index_local].query_choice_bonus > 0) then
+        begin
+            Exit;
+        end;
+        top_units_local := split_text_units(
+            Trim(legacy_candidates[top_index_local].text));
+        if Length(top_units_local) = 0 then
+        begin
+            Exit;
+        end;
+        SetLength(relations_local, candidate_count);
+        SetLength(relation_valid_local, candidate_count);
+        SetLength(window_score_offsets_local, candidate_count);
+        for candidate_index_local := 0 to candidate_count - 1 do
+        begin
+            window_score_offsets_local[candidate_index_local] := -1;
+        end;
+        SetLength(window_texts_local, (candidate_count - 1) * 8);
+        window_count_local := 0;
+        for candidate_position_local := 1 to candidate_count - 1 do
+        begin
+            candidate_index_local :=
+                ordered_indices[candidate_position_local];
+            if (not rank_features[candidate_index_local].complete_match) or
+                (not rank_features[candidate_index_local].complete_pool_anchor_present) or
+                rank_features[candidate_index_local].source_user or
+                rank_features[candidate_index_local].complete_user or
+                rank_features[candidate_index_local].latest_query_choice or
+                (rank_features[candidate_index_local].query_choice_bonus > 0) then
+            begin
+                Continue;
+            end;
+            candidate_units_local := split_text_units(
+                Trim(legacy_candidates[candidate_index_local].text));
+            if Length(candidate_units_local) <> Length(top_units_local) then
+            begin
+                Continue;
+            end;
+            get_text_relation(
+                legacy_candidates[candidate_index_local].text,
+                legacy_candidates[top_index_local].text,
+                relation_local.different_units,
+                relation_local.different_runs,
+                relation_local.max_different_run,
+                relation_local.same_prefix_units,
+                relation_local.same_suffix_units,
+                relation_local.difference_span_units);
+            if relation_local.different_units <= 0 then
+            begin
+                Continue;
+            end;
+            relations_local[candidate_index_local] := relation_local;
+            relation_valid_local[candidate_index_local] := True;
+            window_score_offsets_local[candidate_index_local] :=
+                window_count_local;
+            for radius_local := 0 to 3 do
+            begin
+                window_start_local := Max(0,
+                    relation_local.same_prefix_units - radius_local);
+                window_end_local := Min(Length(top_units_local),
+                    Length(top_units_local) -
+                    relation_local.same_suffix_units + radius_local);
+                top_window_local := '';
+                candidate_window_local := '';
+                for unit_index_local := window_start_local to
+                    window_end_local - 1 do
+                begin
+                    top_window_local := top_window_local +
+                        top_units_local[unit_index_local];
+                    candidate_window_local := candidate_window_local +
+                        candidate_units_local[unit_index_local];
+                end;
+                window_texts_local[window_count_local] :=
+                    top_window_local;
+                Inc(window_count_local);
+                window_texts_local[window_count_local] :=
+                    candidate_window_local;
+                Inc(window_count_local);
+            end;
+        end;
+        SetLength(window_texts_local, window_count_local);
+        if (window_count_local = 0) or
+            (not get_cached_char_lm_scores(window_texts_local,
+            window_scores_local, clsm_suffix, '')) or
+            (Length(window_scores_local) <> window_count_local) then
+        begin
+            Exit;
+        end;
+
+        SetLength(top_scores_local, 4);
+        SetLength(candidate_scores_local, 4);
+        best_position_local := -1;
+        best_score_local := -1.0E308;
+        for candidate_position_local := 1 to candidate_count - 1 do
+        begin
+            candidate_index_local :=
+                ordered_indices[candidate_position_local];
+            if (not relation_valid_local[candidate_index_local]) or
+                (window_score_offsets_local[candidate_index_local] < 0) then
+            begin
+                Continue;
+            end;
+            for radius_local := 0 to 3 do
+            begin
+                top_scores_local[radius_local] := window_scores_local[
+                    window_score_offsets_local[candidate_index_local] +
+                    radius_local * 2];
+                candidate_scores_local[radius_local] :=
+                    window_scores_local[
+                    window_score_offsets_local[candidate_index_local] +
+                    radius_local * 2 + 1];
+            end;
+            { The independent corpus found no positive exact-anchor examples
+              supported by these sparse local word transitions. Keep the
+              feature slots stable without paying two dictionary queries for
+              every challenger. }
+            FillChar(top_word_scores_local,
+                SizeOf(top_word_scores_local), 0);
+            FillChar(candidate_word_scores_local,
+                SizeOf(candidate_word_scores_local), 0);
+            exact_anchor_top_local_word_lm_debug[candidate_index_local] :=
+                top_word_scores_local;
+            exact_anchor_candidate_local_word_lm_debug[
+                candidate_index_local] := candidate_word_scores_local;
+            build_long_exact_anchor_pairwise_features(
+                rank_features[candidate_index_local],
+                rank_features[top_index_local],
+                candidate_position_local + 1, 1,
+                rank_scores[candidate_index_local],
+                rank_scores[top_index_local],
+                relations_local[candidate_index_local],
+                top_scores_local, candidate_scores_local,
+                top_word_scores_local, candidate_word_scores_local,
+                features_local);
+            score_local := long_exact_anchor_pairwise_score(features_local);
+            exact_anchor_pairwise_debug_scores[candidate_index_local] :=
+                Round(score_local * 1000000.0);
+            if score_local > best_score_local then
+            begin
+                best_score_local := score_local;
+                best_position_local := candidate_position_local;
+            end;
+        end;
+        if best_position_local <= 0 then
+        begin
+            Exit;
+        end;
+        candidate_index_local := ordered_indices[best_position_local];
+        strict_threshold_local := c_long_exact_anchor_pairwise_threshold;
+        if rank_features[candidate_index_local].complete_pool_anchor_exact_rank >= 4 then
+        begin
+            { Lower-ranked exact words expand recall, but the ranker was trained
+              on rank 1-3 anchors. Keep unseen ranks out of Top1 until a model
+              trained with their hard negatives explicitly approves them. }
+            strict_threshold_local := 1.0E308;
+        end;
+        move_result_local := apply_long_exact_anchor_pairwise_index_move(
+            ordered_indices, best_position_local, best_score_local,
+            strict_threshold_local,
+            c_long_exact_anchor_pairwise_second_threshold);
+        if move_result_local >= 0 then
+        begin
+            exact_anchor_pairwise_moved_index := candidate_index_local;
+            exact_anchor_pairwise_target_rank := move_result_local + 1;
+            apply_ranker := True;
+        end;
+    end;
+
+    procedure apply_bidirectional_difference_ranking;
+    const
+        c_reverse_radii: array[0..4] of Integer = (0, 1, 2, 3, 5);
+    var
+        top_index_local: Integer;
+        candidate_index_local: Integer;
+        relation_local: TncLongExactAnchorRelationFeatures;
+        top_units_local: TArray<string>;
+        candidate_units_local: TArray<string>;
+        forward_top_scores_local: TArray<Integer>;
+        forward_candidate_scores_local: TArray<Integer>;
+        reverse_window_texts_local: TArray<string>;
+        reverse_window_scores_local: TArray<Integer>;
+        reverse_top_scores_local: TArray<Integer>;
+        reverse_candidate_scores_local: TArray<Integer>;
+        top_word_scores_local: TncLongExactAnchorLocalWordLmScores;
+        candidate_word_scores_local: TncLongExactAnchorLocalWordLmScores;
+        base_features_local: TncLongExactAnchorPairwiseFeatures;
+        features_local: TncLongBidirectionalDifferenceFeatures;
+        window_start_local: Integer;
+        window_end_local: Integer;
+        radius_index_local: Integer;
+        unit_index_local: Integer;
+        top_window_local: string;
+        candidate_window_local: string;
+        score_local: Double;
+        swap_index_local: Integer;
+    begin
+        if (not unified_pool_final) or (candidate_count < 2) or
+            (m_dictionary = nil) then
+        begin
+            Exit;
+        end;
+        top_index_local := ordered_indices[0];
+        candidate_index_local := ordered_indices[1];
+        if (not rank_features[top_index_local].complete_match) or
+            (not rank_features[candidate_index_local].complete_match) or
+            rank_features[top_index_local].source_user or
+            rank_features[candidate_index_local].source_user or
+            rank_features[top_index_local].complete_user or
+            rank_features[candidate_index_local].complete_user or
+            rank_features[top_index_local].latest_query_choice or
+            rank_features[candidate_index_local].latest_query_choice or
+            (rank_features[top_index_local].query_choice_bonus > 0) or
+            (rank_features[candidate_index_local].query_choice_bonus > 0) or
+            SameText(Trim(legacy_candidates[top_index_local].text),
+            Trim(legacy_candidates[candidate_index_local].text)) then
+        begin
+            Exit;
+        end;
+
+        top_units_local := split_text_units(
+            Trim(legacy_candidates[top_index_local].text));
+        candidate_units_local := split_text_units(
+            Trim(legacy_candidates[candidate_index_local].text));
+        if (Length(top_units_local) = 0) or
+            (Length(top_units_local) <> Length(candidate_units_local)) then
+        begin
+            Exit;
+        end;
+        get_text_relation(legacy_candidates[candidate_index_local].text,
+            legacy_candidates[top_index_local].text,
+            relation_local.different_units,
+            relation_local.different_runs,
+            relation_local.max_different_run,
+            relation_local.same_prefix_units,
+            relation_local.same_suffix_units,
+            relation_local.difference_span_units);
+        if relation_local.different_units <= 0 then
+        begin
+            Exit;
+        end;
+        if not get_top2_cached_span_lm_scores(
+            legacy_candidates[top_index_local].text,
+            legacy_candidates[candidate_index_local].text,
+            forward_top_scores_local, forward_candidate_scores_local) then
+        begin
+            Exit;
+        end;
+
+        SetLength(reverse_window_texts_local,
+            Length(c_reverse_radii) * 2);
+        for radius_index_local := 0 to High(c_reverse_radii) do
+        begin
+            window_start_local := Max(0,
+                relation_local.same_prefix_units -
+                c_reverse_radii[radius_index_local]);
+            window_end_local := Min(Length(top_units_local),
+                Length(top_units_local) - relation_local.same_suffix_units +
+                c_reverse_radii[radius_index_local]);
+            top_window_local := '';
+            candidate_window_local := '';
+            for unit_index_local := window_start_local to
+                window_end_local - 1 do
+            begin
+                { The model was trained on reversed sentences. Prefixing each
+                  unit reverses the local window without splitting surrogate
+                  pairs. }
+                top_window_local := top_units_local[unit_index_local] +
+                    top_window_local;
+                candidate_window_local :=
+                    candidate_units_local[unit_index_local] +
+                    candidate_window_local;
+            end;
+            reverse_window_texts_local[radius_index_local * 2] :=
+                top_window_local;
+            reverse_window_texts_local[radius_index_local * 2 + 1] :=
+                candidate_window_local;
+        end;
+        if (not m_dictionary.get_char_reverse_lm_suffix_scores(
+            reverse_window_texts_local, reverse_window_scores_local)) or
+            (Length(reverse_window_scores_local) <
+            Length(reverse_window_texts_local)) then
+        begin
+            Exit;
+        end;
+
+        SetLength(reverse_top_scores_local, Length(c_reverse_radii));
+        SetLength(reverse_candidate_scores_local, Length(c_reverse_radii));
+        for radius_index_local := 0 to High(c_reverse_radii) do
+        begin
+            reverse_top_scores_local[radius_index_local] :=
+                reverse_window_scores_local[radius_index_local * 2];
+            reverse_candidate_scores_local[radius_index_local] :=
+                reverse_window_scores_local[radius_index_local * 2 + 1];
+        end;
+        FillChar(top_word_scores_local, SizeOf(top_word_scores_local), 0);
+        FillChar(candidate_word_scores_local,
+            SizeOf(candidate_word_scores_local), 0);
+        build_long_exact_anchor_pairwise_features(
+            rank_features[candidate_index_local],
+            rank_features[top_index_local], 2, 1,
+            rank_scores[candidate_index_local], rank_scores[top_index_local],
+            relation_local, forward_top_scores_local,
+            forward_candidate_scores_local, top_word_scores_local,
+            candidate_word_scores_local, base_features_local);
+        build_long_bidirectional_difference_features(base_features_local,
+            reverse_top_scores_local, reverse_candidate_scores_local,
+            features_local);
+        score_local := long_bidirectional_difference_score(features_local);
+        if score_local < c_long_bidirectional_threshold then
+        begin
+            Exit;
+        end;
+
+        swap_index_local := ordered_indices[0];
+        ordered_indices[0] := ordered_indices[1];
+        ordered_indices[1] := swap_index_local;
+        bidirectional_top1_swapped := True;
+        apply_ranker := True;
+    end;
+
+    procedure apply_second_slot_bidirectional_ranking;
+    const
+        c_reverse_radii: array[0..4] of Integer = (0, 1, 2, 3, 5);
+    var
+        baseline_index_local: Integer;
+        candidate_index_local: Integer;
+        relation_local: TncLongExactAnchorRelationFeatures;
+        baseline_units_local: TArray<string>;
+        candidate_units_local: TArray<string>;
+        forward_baseline_scores_local: TArray<Integer>;
+        forward_candidate_scores_local: TArray<Integer>;
+        reverse_window_texts_local: TArray<string>;
+        reverse_window_scores_local: TArray<Integer>;
+        reverse_baseline_scores_local: TArray<Integer>;
+        reverse_candidate_scores_local: TArray<Integer>;
+        baseline_word_scores_local: TncLongExactAnchorLocalWordLmScores;
+        candidate_word_scores_local: TncLongExactAnchorLocalWordLmScores;
+        base_features_local: TncLongExactAnchorPairwiseFeatures;
+        features_local: TncLongSecondSlotBidirectionalFeatures;
+        window_start_local: Integer;
+        window_end_local: Integer;
+        radius_index_local: Integer;
+        unit_index_local: Integer;
+        baseline_window_local: string;
+        candidate_window_local: string;
+        score_local: Double;
+        swap_index_local: Integer;
+    begin
+        { The independent model was trained against the established rank-2
+          candidate. Skip cases where the Top1 model changed that reference. }
+        if bidirectional_top1_swapped or (not unified_pool_final) or
+            (candidate_count < 3) or (m_dictionary = nil) then
+        begin
+            Exit;
+        end;
+        baseline_index_local := ordered_indices[1];
+        candidate_index_local := ordered_indices[2];
+        if (not rank_features[baseline_index_local].complete_match) or
+            (not rank_features[candidate_index_local].complete_match) or
+            rank_features[baseline_index_local].source_user or
+            rank_features[candidate_index_local].source_user or
+            rank_features[baseline_index_local].complete_user or
+            rank_features[candidate_index_local].complete_user or
+            rank_features[baseline_index_local].latest_query_choice or
+            rank_features[candidate_index_local].latest_query_choice or
+            (rank_features[baseline_index_local].query_choice_bonus > 0) or
+            (rank_features[candidate_index_local].query_choice_bonus > 0) or
+            SameText(Trim(legacy_candidates[baseline_index_local].text),
+            Trim(legacy_candidates[candidate_index_local].text)) then
+        begin
+            Exit;
+        end;
+
+        baseline_units_local := split_text_units(
+            Trim(legacy_candidates[baseline_index_local].text));
+        candidate_units_local := split_text_units(
+            Trim(legacy_candidates[candidate_index_local].text));
+        if (Length(baseline_units_local) = 0) or
+            (Length(baseline_units_local) <> Length(candidate_units_local)) then
+        begin
+            Exit;
+        end;
+        get_text_relation(legacy_candidates[candidate_index_local].text,
+            legacy_candidates[baseline_index_local].text,
+            relation_local.different_units,
+            relation_local.different_runs,
+            relation_local.max_different_run,
+            relation_local.same_prefix_units,
+            relation_local.same_suffix_units,
+            relation_local.difference_span_units);
+        if relation_local.different_units <= 0 then
+        begin
+            Exit;
+        end;
+        if not get_top2_cached_span_lm_scores(
+            legacy_candidates[baseline_index_local].text,
+            legacy_candidates[candidate_index_local].text,
+            forward_baseline_scores_local,
+            forward_candidate_scores_local) then
+        begin
+            Exit;
+        end;
+
+        SetLength(reverse_window_texts_local,
+            Length(c_reverse_radii) * 2);
+        for radius_index_local := 0 to High(c_reverse_radii) do
+        begin
+            window_start_local := Max(0,
+                relation_local.same_prefix_units -
+                c_reverse_radii[radius_index_local]);
+            window_end_local := Min(Length(baseline_units_local),
+                Length(baseline_units_local) - relation_local.same_suffix_units +
+                c_reverse_radii[radius_index_local]);
+            baseline_window_local := '';
+            candidate_window_local := '';
+            for unit_index_local := window_start_local to
+                window_end_local - 1 do
+            begin
+                baseline_window_local :=
+                    baseline_units_local[unit_index_local] +
+                    baseline_window_local;
+                candidate_window_local :=
+                    candidate_units_local[unit_index_local] +
+                    candidate_window_local;
+            end;
+            reverse_window_texts_local[radius_index_local * 2] :=
+                baseline_window_local;
+            reverse_window_texts_local[radius_index_local * 2 + 1] :=
+                candidate_window_local;
+        end;
+        if (not m_dictionary.get_char_reverse_lm_suffix_scores(
+            reverse_window_texts_local, reverse_window_scores_local)) or
+            (Length(reverse_window_scores_local) <
+            Length(reverse_window_texts_local)) then
+        begin
+            Exit;
+        end;
+
+        SetLength(reverse_baseline_scores_local, Length(c_reverse_radii));
+        SetLength(reverse_candidate_scores_local, Length(c_reverse_radii));
+        for radius_index_local := 0 to High(c_reverse_radii) do
+        begin
+            reverse_baseline_scores_local[radius_index_local] :=
+                reverse_window_scores_local[radius_index_local * 2];
+            reverse_candidate_scores_local[radius_index_local] :=
+                reverse_window_scores_local[radius_index_local * 2 + 1];
+        end;
+        FillChar(baseline_word_scores_local,
+            SizeOf(baseline_word_scores_local), 0);
+        FillChar(candidate_word_scores_local,
+            SizeOf(candidate_word_scores_local), 0);
+        build_long_exact_anchor_pairwise_features(
+            rank_features[candidate_index_local],
+            rank_features[baseline_index_local], 3, 2,
+            rank_scores[candidate_index_local],
+            rank_scores[baseline_index_local], relation_local,
+            forward_baseline_scores_local, forward_candidate_scores_local,
+            baseline_word_scores_local, candidate_word_scores_local,
+            base_features_local);
+        build_long_second_slot_bidirectional_features(base_features_local,
+            reverse_baseline_scores_local, reverse_candidate_scores_local,
+            features_local);
+        score_local := long_second_slot_bidirectional_score(features_local);
+        if score_local < c_long_second_slot_bidirectional_threshold then
+        begin
+            Exit;
+        end;
+
+        swap_index_local := ordered_indices[1];
+        ordered_indices[1] := ordered_indices[2];
+        ordered_indices[2] := swap_index_local;
+        apply_ranker := True;
+    end;
+
     procedure copy_features_to_debug(const features:
         TncLongFinalRankerFeatures; var debug_item:
         TncLongFinalCandidateDebug);
@@ -125421,6 +127510,22 @@ var
             features.complete_pool_substitutions;
         debug_item.complete_pool_changed_position :=
             features.complete_pool_changed_position;
+        debug_item.complete_pool_anchor_present :=
+            features.complete_pool_anchor_present;
+        debug_item.complete_pool_anchor_start :=
+            features.complete_pool_anchor_start;
+        debug_item.complete_pool_anchor_units :=
+            features.complete_pool_anchor_units;
+        debug_item.complete_pool_anchor_exact_rank :=
+            features.complete_pool_anchor_exact_rank;
+        debug_item.complete_pool_anchor_source_weight :=
+            features.complete_pool_anchor_source_weight;
+        debug_item.complete_pool_anchor_replacement_weight :=
+            features.complete_pool_anchor_replacement_weight;
+        debug_item.complete_pool_anchor_top_weight :=
+            features.complete_pool_anchor_top_weight;
+        debug_item.complete_pool_anchor_weight_gain :=
+            features.complete_pool_anchor_weight_gain;
         debug_item.complete_pool_pair_evidence :=
             features.complete_pool_pair_evidence;
         debug_item.complete_pool_proper_name_confidence :=
@@ -125453,6 +127558,7 @@ var
 
 begin
     SetLength(m_debug_long_final_candidates, 0);
+    bidirectional_top1_swapped := False;
     if unified_pool_final then
     begin
         profile := c_long_complete_pool_ranker_default_profile;
@@ -125790,6 +127896,23 @@ begin
                     m_runtime_long_complete_pool_candidates[pool_idx].substitutions;
                 complete_pool_changed_position :=
                     m_runtime_long_complete_pool_candidates[pool_idx].changed_position;
+                complete_pool_anchor_present :=
+                    m_runtime_long_complete_pool_candidates[pool_idx].anchor_units > 0;
+                complete_pool_anchor_start :=
+                    m_runtime_long_complete_pool_candidates[pool_idx].anchor_start;
+                complete_pool_anchor_units :=
+                    m_runtime_long_complete_pool_candidates[pool_idx].anchor_units;
+                complete_pool_anchor_exact_rank :=
+                    m_runtime_long_complete_pool_candidates[pool_idx].anchor_exact_rank;
+                complete_pool_anchor_source_weight :=
+                    m_runtime_long_complete_pool_candidates[pool_idx].source_char_weight;
+                complete_pool_anchor_replacement_weight :=
+                    m_runtime_long_complete_pool_candidates[pool_idx].replacement_char_weight;
+                complete_pool_anchor_top_weight :=
+                    m_runtime_long_complete_pool_candidates[pool_idx].anchor_top_weight;
+                complete_pool_anchor_weight_gain :=
+                    m_runtime_long_complete_pool_candidates[pool_idx].replacement_char_weight -
+                    m_runtime_long_complete_pool_candidates[pool_idx].source_char_weight;
                 complete_pool_pair_evidence :=
                     m_runtime_long_complete_pool_candidates[pool_idx].pair_evidence;
                 complete_pool_proper_name_confidence :=
@@ -126326,6 +128449,33 @@ begin
         end;
     end;
 
+    { Rank 4+ exact anchors are a recall channel, not a trained Top1
+      channel. The unified pool model predates these candidates, so keep the
+      first established/rank 1-3 complete candidate ahead of them. }
+    if unified_pool_final and (candidate_count >= 2) then
+    begin
+        top_idx := ordered_indices[0];
+        if rank_features[top_idx].complete_pool_anchor_present and
+            (rank_features[top_idx].complete_pool_anchor_exact_rank >= 4) then
+        begin
+            for candidate_idx := 1 to candidate_count - 1 do
+            begin
+                current_idx := ordered_indices[candidate_idx];
+                if (not rank_features[current_idx].complete_pool_anchor_present) or
+                    (rank_features[current_idx].complete_pool_anchor_exact_rank < 4) then
+                begin
+                    for top_idx := candidate_idx downto 1 do
+                    begin
+                        ordered_indices[top_idx] := ordered_indices[top_idx - 1];
+                    end;
+                    ordered_indices[0] := current_idx;
+                    apply_ranker := True;
+                    Break;
+                end;
+            end;
+        end;
+    end;
+
     top2_pairwise_score := 0;
     top2_pairwise_candidate_index := -1;
     top2_pairwise_candidate_position := -1;
@@ -126433,6 +128583,19 @@ begin
         end;
     end;
 
+    { Recover exact-word anchored paths only after the established complete
+      pool and Top2 policies have settled. The model may move one existing
+      complete candidate to rank 1 or 2; it never changes candidate recall. }
+    apply_exact_anchor_pairwise_ranking;
+
+    { The final pairwise stage only compares the two already selected complete
+      long candidates. It cannot change Top2 recall or short-word ordering. }
+    apply_bidirectional_difference_ranking;
+
+    { Recover a high-confidence rank-3 complete path into the second slot.
+      The model cannot change Top1 and is isolated from short-word ranking. }
+    apply_second_slot_bidirectional_ranking;
+
     if apply_ranker then
     begin
         for candidate_idx := 0 to candidate_count - 1 do
@@ -126489,6 +128652,28 @@ begin
                 top2_pairwise_eligible;
             m_debug_long_final_candidates[candidate_idx].top2_pairwise_swapped :=
                 top2_pairwise_swapped;
+        end;
+        m_debug_long_final_candidates[candidate_idx].exact_anchor_pairwise_score :=
+            exact_anchor_pairwise_debug_scores[candidate_idx];
+        m_debug_long_final_candidates[candidate_idx].exact_anchor_pairwise_eligible :=
+            exact_anchor_pairwise_debug_scores[candidate_idx] <> Low(Int64);
+        m_debug_long_final_candidates[candidate_idx].exact_anchor_pairwise_moved :=
+            candidate_idx = exact_anchor_pairwise_moved_index;
+        if candidate_idx = exact_anchor_pairwise_moved_index then
+        begin
+            m_debug_long_final_candidates[candidate_idx].exact_anchor_pairwise_target_rank :=
+                exact_anchor_pairwise_target_rank;
+        end;
+        for local_radius := 0 to 8 do
+        begin
+            m_debug_long_final_candidates[candidate_idx].
+                exact_anchor_top_local_word_lm[local_radius] :=
+                exact_anchor_top_local_word_lm_debug[
+                candidate_idx][local_radius];
+            m_debug_long_final_candidates[candidate_idx].
+                exact_anchor_candidate_local_word_lm[local_radius] :=
+                exact_anchor_candidate_local_word_lm_debug[
+                candidate_idx][local_radius];
         end;
         m_debug_long_final_candidates[candidate_idx].local_difference_score :=
             local_difference_debug_scores[candidate_idx];

@@ -63,6 +63,14 @@ type
         complete_pool_original: Boolean;
         complete_pool_substitutions: Integer;
         complete_pool_changed_position: Integer;
+        complete_pool_anchor_present: Boolean;
+        complete_pool_anchor_start: Integer;
+        complete_pool_anchor_units: Integer;
+        complete_pool_anchor_exact_rank: Integer;
+        complete_pool_anchor_source_weight: Integer;
+        complete_pool_anchor_replacement_weight: Integer;
+        complete_pool_anchor_top_weight: Integer;
+        complete_pool_anchor_weight_gain: Integer;
         complete_pool_pair_evidence: Integer;
         complete_pool_proper_name_confidence: Integer;
         complete_pool_signature_support: Integer;

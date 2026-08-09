@@ -69,6 +69,19 @@ type
         m_stmt_char_lm_entries_128: Psqlite3_stmt;
         m_stmt_char_lm_entries_256: Psqlite3_stmt;
         m_stmt_char_lm_entries_400: Psqlite3_stmt;
+        m_char_reverse_lm_entry_cache: TDictionary<string, TncCharLmCacheEntry>;
+        m_char_reverse_lm_cache_order: TQueue<string>;
+        m_char_reverse_lm_text_score_cache: TDictionary<string, Integer>;
+        m_char_reverse_lm_text_score_cache_order: TQueue<string>;
+        m_char_reverse_lm_available: Integer;
+        m_stmt_char_reverse_lm_entries_1: Psqlite3_stmt;
+        m_stmt_char_reverse_lm_entries_8: Psqlite3_stmt;
+        m_stmt_char_reverse_lm_entries_16: Psqlite3_stmt;
+        m_stmt_char_reverse_lm_entries_32: Psqlite3_stmt;
+        m_stmt_char_reverse_lm_entries_64: Psqlite3_stmt;
+        m_stmt_char_reverse_lm_entries_128: Psqlite3_stmt;
+        m_stmt_char_reverse_lm_entries_256: Psqlite3_stmt;
+        m_stmt_char_reverse_lm_entries_400: Psqlite3_stmt;
         m_compound_tail_support_cache: TDictionary<string, Integer>;
         m_stmt_context_bonus: Psqlite3_stmt;
         m_stmt_context_trigram_bonus: Psqlite3_stmt;
@@ -190,17 +203,21 @@ type
         function base_query_path_pinyin_may_exist(
             const query_key: string): Boolean;
         procedure load_lm_transition_bonus_cache;
-        function ensure_char_lm_available: Boolean;
+        function ensure_char_lm_available(
+            const reverse_model: Boolean = False): Boolean;
         procedure cache_char_lm_entry(const ngram: string;
-            const entry: TncCharLmCacheEntry);
+            const entry: TncCharLmCacheEntry;
+            const reverse_model: Boolean = False);
         procedure cache_char_lm_text_score(const cache_key: string;
-            const score: Integer);
+            const score: Integer; const reverse_model: Boolean = False);
         function load_char_lm_entries(const ngrams: TArray<string>;
-            const entries: TDictionary<string, TncCharLmCacheEntry>): Boolean;
+            const entries: TDictionary<string, TncCharLmCacheEntry>;
+            const reverse_model: Boolean = False): Boolean;
         function get_char_lm_text_scores_internal(const texts: TArray<string>;
             out scores: TArray<Integer>; const include_begin_marker: Boolean;
             const left_context: string; const include_end_marker: Boolean;
-            const cache_only: Boolean = False): Boolean;
+            const cache_only: Boolean = False;
+            const reverse_model: Boolean = False): Boolean;
         procedure purge_user_entry_internal(const pinyin: string; const text: string;
             const apply_penalty: Boolean; const purge_all_by_text: Boolean);
         procedure prune_user_entries_existing_in_base;
@@ -289,6 +306,8 @@ type
         function get_char_lm_text_scores(const texts: TArray<string>;
             out scores: TArray<Integer>): Boolean; override;
         function get_char_lm_suffix_scores(const texts: TArray<string>;
+            out scores: TArray<Integer>): Boolean; override;
+        function get_char_reverse_lm_suffix_scores(const texts: TArray<string>;
             out scores: TArray<Integer>): Boolean; override;
         function get_char_lm_cached_span_scores(const texts: TArray<string>;
             out scores: TArray<Integer>): Boolean; override;
@@ -496,6 +515,13 @@ const
         sLineBreak +
         sLineBreak +
         'CREATE TABLE IF NOT EXISTS dict_base_char_lm (' + sLineBreak +
+        '    ngram TEXT NOT NULL PRIMARY KEY,' + sLineBreak +
+        '    score INTEGER NOT NULL DEFAULT 0,' + sLineBreak +
+        '    backoff INTEGER NOT NULL DEFAULT 0' + sLineBreak +
+        ') WITHOUT ROWID;' +
+        sLineBreak +
+        sLineBreak +
+        'CREATE TABLE IF NOT EXISTS dict_base_char_reverse_lm (' + sLineBreak +
         '    ngram TEXT NOT NULL PRIMARY KEY,' + sLineBreak +
         '    score INTEGER NOT NULL DEFAULT 0,' + sLineBreak +
         '    backoff INTEGER NOT NULL DEFAULT 0' + sLineBreak +
@@ -2270,6 +2296,21 @@ begin
     m_stmt_char_lm_entries_128 := nil;
     m_stmt_char_lm_entries_256 := nil;
     m_stmt_char_lm_entries_400 := nil;
+    m_char_reverse_lm_entry_cache :=
+        TDictionary<string, TncCharLmCacheEntry>.Create;
+    m_char_reverse_lm_cache_order := TQueue<string>.Create;
+    m_char_reverse_lm_text_score_cache :=
+        TDictionary<string, Integer>.Create;
+    m_char_reverse_lm_text_score_cache_order := TQueue<string>.Create;
+    m_char_reverse_lm_available := -1;
+    m_stmt_char_reverse_lm_entries_1 := nil;
+    m_stmt_char_reverse_lm_entries_8 := nil;
+    m_stmt_char_reverse_lm_entries_16 := nil;
+    m_stmt_char_reverse_lm_entries_32 := nil;
+    m_stmt_char_reverse_lm_entries_64 := nil;
+    m_stmt_char_reverse_lm_entries_128 := nil;
+    m_stmt_char_reverse_lm_entries_256 := nil;
+    m_stmt_char_reverse_lm_entries_400 := nil;
     m_compound_tail_support_cache := TDictionary<string, Integer>.Create;
     m_query_path_penalty_cache := TDictionary<string, Integer>.Create;
     m_candidate_penalty_cache := TDictionary<string, Integer>.Create;
@@ -2423,6 +2464,26 @@ begin
     begin
         m_char_lm_text_score_cache_order.Free;
         m_char_lm_text_score_cache_order := nil;
+    end;
+    if m_char_reverse_lm_entry_cache <> nil then
+    begin
+        m_char_reverse_lm_entry_cache.Free;
+        m_char_reverse_lm_entry_cache := nil;
+    end;
+    if m_char_reverse_lm_cache_order <> nil then
+    begin
+        m_char_reverse_lm_cache_order.Free;
+        m_char_reverse_lm_cache_order := nil;
+    end;
+    if m_char_reverse_lm_text_score_cache <> nil then
+    begin
+        m_char_reverse_lm_text_score_cache.Free;
+        m_char_reverse_lm_text_score_cache := nil;
+    end;
+    if m_char_reverse_lm_text_score_cache_order <> nil then
+    begin
+        m_char_reverse_lm_text_score_cache_order.Free;
+        m_char_reverse_lm_text_score_cache_order := nil;
     end;
     if m_compound_tail_support_cache <> nil then
     begin
@@ -3722,6 +3783,17 @@ begin
 
     if not connection.exec(
         'CREATE TABLE IF NOT EXISTS dict_base_char_lm (' +
+        'ngram TEXT NOT NULL PRIMARY KEY,' +
+        'score INTEGER NOT NULL DEFAULT 0,' +
+        'backoff INTEGER NOT NULL DEFAULT 0' +
+        ') WITHOUT ROWID;') then
+    begin
+        Result := False;
+        Exit;
+    end;
+
+    if not connection.exec(
+        'CREATE TABLE IF NOT EXISTS dict_base_char_reverse_lm (' +
         'ngram TEXT NOT NULL PRIMARY KEY,' +
         'score INTEGER NOT NULL DEFAULT 0,' +
         'backoff INTEGER NOT NULL DEFAULT 0' +
@@ -7412,6 +7484,46 @@ begin
             m_base_connection.finalize(m_stmt_char_lm_entries_400);
             m_stmt_char_lm_entries_400 := nil;
         end;
+        if m_stmt_char_reverse_lm_entries_1 <> nil then
+        begin
+            m_base_connection.finalize(m_stmt_char_reverse_lm_entries_1);
+            m_stmt_char_reverse_lm_entries_1 := nil;
+        end;
+        if m_stmt_char_reverse_lm_entries_8 <> nil then
+        begin
+            m_base_connection.finalize(m_stmt_char_reverse_lm_entries_8);
+            m_stmt_char_reverse_lm_entries_8 := nil;
+        end;
+        if m_stmt_char_reverse_lm_entries_16 <> nil then
+        begin
+            m_base_connection.finalize(m_stmt_char_reverse_lm_entries_16);
+            m_stmt_char_reverse_lm_entries_16 := nil;
+        end;
+        if m_stmt_char_reverse_lm_entries_32 <> nil then
+        begin
+            m_base_connection.finalize(m_stmt_char_reverse_lm_entries_32);
+            m_stmt_char_reverse_lm_entries_32 := nil;
+        end;
+        if m_stmt_char_reverse_lm_entries_64 <> nil then
+        begin
+            m_base_connection.finalize(m_stmt_char_reverse_lm_entries_64);
+            m_stmt_char_reverse_lm_entries_64 := nil;
+        end;
+        if m_stmt_char_reverse_lm_entries_128 <> nil then
+        begin
+            m_base_connection.finalize(m_stmt_char_reverse_lm_entries_128);
+            m_stmt_char_reverse_lm_entries_128 := nil;
+        end;
+        if m_stmt_char_reverse_lm_entries_256 <> nil then
+        begin
+            m_base_connection.finalize(m_stmt_char_reverse_lm_entries_256);
+            m_stmt_char_reverse_lm_entries_256 := nil;
+        end;
+        if m_stmt_char_reverse_lm_entries_400 <> nil then
+        begin
+            m_base_connection.finalize(m_stmt_char_reverse_lm_entries_400);
+            m_stmt_char_reverse_lm_entries_400 := nil;
+        end;
     end;
     if m_base_connection <> nil then
     begin
@@ -7499,6 +7611,23 @@ begin
         m_char_lm_text_score_cache_order.Clear;
     end;
     m_char_lm_available := -1;
+    if m_char_reverse_lm_entry_cache <> nil then
+    begin
+        m_char_reverse_lm_entry_cache.Clear;
+    end;
+    if m_char_reverse_lm_cache_order <> nil then
+    begin
+        m_char_reverse_lm_cache_order.Clear;
+    end;
+    if m_char_reverse_lm_text_score_cache <> nil then
+    begin
+        m_char_reverse_lm_text_score_cache.Clear;
+    end;
+    if m_char_reverse_lm_text_score_cache_order <> nil then
+    begin
+        m_char_reverse_lm_text_score_cache_order.Clear;
+    end;
+    m_char_reverse_lm_available := -1;
     if m_compound_tail_support_cache <> nil then
     begin
         m_compound_tail_support_cache.Clear;
@@ -12779,18 +12908,31 @@ begin
     Result := Length(results) > 0;
 end;
 
-function TncSqliteDictionary.ensure_char_lm_available: Boolean;
-const
-    query_sql = 'SELECT 1 FROM dict_base_char_lm LIMIT 1';
+function TncSqliteDictionary.ensure_char_lm_available(
+    const reverse_model: Boolean): Boolean;
 var
     stmt: Psqlite3_stmt;
+    query_sql: string;
 begin
-    if m_char_lm_available >= 0 then
+    if reverse_model and (m_char_reverse_lm_available >= 0) then
+    begin
+        Exit(m_char_reverse_lm_available > 0);
+    end;
+    if (not reverse_model) and (m_char_lm_available >= 0) then
     begin
         Exit(m_char_lm_available > 0);
     end;
 
-    m_char_lm_available := 0;
+    if reverse_model then
+    begin
+        m_char_reverse_lm_available := 0;
+        query_sql := 'SELECT 1 FROM dict_base_char_reverse_lm LIMIT 1';
+    end
+    else
+    begin
+        m_char_lm_available := 0;
+        query_sql := 'SELECT 1 FROM dict_base_char_lm LIMIT 1';
+    end;
     if (not ensure_open) or (not m_base_ready) or
         (m_base_connection = nil) then
     begin
@@ -12805,7 +12947,14 @@ begin
         end;
         if m_base_connection.step(stmt) = SQLITE_ROW then
         begin
-            m_char_lm_available := 1;
+            if reverse_model then
+            begin
+                m_char_reverse_lm_available := 1;
+            end
+            else
+            begin
+                m_char_lm_available := 1;
+            end;
         end;
     finally
         if stmt <> nil then
@@ -12813,74 +12962,104 @@ begin
             m_base_connection.finalize(stmt);
         end;
     end;
-    Result := m_char_lm_available > 0;
+    if reverse_model then
+    begin
+        Result := m_char_reverse_lm_available > 0;
+    end
+    else
+    begin
+        Result := m_char_lm_available > 0;
+    end;
 end;
 
 procedure TncSqliteDictionary.cache_char_lm_entry(const ngram: string;
-    const entry: TncCharLmCacheEntry);
+    const entry: TncCharLmCacheEntry; const reverse_model: Boolean);
 const
     c_cache_max_entries = 65536;
 var
     evicted_ngram: string;
+    entry_cache: TDictionary<string, TncCharLmCacheEntry>;
+    cache_order: TQueue<string>;
 begin
-    if (ngram = '') or (m_char_lm_entry_cache = nil) or
-        (m_char_lm_cache_order = nil) then
+    if reverse_model then
+    begin
+        entry_cache := m_char_reverse_lm_entry_cache;
+        cache_order := m_char_reverse_lm_cache_order;
+    end
+    else
+    begin
+        entry_cache := m_char_lm_entry_cache;
+        cache_order := m_char_lm_cache_order;
+    end;
+    if (ngram = '') or (entry_cache = nil) or (cache_order = nil) then
     begin
         Exit;
     end;
 
-    if m_char_lm_entry_cache.ContainsKey(ngram) then
+    if entry_cache.ContainsKey(ngram) then
     begin
-        m_char_lm_entry_cache.AddOrSetValue(ngram, entry);
+        entry_cache.AddOrSetValue(ngram, entry);
         Exit;
     end;
 
-    while m_char_lm_entry_cache.Count >= c_cache_max_entries do
+    while entry_cache.Count >= c_cache_max_entries do
     begin
-        if m_char_lm_cache_order.Count <= 0 then
+        if cache_order.Count <= 0 then
         begin
             Exit;
         end;
-        evicted_ngram := m_char_lm_cache_order.Dequeue;
-        m_char_lm_entry_cache.Remove(evicted_ngram);
+        evicted_ngram := cache_order.Dequeue;
+        entry_cache.Remove(evicted_ngram);
     end;
-    m_char_lm_entry_cache.Add(ngram, entry);
-    m_char_lm_cache_order.Enqueue(ngram);
+    entry_cache.Add(ngram, entry);
+    cache_order.Enqueue(ngram);
 end;
 
 procedure TncSqliteDictionary.cache_char_lm_text_score(const cache_key: string;
-    const score: Integer);
+    const score: Integer; const reverse_model: Boolean);
 const
     c_cache_max_entries = 16384;
 var
     evicted_key: string;
+    score_cache: TDictionary<string, Integer>;
+    cache_order: TQueue<string>;
 begin
-    if (cache_key = '') or (m_char_lm_text_score_cache = nil) or
-        (m_char_lm_text_score_cache_order = nil) then
+    if reverse_model then
+    begin
+        score_cache := m_char_reverse_lm_text_score_cache;
+        cache_order := m_char_reverse_lm_text_score_cache_order;
+    end
+    else
+    begin
+        score_cache := m_char_lm_text_score_cache;
+        cache_order := m_char_lm_text_score_cache_order;
+    end;
+    if (cache_key = '') or (score_cache = nil) or (cache_order = nil) then
     begin
         Exit;
     end;
-    if m_char_lm_text_score_cache.ContainsKey(cache_key) then
+    if score_cache.ContainsKey(cache_key) then
     begin
-        m_char_lm_text_score_cache.AddOrSetValue(cache_key, score);
+        score_cache.AddOrSetValue(cache_key, score);
         Exit;
     end;
-    while m_char_lm_text_score_cache.Count >= c_cache_max_entries do
+    while score_cache.Count >= c_cache_max_entries do
     begin
-        if m_char_lm_text_score_cache_order.Count <= 0 then
+        if cache_order.Count <= 0 then
         begin
             Exit;
         end;
-        evicted_key := m_char_lm_text_score_cache_order.Dequeue;
-        m_char_lm_text_score_cache.Remove(evicted_key);
+        evicted_key := cache_order.Dequeue;
+        score_cache.Remove(evicted_key);
     end;
-    m_char_lm_text_score_cache.Add(cache_key, score);
-    m_char_lm_text_score_cache_order.Enqueue(cache_key);
+    score_cache.Add(cache_key, score);
+    cache_order.Enqueue(cache_key);
 end;
 
 function TncSqliteDictionary.load_char_lm_entries(
     const ngrams: TArray<string>;
-    const entries: TDictionary<string, TncCharLmCacheEntry>): Boolean;
+    const entries: TDictionary<string, TncCharLmCacheEntry>;
+    const reverse_model: Boolean): Boolean;
 const
     c_query_chunk_size = 400;
 var
@@ -12893,6 +13072,7 @@ var
     chunk_count: Integer;
     chunk_idx: Integer;
     step_result: Integer;
+    entry_cache: TDictionary<string, TncCharLmCacheEntry>;
 
     function get_query_capacity(const wanted_count: Integer): Integer;
     begin
@@ -12937,15 +13117,31 @@ var
         local_idx: Integer;
     begin
         cached_stmt := nil;
-        case capacity of
-            1: cached_stmt := m_stmt_char_lm_entries_1;
-            8: cached_stmt := m_stmt_char_lm_entries_8;
-            16: cached_stmt := m_stmt_char_lm_entries_16;
-            32: cached_stmt := m_stmt_char_lm_entries_32;
-            64: cached_stmt := m_stmt_char_lm_entries_64;
-            128: cached_stmt := m_stmt_char_lm_entries_128;
-            256: cached_stmt := m_stmt_char_lm_entries_256;
-            400: cached_stmt := m_stmt_char_lm_entries_400;
+        if reverse_model then
+        begin
+            case capacity of
+                1: cached_stmt := m_stmt_char_reverse_lm_entries_1;
+                8: cached_stmt := m_stmt_char_reverse_lm_entries_8;
+                16: cached_stmt := m_stmt_char_reverse_lm_entries_16;
+                32: cached_stmt := m_stmt_char_reverse_lm_entries_32;
+                64: cached_stmt := m_stmt_char_reverse_lm_entries_64;
+                128: cached_stmt := m_stmt_char_reverse_lm_entries_128;
+                256: cached_stmt := m_stmt_char_reverse_lm_entries_256;
+                400: cached_stmt := m_stmt_char_reverse_lm_entries_400;
+            end;
+        end
+        else
+        begin
+            case capacity of
+                1: cached_stmt := m_stmt_char_lm_entries_1;
+                8: cached_stmt := m_stmt_char_lm_entries_8;
+                16: cached_stmt := m_stmt_char_lm_entries_16;
+                32: cached_stmt := m_stmt_char_lm_entries_32;
+                64: cached_stmt := m_stmt_char_lm_entries_64;
+                128: cached_stmt := m_stmt_char_lm_entries_128;
+                256: cached_stmt := m_stmt_char_lm_entries_256;
+                400: cached_stmt := m_stmt_char_lm_entries_400;
+            end;
         end;
         if cached_stmt <> nil then
         begin
@@ -12954,8 +13150,16 @@ var
 
         local_builder := TStringBuilder.Create;
         try
-            local_builder.Append(
-                'SELECT ngram, score, backoff FROM dict_base_char_lm WHERE ngram IN (');
+            if reverse_model then
+            begin
+                local_builder.Append(
+                    'SELECT ngram, score, backoff FROM dict_base_char_reverse_lm WHERE ngram IN (');
+            end
+            else
+            begin
+                local_builder.Append(
+                    'SELECT ngram, score, backoff FROM dict_base_char_lm WHERE ngram IN (');
+            end;
             for local_idx := 1 to capacity do
             begin
                 if local_idx > 1 then
@@ -12976,15 +13180,31 @@ var
             local_builder.Free;
         end;
 
-        case capacity of
-            1: m_stmt_char_lm_entries_1 := cached_stmt;
-            8: m_stmt_char_lm_entries_8 := cached_stmt;
-            16: m_stmt_char_lm_entries_16 := cached_stmt;
-            32: m_stmt_char_lm_entries_32 := cached_stmt;
-            64: m_stmt_char_lm_entries_64 := cached_stmt;
-            128: m_stmt_char_lm_entries_128 := cached_stmt;
-            256: m_stmt_char_lm_entries_256 := cached_stmt;
-            400: m_stmt_char_lm_entries_400 := cached_stmt;
+        if reverse_model then
+        begin
+            case capacity of
+                1: m_stmt_char_reverse_lm_entries_1 := cached_stmt;
+                8: m_stmt_char_reverse_lm_entries_8 := cached_stmt;
+                16: m_stmt_char_reverse_lm_entries_16 := cached_stmt;
+                32: m_stmt_char_reverse_lm_entries_32 := cached_stmt;
+                64: m_stmt_char_reverse_lm_entries_64 := cached_stmt;
+                128: m_stmt_char_reverse_lm_entries_128 := cached_stmt;
+                256: m_stmt_char_reverse_lm_entries_256 := cached_stmt;
+                400: m_stmt_char_reverse_lm_entries_400 := cached_stmt;
+            end;
+        end
+        else
+        begin
+            case capacity of
+                1: m_stmt_char_lm_entries_1 := cached_stmt;
+                8: m_stmt_char_lm_entries_8 := cached_stmt;
+                16: m_stmt_char_lm_entries_16 := cached_stmt;
+                32: m_stmt_char_lm_entries_32 := cached_stmt;
+                64: m_stmt_char_lm_entries_64 := cached_stmt;
+                128: m_stmt_char_lm_entries_128 := cached_stmt;
+                256: m_stmt_char_lm_entries_256 := cached_stmt;
+                400: m_stmt_char_lm_entries_400 := cached_stmt;
+            end;
         end;
         Result := True;
     end;
@@ -12992,7 +13212,15 @@ var
     query_capacity: Integer;
 begin
     Result := False;
-    if (entries = nil) or (not ensure_char_lm_available) then
+    if reverse_model then
+    begin
+        entry_cache := m_char_reverse_lm_entry_cache;
+    end
+    else
+    begin
+        entry_cache := m_char_lm_entry_cache;
+    end;
+    if (entries = nil) or (not ensure_char_lm_available(reverse_model)) then
     begin
         Exit;
     end;
@@ -13005,8 +13233,8 @@ begin
             begin
                 Continue;
             end;
-            if (m_char_lm_entry_cache <> nil) and
-                m_char_lm_entry_cache.TryGetValue(ngram, entry) then
+            if (entry_cache <> nil) and
+                entry_cache.TryGetValue(ngram, entry) then
             begin
                 entries.AddOrSetValue(ngram, entry);
             end
@@ -13058,7 +13286,7 @@ begin
                     entry.score := m_base_connection.column_int(stmt, 1);
                     entry.backoff := m_base_connection.column_int(stmt, 2);
                     entries.AddOrSetValue(row_ngram, entry);
-                    cache_char_lm_entry(row_ngram, entry);
+                    cache_char_lm_entry(row_ngram, entry, reverse_model);
                     step_result := m_base_connection.step(stmt);
                 end;
                 if step_result <> SQLITE_DONE then
@@ -13082,7 +13310,7 @@ begin
                 if not entries.ContainsKey(ngram) then
                 begin
                     entries.Add(ngram, entry);
-                    cache_char_lm_entry(ngram, entry);
+                    cache_char_lm_entry(ngram, entry, reverse_model);
                 end;
             end;
             Inc(chunk_start, chunk_count);
@@ -13096,7 +13324,8 @@ end;
 function TncSqliteDictionary.get_char_lm_text_scores_internal(
     const texts: TArray<string>; out scores: TArray<Integer>;
     const include_begin_marker: Boolean; const left_context: string;
-    const include_end_marker: Boolean; const cache_only: Boolean): Boolean;
+    const include_end_marker: Boolean; const cache_only: Boolean;
+    const reverse_model: Boolean): Boolean;
 const
     c_begin_marker = #2;
     c_end_marker = #3;
@@ -13138,6 +13367,8 @@ var
     all_scores_cached: Boolean;
     wanted_key: string;
     cached_entry: TncCharLmCacheEntry;
+    entry_cache: TDictionary<string, TncCharLmCacheEntry>;
+    score_cache: TDictionary<string, Integer>;
 
     function try_get_loaded_entry(const ngram: string;
         out score: Integer; out backoff: Integer): Boolean;
@@ -13161,6 +13392,16 @@ begin
     if Length(texts) <= 0 then
     begin
         Exit;
+    end;
+    if reverse_model then
+    begin
+        entry_cache := m_char_reverse_lm_entry_cache;
+        score_cache := m_char_reverse_lm_text_score_cache;
+    end
+    else
+    begin
+        entry_cache := m_char_lm_entry_cache;
+        score_cache := m_char_lm_text_score_cache;
     end;
     SetLength(context_prefix_units, 0);
     normalized_context := '';
@@ -13198,8 +13439,8 @@ begin
     begin
         normalized_texts[text_idx] := Trim(texts[text_idx]);
         cache_key := cache_prefix + normalized_texts[text_idx];
-        if (m_char_lm_text_score_cache <> nil) and
-            m_char_lm_text_score_cache.TryGetValue(cache_key,
+        if (score_cache <> nil) and
+            score_cache.TryGetValue(cache_key,
                 scores[text_idx]) then
         begin
             score_cached[text_idx] := True;
@@ -13320,13 +13561,13 @@ begin
             wanted_keys := wanted.Keys.ToArray;
             if cache_only then
             begin
-                if m_char_lm_entry_cache = nil then
+                if entry_cache = nil then
                 begin
                     Exit;
                 end;
                 for wanted_key in wanted_keys do
                 begin
-                    if not m_char_lm_entry_cache.TryGetValue(wanted_key,
+                    if not entry_cache.TryGetValue(wanted_key,
                         cached_entry) then
                     begin
                         Exit;
@@ -13335,7 +13576,8 @@ begin
                 end;
             end
             else if (Length(wanted_keys) > 0) and
-                (not load_char_lm_entries(wanted_keys, loaded_entries)) then
+                (not load_char_lm_entries(wanted_keys, loaded_entries,
+                reverse_model)) then
             begin
                 Exit;
             end;
@@ -13466,7 +13708,7 @@ begin
         if not cache_only then
         begin
             cache_char_lm_text_score(cache_prefix + normalized_text,
-                scores[text_idx]);
+                scores[text_idx], reverse_model);
         end;
         end;
         Result := True;
@@ -13500,6 +13742,13 @@ function TncSqliteDictionary.get_char_lm_continuation_scores(
 begin
     Result := get_char_lm_text_scores_internal(texts, scores, False,
         left_context, False);
+end;
+
+function TncSqliteDictionary.get_char_reverse_lm_suffix_scores(
+    const texts: TArray<string>; out scores: TArray<Integer>): Boolean;
+begin
+    Result := get_char_lm_text_scores_internal(texts, scores, False, '',
+        True, False, True);
 end;
 
 function TncSqliteDictionary.get_compound_tail_support(const tail_text: string): Integer;

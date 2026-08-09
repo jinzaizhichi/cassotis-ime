@@ -224,6 +224,8 @@ $lexicon_lm_transition_sc = Join-Path $lexicon_root 'data\generated\dict_lm_tran
 $lexicon_lm_transition_tc = Join-Path $lexicon_root 'data\generated\dict_lm_transition_tc.txt'
 $lexicon_char_lm_sc = Join-Path $lexicon_root 'data\generated\dict_char_lm_sc.txt'
 $lexicon_char_lm_tc = Join-Path $lexicon_root 'data\generated\dict_char_lm_tc.txt'
+$lexicon_char_reverse_lm_sc = Join-Path $lexicon_root 'data\generated\dict_char_reverse_lm_sc.txt'
+$lexicon_char_reverse_lm_tc = Join-Path $lexicon_root 'data\generated\dict_char_reverse_lm_tc.txt'
 $custom_dict_sc = Join-Path $repo_root 'data\custom_dict_sc.txt'
 $custom_dict_tc = Join-Path $repo_root 'data\custom_dict_tc.txt'
 
@@ -315,6 +317,24 @@ try {
         }
         else {
             Write-Warning "Traditional character LM file not found under lexicon data/generated; skipping import."
+        }
+
+        if (Test-Path -LiteralPath $lexicon_char_reverse_lm_sc) {
+            Write-Host ("Importing lexicon reverse character LM from: " + $lexicon_char_reverse_lm_sc)
+            invoke_tool 'cassotis_ime_dict_init (lexicon reverse character LM sc)' $dict_init @(
+                $base_db_sc_path, $schema_path, $lexicon_char_reverse_lm_sc, 'char_reverse_lm')
+        }
+        else {
+            Write-Warning "Simplified reverse character LM file not found under lexicon data/generated; skipping import."
+        }
+
+        if (Test-Path -LiteralPath $lexicon_char_reverse_lm_tc) {
+            Write-Host ("Importing lexicon reverse character LM from: " + $lexicon_char_reverse_lm_tc)
+            invoke_tool 'cassotis_ime_dict_init (lexicon reverse character LM tc)' $dict_init @(
+                $base_db_tc_path, $schema_path, $lexicon_char_reverse_lm_tc, 'char_reverse_lm')
+        }
+        else {
+            Write-Warning "Traditional reverse character LM file not found under lexicon data/generated; skipping import."
         }
     }
 
