@@ -908,6 +908,7 @@ uses
     nc_short_context_reranker_model,
     nc_short_context_residual_model,
     nc_short_context_boundary_residual_model,
+    nc_short_context_difference_model,
     nc_short_nocontext_residual_model;
 
 const
@@ -148268,6 +148269,19 @@ var
             boundary_same_suffix_local: Integer;
             boundary_compare_limit_local: Integer;
             boundary_promoted_local: Boolean;
+            difference_features_local: TncShortContextDifferenceFeatures;
+            difference_top_idx_local: Integer;
+            difference_second_idx_local: Integer;
+            difference_best_idx_local: Integer;
+            difference_idx_local: Integer;
+            difference_rank_local: Integer;
+            difference_score_local: Int64;
+            difference_best_score_local: Int64;
+            difference_runner_up_score_local: Int64;
+            difference_best_probability_local: Double;
+            difference_runner_up_probability_local: Double;
+            difference_stage1_promoted_local: Boolean;
+            difference_stage2_promoted_local: Boolean;
             rank_item_local: TShortExactRankItem;
 
             function effective_left_context_local: string;
@@ -148402,6 +148416,130 @@ var
                     boundary_same_prefix_local;
                 features_local.same_suffix_units :=
                     boundary_same_suffix_local;
+            end;
+
+            function difference_pair_eligible_local(
+                const top_index_local,
+                challenger_index_local: Integer): Boolean;
+            begin
+                Result :=
+                    (Length(candidate_texts_local[top_index_local]) =
+                    Length(candidate_texts_local[challenger_index_local])) and
+                    m_dictionary.is_base_entry(normalized_pinyin,
+                    candidate_texts_local[top_index_local]) and
+                    m_dictionary.is_base_entry(normalized_pinyin,
+                    candidate_texts_local[challenger_index_local]);
+            end;
+
+            procedure build_difference_features_local(
+                const top_index_local, challenger_index_local,
+                challenger_rank_local: Integer;
+                out features_local: TncShortContextDifferenceFeatures);
+            var
+                top_text_inner: string;
+                challenger_text_inner: string;
+                compare_index_inner: Integer;
+                compare_limit_inner: Integer;
+                different_inner: Integer;
+                prefix_inner: Integer;
+                suffix_inner: Integer;
+            begin
+                FillChar(features_local, SizeOf(features_local), 0);
+                top_text_inner := candidate_texts_local[top_index_local];
+                challenger_text_inner := candidate_texts_local[
+                    challenger_index_local];
+                compare_limit_inner := Min(Length(top_text_inner),
+                    Length(challenger_text_inner));
+                different_inner := Abs(Length(top_text_inner) -
+                    Length(challenger_text_inner));
+                for compare_index_inner := 1 to compare_limit_inner do
+                begin
+                    if top_text_inner[compare_index_inner] <>
+                        challenger_text_inner[compare_index_inner] then
+                    begin
+                        Inc(different_inner);
+                    end;
+                end;
+                prefix_inner := 0;
+                while (prefix_inner < compare_limit_inner) and
+                    (top_text_inner[prefix_inner + 1] =
+                    challenger_text_inner[prefix_inner + 1]) do
+                begin
+                    Inc(prefix_inner);
+                end;
+                suffix_inner := 0;
+                while (suffix_inner < compare_limit_inner - prefix_inner) and
+                    (top_text_inner[Length(top_text_inner) - suffix_inner] =
+                    challenger_text_inner[Length(challenger_text_inner) -
+                    suffix_inner]) do
+                begin
+                    Inc(suffix_inner);
+                end;
+
+                features_local.challenger_rank := challenger_rank_local;
+                features_local.delta_full_lm :=
+                    candidate_lm_scores_local[challenger_index_local] -
+                    candidate_lm_scores_local[top_index_local];
+                features_local.delta_prefix1_lm :=
+                    boundary_prefix1_scores_local[challenger_index_local] -
+                    boundary_prefix1_scores_local[top_index_local];
+                features_local.delta_prefix2_lm :=
+                    boundary_prefix2_scores_local[challenger_index_local] -
+                    boundary_prefix2_scores_local[top_index_local];
+                features_local.delta_dict_weight :=
+                    candidate_weights_local[challenger_index_local] -
+                    candidate_weights_local[top_index_local];
+                features_local.delta_display_score :=
+                    candidate_display_scores_local[challenger_index_local] -
+                    candidate_display_scores_local[top_index_local];
+                features_local.top_full_lm :=
+                    candidate_lm_scores_local[top_index_local];
+                features_local.challenger_full_lm :=
+                    candidate_lm_scores_local[challenger_index_local];
+                features_local.top_prefix1_lm :=
+                    boundary_prefix1_scores_local[top_index_local];
+                features_local.challenger_prefix1_lm :=
+                    boundary_prefix1_scores_local[challenger_index_local];
+                features_local.top_prefix2_lm :=
+                    boundary_prefix2_scores_local[top_index_local];
+                features_local.challenger_prefix2_lm :=
+                    boundary_prefix2_scores_local[challenger_index_local];
+                features_local.top_log_dict_weight := Ln(1.0 + Max(0,
+                    candidate_weights_local[top_index_local]));
+                features_local.challenger_log_dict_weight := Ln(1.0 + Max(0,
+                    candidate_weights_local[challenger_index_local]));
+                features_local.context_units := Min(12,
+                    Length(context_value_local));
+                features_local.query_units := Length(normalized_pinyin);
+                features_local.top_text_units := Length(top_text_inner);
+                features_local.challenger_text_units :=
+                    Length(challenger_text_inner);
+                features_local.different_units := different_inner;
+                features_local.same_prefix_units := prefix_inner;
+                features_local.same_suffix_units := suffix_inner;
+                features_local.candidate_count :=
+                    Length(candidate_texts_local);
+                short_context_difference_fill_evidence(context_value_local,
+                    top_text_inner, challenger_text_inner, features_local);
+            end;
+
+            function difference_probability_local(
+                const score_local: Int64): Double;
+            var
+                scaled_score_local: Double;
+                exponential_local: Double;
+            begin
+                scaled_score_local := score_local /
+                    c_short_context_difference_score_scale;
+                if scaled_score_local >= 0.0 then
+                begin
+                    Result := 1.0 / (1.0 + Exp(-scaled_score_local));
+                end
+                else
+                begin
+                    exponential_local := Exp(scaled_score_local);
+                    Result := exponential_local / (1.0 + exponential_local);
+                end;
             end;
 
         begin
@@ -148607,6 +148745,8 @@ var
                   the first character and first two characters of existing
                   exact candidates; it never creates candidates. }
                 boundary_promoted_local := False;
+                difference_stage1_promoted_local := False;
+                difference_stage2_promoted_local := False;
                 boundary_best_idx_local := final_idx_local;
                 boundary_best_score_local := Low(Int64);
                 boundary_lead_local := 0;
@@ -148680,13 +148820,160 @@ var
                         boundary_lead_local := boundary_best_score_local -
                             c_short_context_boundary_promotion_threshold;
                     end;
+
+                    { Compare the final current winner against existing exact
+                      alternatives. The first pass only considers the logical
+                      second candidate. A stricter second pass considers the
+                      remaining candidates only when the first pass abstains. }
+                    difference_top_idx_local := final_idx_local;
+                    difference_second_idx_local := -1;
+                    for difference_idx_local := 0 to
+                        High(candidate_texts_local) do
+                    begin
+                        if difference_idx_local <>
+                            difference_top_idx_local then
+                        begin
+                            difference_second_idx_local :=
+                                difference_idx_local;
+                            Break;
+                        end;
+                    end;
+                    difference_score_local := Low(Int64);
+                    if (difference_second_idx_local >= 0) and
+                        difference_pair_eligible_local(
+                        difference_top_idx_local,
+                        difference_second_idx_local) and
+                        short_context_difference_has_positive_signal(
+                        context_value_local,
+                        candidate_texts_local[difference_top_idx_local],
+                        candidate_texts_local[
+                        difference_second_idx_local]) then
+                    begin
+                        build_difference_features_local(
+                            difference_top_idx_local,
+                            difference_second_idx_local, 2,
+                            difference_features_local);
+                        difference_score_local :=
+                            short_context_difference_stage1_score(
+                            difference_features_local);
+                        if difference_score_local >=
+                            c_short_context_difference_stage1_threshold then
+                        begin
+                            final_idx_local := difference_second_idx_local;
+                            difference_stage1_promoted_local := True;
+                        end;
+                    end;
+
+                    if not difference_stage1_promoted_local then
+                    begin
+                        difference_best_idx_local := -1;
+                        difference_best_score_local := Low(Int64);
+                        difference_runner_up_score_local := Low(Int64);
+                        difference_rank_local := 1;
+                        for difference_idx_local := 0 to
+                            High(candidate_texts_local) do
+                        begin
+                            if difference_idx_local =
+                                difference_top_idx_local then
+                            begin
+                                Continue;
+                            end;
+                            Inc(difference_rank_local);
+                            if difference_idx_local =
+                                difference_second_idx_local then
+                            begin
+                                Continue;
+                            end;
+                            if not difference_pair_eligible_local(
+                                difference_top_idx_local,
+                                difference_idx_local) then
+                            begin
+                                Continue;
+                            end;
+                            if not
+                                short_context_difference_has_positive_mined_evidence(
+                                context_value_local,
+                                candidate_texts_local[
+                                difference_top_idx_local],
+                                candidate_texts_local[difference_idx_local]) then
+                            begin
+                                Continue;
+                            end;
+                            build_difference_features_local(
+                                difference_top_idx_local,
+                                difference_idx_local,
+                                difference_rank_local,
+                                difference_features_local);
+                            difference_score_local :=
+                                short_context_difference_stage2_score(
+                                difference_features_local);
+                            if difference_score_local >
+                                difference_best_score_local then
+                            begin
+                                difference_runner_up_score_local :=
+                                    difference_best_score_local;
+                                difference_best_score_local :=
+                                    difference_score_local;
+                                difference_best_idx_local :=
+                                    difference_idx_local;
+                            end
+                            else if difference_score_local >
+                                difference_runner_up_score_local then
+                            begin
+                                difference_runner_up_score_local :=
+                                    difference_score_local;
+                            end;
+                        end;
+                        if (difference_best_idx_local >= 0) and
+                            (difference_best_score_local >=
+                            c_short_context_difference_stage2_threshold) then
+                        begin
+                            difference_best_probability_local :=
+                                difference_probability_local(
+                                difference_best_score_local);
+                            if difference_runner_up_score_local =
+                                Low(Int64) then
+                            begin
+                                difference_runner_up_probability_local := 0.0;
+                            end
+                            else
+                            begin
+                                difference_runner_up_probability_local :=
+                                    difference_probability_local(
+                                    difference_runner_up_score_local);
+                            end;
+                            if difference_best_probability_local -
+                                difference_runner_up_probability_local >=
+                                c_short_context_difference_stage2_lead_threshold then
+                            begin
+                                final_idx_local := difference_best_idx_local;
+                                difference_stage2_promoted_local := True;
+                                difference_score_local :=
+                                    difference_best_score_local;
+                            end;
+                        end;
+                    end;
                 end;
 
                 if final_idx_local <> baseline_idx_local then
                 begin
                     short_context_promoted_exact_text :=
                         candidate_texts_local[final_idx_local];
-                    if boundary_promoted_local then
+                    if difference_stage1_promoted_local then
+                    begin
+                        short_context_promoted_exact_lead := EnsureRange(
+                            (difference_score_local -
+                            c_short_context_difference_stage1_threshold) div
+                            100000, Low(Integer), High(Integer));
+                    end
+                    else if difference_stage2_promoted_local then
+                    begin
+                        short_context_promoted_exact_lead := EnsureRange(
+                            (difference_score_local -
+                            c_short_context_difference_stage2_threshold) div
+                            100000, Low(Integer), High(Integer));
+                    end
+                    else if boundary_promoted_local then
                     begin
                         short_context_promoted_exact_lead := EnsureRange(
                             boundary_lead_local div 100000, Low(Integer),
@@ -148739,7 +149026,9 @@ var
                             candidate_texts_local[residual_best_idx_local],
                             residual_best_score_local]);
                     end;
-                    if boundary_promoted_local then
+                    if boundary_promoted_local and
+                        (not difference_stage1_promoted_local) and
+                        (not difference_stage2_promoted_local) then
                     begin
                         if m_last_lookup_debug_extra <> '' then
                         begin
@@ -148749,6 +149038,20 @@ var
                         m_last_lookup_debug_extra := m_last_lookup_debug_extra +
                             Format('shortctxboundary=%s:%d',
                             [candidate_texts_local[final_idx_local],
+                            short_context_promoted_exact_lead]);
+                    end;
+                    if difference_stage1_promoted_local or
+                        difference_stage2_promoted_local then
+                    begin
+                        if m_last_lookup_debug_extra <> '' then
+                        begin
+                            m_last_lookup_debug_extra :=
+                                m_last_lookup_debug_extra + ' ';
+                        end;
+                        m_last_lookup_debug_extra := m_last_lookup_debug_extra +
+                            Format('shortctxdiff%d=%s:%d',
+                            [1 + Ord(difference_stage2_promoted_local),
+                            candidate_texts_local[final_idx_local],
                             short_context_promoted_exact_lead]);
                     end;
                 end;
