@@ -1560,7 +1560,147 @@ var
     x_value: Integer;
     y_value: Integer;
     work_area: TRect;
-    virtual_rect: TRect;
+    position_adjusted: Boolean;
+
+    function rect_intersection_area(const left_rect: TRect;
+        const right_rect: TRect): Int64;
+    var
+        intersection_left: Integer;
+        intersection_top: Integer;
+        intersection_right: Integer;
+        intersection_bottom: Integer;
+    begin
+        if left_rect.Left > right_rect.Left then
+        begin
+            intersection_left := left_rect.Left;
+        end
+        else
+        begin
+            intersection_left := right_rect.Left;
+        end;
+        if left_rect.Top > right_rect.Top then
+        begin
+            intersection_top := left_rect.Top;
+        end
+        else
+        begin
+            intersection_top := right_rect.Top;
+        end;
+        if left_rect.Right < right_rect.Right then
+        begin
+            intersection_right := left_rect.Right;
+        end
+        else
+        begin
+            intersection_right := right_rect.Right;
+        end;
+        if left_rect.Bottom < right_rect.Bottom then
+        begin
+            intersection_bottom := left_rect.Bottom;
+        end
+        else
+        begin
+            intersection_bottom := right_rect.Bottom;
+        end;
+
+        if (intersection_right <= intersection_left) or
+            (intersection_bottom <= intersection_top) then
+        begin
+            Exit(0);
+        end;
+        Result := Int64(intersection_right - intersection_left) *
+            Int64(intersection_bottom - intersection_top);
+    end;
+
+    function fit_origin_to_monitor_work_area(var origin_x: Integer;
+        var origin_y: Integer): Boolean;
+    var
+        original_x: Integer;
+        original_y: Integer;
+        candidate_rect: TRect;
+        monitor_rect: TRect;
+        target_rect: TRect;
+        intersection_area: Int64;
+        best_intersection_area: Int64;
+        best_monitor_index: Integer;
+        monitor_index: Integer;
+        max_x: Integer;
+        max_y: Integer;
+    begin
+        original_x := origin_x;
+        original_y := origin_y;
+        candidate_rect := Rect(origin_x, origin_y,
+            origin_x + m_status_form.Width,
+            origin_y + m_status_form.Height);
+        best_monitor_index := -1;
+        best_intersection_area := 0;
+        for monitor_index := 0 to Screen.MonitorCount - 1 do
+        begin
+            monitor_rect := Screen.Monitors[monitor_index].WorkareaRect;
+            intersection_area := rect_intersection_area(candidate_rect,
+                monitor_rect);
+            if intersection_area > best_intersection_area then
+            begin
+                best_intersection_area := intersection_area;
+                best_monitor_index := monitor_index;
+            end;
+        end;
+
+        if best_monitor_index < 0 then
+        begin
+            { The virtual desktop bounding rectangle may include gaps between
+              monitors. Reset a widget in such a gap to the primary monitor. }
+            if Screen.PrimaryMonitor <> nil then
+            begin
+                target_rect := Screen.PrimaryMonitor.WorkareaRect;
+            end
+            else
+            begin
+                target_rect := Screen.WorkAreaRect;
+            end;
+            origin_x := target_rect.Right - m_status_form.Width - 12;
+            origin_y := target_rect.Bottom - m_status_form.Height - 12;
+        end
+        else
+        begin
+            target_rect := Screen.Monitors[best_monitor_index].WorkareaRect;
+        end;
+
+        max_x := target_rect.Right - m_status_form.Width;
+        max_y := target_rect.Bottom - m_status_form.Height;
+        if max_x < target_rect.Left then
+        begin
+            origin_x := target_rect.Left;
+        end
+        else
+        begin
+            if origin_x < target_rect.Left then
+            begin
+                origin_x := target_rect.Left;
+            end;
+            if origin_x > max_x then
+            begin
+                origin_x := max_x;
+            end;
+        end;
+        if max_y < target_rect.Top then
+        begin
+            origin_y := target_rect.Top;
+        end
+        else
+        begin
+            if origin_y < target_rect.Top then
+            begin
+                origin_y := target_rect.Top;
+            end;
+            if origin_y > max_y then
+            begin
+                origin_y := max_y;
+            end;
+        end;
+
+        Result := (origin_x <> original_x) or (origin_y <> original_y);
+    end;
 begin
     if m_status_form = nil then
     begin
@@ -1592,38 +1732,21 @@ begin
         end;
     end;
 
-    virtual_rect := Rect(
-        GetSystemMetrics(SM_XVIRTUALSCREEN),
-        GetSystemMetrics(SM_YVIRTUALSCREEN),
-        GetSystemMetrics(SM_XVIRTUALSCREEN) + GetSystemMetrics(SM_CXVIRTUALSCREEN),
-        GetSystemMetrics(SM_YVIRTUALSCREEN) + GetSystemMetrics(SM_CYVIRTUALSCREEN)
-    );
-    if (virtual_rect.Right <= virtual_rect.Left) or (virtual_rect.Bottom <= virtual_rect.Top) then
-    begin
-        virtual_rect := work_area;
-    end;
-
-    if x_value < virtual_rect.Left then
-    begin
-        x_value := virtual_rect.Left;
-    end;
-    if y_value < virtual_rect.Top then
-    begin
-        y_value := virtual_rect.Top;
-    end;
-    if x_value > virtual_rect.Right - m_status_form.Width then
-    begin
-        x_value := virtual_rect.Right - m_status_form.Width;
-    end;
-    if y_value > virtual_rect.Bottom - m_status_form.Height then
-    begin
-        y_value := virtual_rect.Bottom - m_status_form.Height;
-    end;
-
+    position_adjusted := fit_origin_to_monitor_work_area(x_value, y_value);
     m_status_form.SetBounds(x_value, y_value, m_status_form.Width, m_status_form.Height);
     refresh_status_widget_frame;
+    if fit_origin_to_monitor_work_area(x_value, y_value) then
+    begin
+        position_adjusted := True;
+        m_status_form.SetBounds(x_value, y_value, m_status_form.Width,
+            m_status_form.Height);
+    end;
     m_status_saved_origin := Point(x_value, y_value);
     m_item_status_widget.Checked := visible_value;
+    if position_adjusted then
+    begin
+        save_status_widget_state;
+    end;
     apply_status_widget_visibility;
     update_status_widget;
 end;

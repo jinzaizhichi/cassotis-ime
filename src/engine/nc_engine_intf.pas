@@ -909,6 +909,7 @@ uses
     nc_short_context_residual_model,
     nc_short_context_boundary_residual_model,
     nc_short_context_difference_model,
+    nc_short_context_top2_difference_model,
     nc_short_nocontext_residual_model;
 
 const
@@ -82923,6 +82924,55 @@ var
         out_idx: Integer;
         candidate_text: string;
         candidate_units: TArray<string>;
+
+        function is_exact_multi_char_prefix_local(const text_value: string;
+            const unit_count: Integer): Boolean;
+        var
+            syllables_local: TncPinyinParseResult;
+            prefix_key_local: string;
+            syllable_idx_local: Integer;
+            exact_candidates_local: TncCandidateList;
+            exact_idx_local: Integer;
+        begin
+            Result := False;
+            if (m_dictionary = nil) or (unit_count < 2) then
+            begin
+                Exit;
+            end;
+
+            syllables_local := get_effective_compact_pinyin_syllables(
+                lookup_text);
+            if Length(syllables_local) < unit_count then
+            begin
+                Exit;
+            end;
+
+            prefix_key_local := '';
+            for syllable_idx_local := 0 to unit_count - 1 do
+            begin
+                prefix_key_local := prefix_key_local + normalize_pinyin_text(
+                    syllables_local[syllable_idx_local].text);
+            end;
+            if prefix_key_local = '' then
+            begin
+                Exit;
+            end;
+
+            if not dictionary_exact_lookup_cached(prefix_key_local,
+                exact_candidates_local) then
+            begin
+                Exit;
+            end;
+            for exact_idx_local := 0 to High(exact_candidates_local) do
+            begin
+                if (Trim(exact_candidates_local[exact_idx_local].comment) = '') and
+                    SameText(Trim(exact_candidates_local[exact_idx_local].text),
+                    text_value) then
+                begin
+                    Exit(True);
+                end;
+            end;
+        end;
     begin
         if (Length(candidates) = 0) or
             (not try_get_fixed_pronoun_tail_query_parts(lookup_text,
@@ -82959,7 +83009,9 @@ var
                 (Trim(candidate_units[0]) <> head_text) and
                 (m_dictionary <> nil) and
                 m_dictionary.single_char_matches_pinyin(head_pinyin,
-                Trim(candidate_units[0])) then
+                Trim(candidate_units[0])) and
+                (not is_exact_multi_char_prefix_local(candidate_text,
+                Length(candidate_units))) then
             begin
                 Continue;
             end;
@@ -148270,8 +148322,13 @@ var
             boundary_compare_limit_local: Integer;
             boundary_promoted_local: Boolean;
             difference_features_local: TncShortContextDifferenceFeatures;
+            difference_stage1_features_local:
+                TncShortContextDifferenceFeatures;
             difference_top_idx_local: Integer;
             difference_second_idx_local: Integer;
+            difference_nocontext_top_idx_local: Integer;
+            difference_stage1_top_idx_local: Integer;
+            difference_stage1_second_idx_local: Integer;
             difference_best_idx_local: Integer;
             difference_idx_local: Integer;
             difference_rank_local: Integer;
@@ -148282,6 +148339,10 @@ var
             difference_runner_up_probability_local: Double;
             difference_stage1_promoted_local: Boolean;
             difference_stage2_promoted_local: Boolean;
+            difference_stage1_features_valid_local: Boolean;
+            top2_difference_score_local: Int64;
+            top2_difference_threshold_local: Int64;
+            top2_difference_promoted_local: Boolean;
             rank_item_local: TShortExactRankItem;
 
             function effective_left_context_local: string;
@@ -148431,9 +148492,50 @@ var
                     candidate_texts_local[challenger_index_local]);
             end;
 
+            function difference_candidate_precedes_local(
+                const left_index_local,
+                right_index_local: Integer): Boolean;
+            var
+                left_item_local: TShortExactRankItem;
+                right_item_local: TShortExactRankItem;
+            begin
+                left_item_local := list[
+                    candidate_list_indices_local[left_index_local]];
+                right_item_local := list[
+                    candidate_list_indices_local[right_index_local]];
+                if left_item_local.low_frequency_medical_exact <>
+                    right_item_local.low_frequency_medical_exact then
+                begin
+                    Exit(not left_item_local.low_frequency_medical_exact);
+                end;
+                if left_item_local.nocontext_exact_priority <>
+                    right_item_local.nocontext_exact_priority then
+                begin
+                    Exit(left_item_local.nocontext_exact_priority >
+                        right_item_local.nocontext_exact_priority);
+                end;
+                if left_item_local.rank_score <> right_item_local.rank_score then
+                begin
+                    Exit(left_item_local.rank_score > right_item_local.rank_score);
+                end;
+                if left_item_local.original_index <>
+                    right_item_local.original_index then
+                begin
+                    Exit(left_item_local.original_index <
+                        right_item_local.original_index);
+                end;
+                if left_item_local.text_length <> right_item_local.text_length then
+                begin
+                    Exit(left_item_local.text_length < right_item_local.text_length);
+                end;
+                Result := CompareText(left_item_local.candidate.text,
+                    right_item_local.candidate.text) < 0;
+            end;
+
             procedure build_difference_features_local(
                 const top_index_local, challenger_index_local,
                 challenger_rank_local: Integer;
+                const use_stage2_evidence_local: Boolean;
                 out features_local: TncShortContextDifferenceFeatures);
             var
                 top_text_inner: string;
@@ -148519,8 +148621,18 @@ var
                 features_local.same_suffix_units := suffix_inner;
                 features_local.candidate_count :=
                     Length(candidate_texts_local);
-                short_context_difference_fill_evidence(context_value_local,
-                    top_text_inner, challenger_text_inner, features_local);
+                if use_stage2_evidence_local then
+                begin
+                    short_context_difference_fill_stage2_evidence(
+                        context_value_local, top_text_inner,
+                        challenger_text_inner, features_local);
+                end
+                else
+                begin
+                    short_context_difference_fill_stage1_evidence(
+                        context_value_local, top_text_inner,
+                        challenger_text_inner, features_local);
+                end;
             end;
 
             function difference_probability_local(
@@ -148747,6 +148859,9 @@ var
                 boundary_promoted_local := False;
                 difference_stage1_promoted_local := False;
                 difference_stage2_promoted_local := False;
+                difference_stage1_features_valid_local := False;
+                top2_difference_promoted_local := False;
+                difference_top_idx_local := final_idx_local;
                 boundary_best_idx_local := final_idx_local;
                 boundary_best_score_local := Low(Int64);
                 boundary_lead_local := 0;
@@ -148826,6 +148941,18 @@ var
                       second candidate. A stricter second pass considers the
                       remaining candidates only when the first pass abstains. }
                     difference_top_idx_local := final_idx_local;
+                    difference_nocontext_top_idx_local := 0;
+                    for difference_idx_local := 1 to
+                        High(candidate_texts_local) do
+                    begin
+                        if difference_candidate_precedes_local(
+                            difference_idx_local,
+                            difference_nocontext_top_idx_local) then
+                        begin
+                            difference_nocontext_top_idx_local :=
+                                difference_idx_local;
+                        end;
+                    end;
                     difference_second_idx_local := -1;
                     for difference_idx_local := 0 to
                         High(candidate_texts_local) do
@@ -148851,8 +148978,15 @@ var
                     begin
                         build_difference_features_local(
                             difference_top_idx_local,
-                            difference_second_idx_local, 2,
+                            difference_second_idx_local, 2, False,
                             difference_features_local);
+                        difference_stage1_features_local :=
+                            difference_features_local;
+                        difference_stage1_top_idx_local :=
+                            difference_top_idx_local;
+                        difference_stage1_second_idx_local :=
+                            difference_second_idx_local;
+                        difference_stage1_features_valid_local := True;
                         difference_score_local :=
                             short_context_difference_stage1_score(
                             difference_features_local);
@@ -148902,7 +149036,7 @@ var
                             build_difference_features_local(
                                 difference_top_idx_local,
                                 difference_idx_local,
-                                difference_rank_local,
+                                difference_rank_local, True,
                                 difference_features_local);
                             difference_score_local :=
                                 short_context_difference_stage2_score(
@@ -148953,13 +149087,97 @@ var
                             end;
                         end;
                     end;
+
+                    { Preserve all existing context stages, then calibrate only
+                      the final first and second exact candidates. This pass
+                      cannot add, remove, or promote a deeper candidate. }
+                    difference_top_idx_local := final_idx_local;
+                    difference_second_idx_local := -1;
+                    for difference_idx_local := 0 to
+                        High(candidate_texts_local) do
+                    begin
+                        if (difference_idx_local <>
+                            difference_top_idx_local) and
+                            ((difference_second_idx_local < 0) or
+                            difference_candidate_precedes_local(
+                            difference_idx_local,
+                            difference_second_idx_local)) then
+                        begin
+                            difference_second_idx_local :=
+                                difference_idx_local;
+                        end;
+                    end;
+                    top2_difference_score_local := Low(Int64);
+                    top2_difference_threshold_local :=
+                        c_short_context_top2_override_threshold;
+                    if (difference_second_idx_local >= 0) and
+                        difference_pair_eligible_local(
+                        difference_top_idx_local,
+                        difference_second_idx_local) then
+                    begin
+                        if (difference_second_idx_local =
+                            difference_nocontext_top_idx_local) and
+                            (difference_top_idx_local <>
+                            difference_nocontext_top_idx_local) then
+                        begin
+                            top2_difference_threshold_local :=
+                                c_short_context_top2_restore_threshold;
+                        end
+                        else
+                        begin
+                            { Replacing the original no-context winner needs
+                              stronger evidence than restoring it. }
+                            top2_difference_threshold_local :=
+                                c_short_context_top2_override_threshold;
+                        end;
+                        if difference_stage1_features_valid_local and
+                            (difference_top_idx_local =
+                            difference_stage1_top_idx_local) and
+                            (difference_second_idx_local =
+                            difference_stage1_second_idx_local) then
+                        begin
+                            difference_features_local :=
+                                difference_stage1_features_local;
+                        end
+                        else
+                        begin
+                            build_difference_features_local(
+                                difference_top_idx_local,
+                                difference_second_idx_local, 2, False,
+                                difference_features_local);
+                        end;
+                        short_context_top2_overlay_evidence(
+                            context_value_local,
+                            candidate_texts_local[
+                            difference_top_idx_local],
+                            candidate_texts_local[
+                            difference_second_idx_local],
+                            difference_features_local);
+                        if short_context_top2_passes(
+                            difference_features_local,
+                            top2_difference_threshold_local,
+                            top2_difference_score_local) then
+                        begin
+                            final_idx_local :=
+                                difference_second_idx_local;
+                            top2_difference_promoted_local := True;
+                        end;
+                    end;
                 end;
 
-                if final_idx_local <> baseline_idx_local then
+                if (final_idx_local <> baseline_idx_local) or
+                    top2_difference_promoted_local then
                 begin
                     short_context_promoted_exact_text :=
                         candidate_texts_local[final_idx_local];
-                    if difference_stage1_promoted_local then
+                    if top2_difference_promoted_local then
+                    begin
+                        short_context_promoted_exact_lead := EnsureRange(
+                            (top2_difference_score_local -
+                            top2_difference_threshold_local) div
+                            100000, Low(Integer), High(Integer));
+                    end
+                    else if difference_stage1_promoted_local then
                     begin
                         short_context_promoted_exact_lead := EnsureRange(
                             (difference_score_local -
@@ -148991,9 +149209,25 @@ var
                     end;
                     rank_item_local := list[
                         candidate_list_indices_local[final_idx_local]];
-                    rank_item_local.context_exact_priority := 1;
+                    if top2_difference_promoted_local then
+                    begin
+                        rank_item_local.context_exact_priority := 3;
+                    end
+                    else
+                    begin
+                        rank_item_local.context_exact_priority := 1;
+                    end;
                     list[candidate_list_indices_local[final_idx_local]] :=
                         rank_item_local;
+                    if top2_difference_promoted_local then
+                    begin
+                        rank_item_local := list[
+                            candidate_list_indices_local[
+                            difference_top_idx_local]];
+                        rank_item_local.context_exact_priority := 2;
+                        list[candidate_list_indices_local[
+                            difference_top_idx_local]] := rank_item_local;
+                    end;
                 end;
 
                 if m_config.debug_mode then
@@ -149052,6 +149286,18 @@ var
                             Format('shortctxdiff%d=%s:%d',
                             [1 + Ord(difference_stage2_promoted_local),
                             candidate_texts_local[final_idx_local],
+                            short_context_promoted_exact_lead]);
+                    end;
+                    if top2_difference_promoted_local then
+                    begin
+                        if m_last_lookup_debug_extra <> '' then
+                        begin
+                            m_last_lookup_debug_extra :=
+                                m_last_lookup_debug_extra + ' ';
+                        end;
+                        m_last_lookup_debug_extra := m_last_lookup_debug_extra +
+                            Format('shortctxtop2=%s:%d',
+                            [candidate_texts_local[final_idx_local],
                             short_context_promoted_exact_lead]);
                     end;
                 end;
@@ -171486,6 +171732,7 @@ var
             candidate_idx_local: Integer;
             forced_idx_local: Integer;
             forced_source_idx_local: Integer;
+            superseding_idx_local: Integer;
             tmp_candidate_local: TncCandidate;
             tmp_source_idx_local: Integer;
 
@@ -171494,37 +171741,102 @@ var
             var
                 current_text_local: string;
                 forced_text_local: string;
+                current_prefix_key_local: string;
+                current_text_units_local: Integer;
+                current_tail_units_local: Integer;
+                forced_text_units_local: Integer;
                 forced_tail_units_local: Integer;
             begin
                 Result := False;
-                if (Trim(current_top_candidate.comment) <> '') or
-                    (Trim(m_forced_visible_top_candidate.comment) = '') then
+                if Trim(m_forced_visible_top_candidate.comment) = '' then
                 begin
                     Exit;
                 end;
 
                 current_text_local := Trim(current_top_candidate.text);
                 forced_text_local := Trim(m_forced_visible_top_candidate.text);
-                if (current_text_local = '') or (forced_text_local = '') or
-                    (get_candidate_text_unit_count(current_text_local) <>
-                    expected_units) or
-                    (Copy(current_text_local, 1, Length(forced_text_local)) <>
-                    forced_text_local) then
+                if (current_text_local = '') or (forced_text_local = '') then
                 begin
                     Exit;
                 end;
 
+                current_text_units_local :=
+                    get_candidate_text_unit_count(current_text_local);
+                forced_text_units_local :=
+                    get_candidate_text_unit_count(forced_text_local);
                 forced_tail_units_local :=
                     get_effective_compact_pinyin_unit_count(
                     normalize_pinyin_text(
                     Trim(m_forced_visible_top_candidate.comment)));
-                Result := (forced_tail_units_local > 0) and
-                    (get_candidate_text_unit_count(forced_text_local) +
-                    forced_tail_units_local = expected_units);
+                if (forced_tail_units_local <= 0) or
+                    (forced_text_units_local + forced_tail_units_local <>
+                    expected_units) then
+                begin
+                    Exit;
+                end;
+
+                if Trim(current_top_candidate.comment) = '' then
+                begin
+                    Result := (current_text_units_local = expected_units) and
+                        (Copy(current_text_local, 1,
+                        Length(forced_text_local)) = forced_text_local);
+                    Exit;
+                end;
+
+                current_tail_units_local :=
+                    get_effective_compact_pinyin_unit_count(
+                    normalize_pinyin_text(
+                    Trim(current_top_candidate.comment)));
+                if (current_tail_units_local <= 0) or
+                    (current_text_units_local + current_tail_units_local <>
+                    expected_units) or
+                    (current_text_units_local <= forced_text_units_local) then
+                begin
+                    Exit;
+                end;
+
+                current_prefix_key_local := build_display_query_key(0,
+                    current_text_units_local);
+                Result := (current_prefix_key_local <> '') and
+                    display_exact_key_has_text(current_prefix_key_local,
+                    current_text_local);
             end;
         begin
             if (page_size <= 0) or (not forced_visible_top_candidate_applies) then
             begin
+                Exit;
+            end;
+
+            { A forced incremental prefix must not displace a longer exact
+              phrase prefix that already explains more input syllables. }
+            superseding_idx_local := -1;
+            for candidate_idx_local := 0 to High(Result) do
+            begin
+                if (Trim(Result[candidate_idx_local].comment) <> '') and
+                    current_top_supersedes_forced_partial_local(
+                    Result[candidate_idx_local]) then
+                begin
+                    superseding_idx_local := candidate_idx_local;
+                    Break;
+                end;
+            end;
+            if superseding_idx_local >= 0 then
+            begin
+                if superseding_idx_local > 0 then
+                begin
+                    tmp_candidate_local := Result[superseding_idx_local];
+                    tmp_source_idx_local :=
+                        visible_source_indices[superseding_idx_local];
+                    for candidate_idx_local := superseding_idx_local downto 1 do
+                    begin
+                        Result[candidate_idx_local] :=
+                            Result[candidate_idx_local - 1];
+                        visible_source_indices[candidate_idx_local] :=
+                            visible_source_indices[candidate_idx_local - 1];
+                    end;
+                    Result[0] := tmp_candidate_local;
+                    visible_source_indices[0] := tmp_source_idx_local;
+                end;
                 Exit;
             end;
 
@@ -172400,6 +172712,267 @@ var
                 Result[insert_idx] := local_candidate;
                 visible_source_indices[insert_idx] := local_source_idx;
             end;
+
+            function is_number_unit_for_prefix_partial_local(
+                const unit_value: string): Boolean;
+            begin
+                Result := False;
+                if (unit_value = '') or
+                    (get_candidate_text_unit_count(unit_value) <> 1) then
+                begin
+                    Exit;
+                end;
+                case Ord(unit_value[1]) of
+                    $4E00, $4E8C, $4E24, $4FE9, $4E09, $56DB, $4E94,
+                    $516D, $4E03, $516B, $4E5D, $5341, $51E0, $534A:
+                        Result := True;
+                end;
+            end;
+
+            function is_classifier_unit_for_prefix_partial_local(
+                const unit_value: string): Boolean;
+            begin
+                Result := False;
+                if (unit_value = '') or
+                    (get_candidate_text_unit_count(unit_value) <> 1) then
+                begin
+                    Exit;
+                end;
+                case Ord(unit_value[1]) of
+                    $4E2A, $6761, $53EA, $672C, $53F0, $90E8, $6279,
+                    $5339, $6839, $7247, $9875, $4EF6, $9879, $6B21,
+                    $6B65, $8F6E, $628A, $526F, $5BF9, $53CC, $74F6,
+                    $6876, $76D8, $6247, $95E8, $5B57, $884C, $5217,
+                    $5C42, $7AE0, $8282, $6BB5, $680B, $5E62:
+                        Result := True;
+                end;
+            end;
+
+            function is_rejected_quantity_partial_local(
+                const text_value: string;
+                const tail_key_value: string): Boolean;
+            var
+                units_local: TArray<string>;
+                normalized_tail_local: string;
+            begin
+                normalized_tail_local := normalize_pinyin_text(tail_key_value);
+                if (normalized_tail_local <> 'dao') and
+                    (normalized_tail_local <> 'da') and
+                    (normalized_tail_local <> 'd') and
+                    (normalized_tail_local <> 'le') and
+                    (normalized_tail_local <> 'de') and
+                    (normalized_tail_local <> 'guo') and
+                    (normalized_tail_local <> 'zhe') and
+                    (normalized_tail_local <> 'ma') and
+                    (normalized_tail_local <> 'ba') and
+                    (normalized_tail_local <> 'ne') and
+                    (normalized_tail_local <> 'a') and
+                    (normalized_tail_local <> 'ya') and
+                    (normalized_tail_local <> 'la') then
+                begin
+                    Exit(False);
+                end;
+                units_local := split_text_units(Trim(text_value));
+                Result := (Length(units_local) = 2) and
+                    is_number_unit_for_prefix_partial_local(units_local[0]) and
+                    is_classifier_unit_for_prefix_partial_local(units_local[1]);
+            end;
+
+            procedure supplement_direct_exact_prefixes_local;
+            const
+                c_max_direct_added = 4;
+            var
+                direct_prefix_units_local: Integer;
+                direct_tail_units_local: Integer;
+                direct_exact_idx_local: Integer;
+                direct_existing_idx_local: Integer;
+                direct_source_idx_local: Integer;
+                direct_scan_idx_local: Integer;
+                direct_insert_pos_local: Integer;
+                direct_added_local: Integer;
+                direct_min_prefix_units_local: Integer;
+                direct_visible_prefix_units_local: Integer;
+                direct_visible_tail_units_local: Integer;
+                direct_prefix_key_local: string;
+                direct_tail_key_local: string;
+                direct_exact_text_local: string;
+                direct_exact_results_local: TncCandidateList;
+                direct_candidate_local: TncCandidate;
+                direct_moved_candidate_local: TncCandidate;
+                direct_moved_source_local: Integer;
+                direct_found_for_length_local: Boolean;
+
+                function find_source_candidate_index_local(
+                    const local_text: string;
+                    const local_comment: string): Integer;
+                var
+                    local_idx: Integer;
+                begin
+                    Result := -1;
+                    for local_idx := 0 to High(m_candidates) do
+                    begin
+                        if SameText(Trim(m_candidates[local_idx].text),
+                            local_text) and
+                            SameText(normalize_pinyin_text(
+                            Trim(m_candidates[local_idx].comment)),
+                            local_comment) then
+                        begin
+                            Exit(local_idx);
+                        end;
+                    end;
+                end;
+
+            begin
+                direct_added_local := 0;
+                direct_insert_pos_local := 0;
+                direct_min_prefix_units_local := 2;
+                for direct_scan_idx_local := 0 to High(Result) do
+                begin
+                    direct_visible_prefix_units_local :=
+                        get_candidate_text_unit_count(
+                        Trim(Result[direct_scan_idx_local].text));
+                    direct_visible_tail_units_local :=
+                        get_effective_compact_pinyin_unit_count(
+                        normalize_pinyin_text(
+                        Trim(Result[direct_scan_idx_local].comment)));
+                    if (direct_visible_tail_units_local > 0) and
+                        (direct_visible_prefix_units_local +
+                        direct_visible_tail_units_local = expected_units) and
+                        (direct_visible_prefix_units_local >
+                        direct_min_prefix_units_local) then
+                    begin
+                        direct_min_prefix_units_local :=
+                            direct_visible_prefix_units_local;
+                    end;
+                end;
+                while (direct_insert_pos_local < Length(Result)) and
+                    (Trim(Result[direct_insert_pos_local].comment) = '') do
+                begin
+                    Inc(direct_insert_pos_local);
+                end;
+                if direct_insert_pos_local >= page_size then
+                begin
+                    direct_insert_pos_local := Max(1,
+                        page_size - c_max_direct_added);
+                end;
+
+                if expected_units - 1 < direct_min_prefix_units_local then
+                begin
+                    Exit;
+                end;
+                for direct_prefix_units_local := expected_units - 1 downto
+                    direct_min_prefix_units_local do
+                begin
+                    if direct_added_local >= c_max_direct_added then
+                    begin
+                        Break;
+                    end;
+                    direct_tail_units_local := expected_units -
+                        direct_prefix_units_local;
+                    direct_prefix_key_local := build_display_query_key(0,
+                        direct_prefix_units_local);
+                    direct_tail_key_local := build_display_query_key(
+                        direct_prefix_units_local, direct_tail_units_local);
+                    if (direct_prefix_key_local = '') or
+                        (direct_tail_key_local = '') or
+                        (not lookup_display_exact_cached(
+                        direct_prefix_key_local, direct_exact_results_local)) then
+                    begin
+                        Continue;
+                    end;
+
+                    direct_found_for_length_local := False;
+                    for direct_exact_idx_local := 0 to
+                        Min(c_probe_limit - 1,
+                        High(direct_exact_results_local)) do
+                    begin
+                        direct_exact_text_local := Trim(
+                            direct_exact_results_local[
+                            direct_exact_idx_local].text);
+                        if (Trim(direct_exact_results_local[
+                            direct_exact_idx_local].comment) <> '') or
+                            (direct_exact_text_local = '') or
+                            (get_candidate_text_unit_count(
+                            direct_exact_text_local) <>
+                            direct_prefix_units_local) then
+                        begin
+                            Continue;
+                        end;
+
+                        if is_rejected_quantity_partial_local(
+                            direct_exact_text_local,
+                            direct_tail_key_local) then
+                        begin
+                            Continue;
+                        end;
+
+                        { Prefer an existing source candidate so selection keeps
+                          its path metadata. Some exact prefixes are no longer
+                          in the retained pool, so use the dictionary candidate
+                          only after applying the same boundary rejection. }
+                        direct_source_idx_local :=
+                            find_source_candidate_index_local(
+                            direct_exact_text_local, direct_tail_key_local);
+                        if direct_source_idx_local >= 0 then
+                        begin
+                            direct_candidate_local :=
+                                m_candidates[direct_source_idx_local];
+                        end
+                        else
+                        begin
+                            direct_candidate_local :=
+                                direct_exact_results_local[
+                                direct_exact_idx_local];
+                            direct_candidate_local.comment :=
+                                direct_tail_key_local;
+                        end;
+
+                        if display_candidate_should_drop_short_invalid_partial(
+                            direct_candidate_local) then
+                        begin
+                            Continue;
+                        end;
+                        direct_found_for_length_local := True;
+                        find_visible_candidate_index_local(
+                            direct_exact_text_local, direct_tail_key_local,
+                            direct_existing_idx_local);
+                        if direct_existing_idx_local >= 0 then
+                        begin
+                            if direct_existing_idx_local >=
+                                direct_insert_pos_local then
+                            begin
+                                direct_moved_candidate_local := Result[
+                                    direct_existing_idx_local];
+                                direct_moved_source_local :=
+                                    visible_source_indices[
+                                    direct_existing_idx_local];
+                                remove_visible_candidate_local(
+                                    direct_existing_idx_local);
+                                insert_visible_candidate_local(
+                                    direct_insert_pos_local,
+                                    direct_moved_candidate_local,
+                                    direct_moved_source_local);
+                                Inc(direct_insert_pos_local);
+                            end;
+                            Continue;
+                        end;
+
+                        insert_visible_candidate_local(
+                            direct_insert_pos_local, direct_candidate_local,
+                            direct_source_idx_local);
+                        Inc(direct_insert_pos_local);
+                        Inc(direct_added_local);
+                        if direct_added_local >= c_max_direct_added then
+                        begin
+                            Break;
+                        end;
+                    end;
+                    if direct_found_for_length_local then
+                    begin
+                        Break;
+                    end;
+                end;
+            end;
         begin
             if (m_page_index <> 0) or (m_dictionary = nil) or
                 (expected_units < 3) or (expected_units > 5) or
@@ -172408,6 +172981,11 @@ var
             begin
                 Exit;
             end;
+
+            { Exact phrase prefixes must remain reachable even when an
+              incremental fixed-head candidate and rich single-character
+              fallbacks would otherwise occupy the whole first page. }
+            supplement_direct_exact_prefixes_local;
 
             for base_idx_local := 0 to High(Result) do
             begin
@@ -172476,6 +173054,16 @@ var
                         Continue;
                     end;
 
+                    new_candidate_local := exact_results_local[exact_idx_local];
+                    new_candidate_local.comment := candidate_tail_local;
+                    if is_rejected_quantity_partial_local(exact_text_local,
+                        candidate_tail_local) or
+                        display_candidate_should_drop_short_invalid_partial(
+                        new_candidate_local) then
+                    begin
+                        Continue;
+                    end;
+
                     find_visible_candidate_index_local(exact_text_local,
                         candidate_tail_local, existing_idx_local);
                     if existing_idx_local >= 0 then
@@ -172493,8 +173081,6 @@ var
                         Continue;
                     end;
 
-                    new_candidate_local := exact_results_local[exact_idx_local];
-                    new_candidate_local.comment := candidate_tail_local;
                     insert_visible_candidate_local(insert_pos_local,
                         new_candidate_local, -1);
                     Inc(insert_pos_local);
@@ -172554,6 +173140,125 @@ var
             finally
                 seen_keys_local.Free;
             end;
+        end;
+
+        procedure promote_visible_longest_exact_prefix_partial_local;
+        var
+            idx_local: Integer;
+            move_idx_local: Integer;
+            target_idx_local: Integer;
+            best_idx_local: Integer;
+            best_units_local: Integer;
+            text_units_local: Integer;
+            tail_units_local: Integer;
+            prefix_key_local: string;
+            support_path_local: string;
+            support_score_local: Integer;
+            support_segments_local: Integer;
+            source_idx_local: Integer;
+            picked_candidate_local: TncCandidate;
+            picked_source_local: Integer;
+
+            function candidate_has_supported_prefix_path_local(
+                const candidate_idx: Integer;
+                const query_key: string;
+                const text_value: string): Boolean;
+            begin
+                Result := display_exact_key_has_text(query_key, text_value);
+                if Result then
+                begin
+                    Exit;
+                end;
+
+                support_path_local := '';
+                source_idx_local := -1;
+                if candidate_idx < Length(visible_source_indices) then
+                begin
+                    source_idx_local := visible_source_indices[candidate_idx];
+                end;
+                if (source_idx_local >= 0) and
+                    (source_idx_local < Length(m_candidates)) then
+                begin
+                    support_path_local := get_segment_path_for_candidate(
+                        m_candidates[source_idx_local], source_idx_local);
+                end;
+                if get_encoded_path_segment_count_local(
+                    support_path_local) > 1 then
+                begin
+                    Exit(True);
+                end;
+
+                support_path_local :=
+                    infer_segment_path_for_query_text_with_score(query_key,
+                    text_value, support_score_local,
+                    support_segments_local, False);
+                Result := (support_path_local <> '') and
+                    (support_segments_local > 1);
+            end;
+        begin
+            if (expected_units < 3) or (expected_units > 5) or
+                (Length(Result) <= 1) or
+                (not is_full_pinyin_key(normalized_pinyin)) then
+            begin
+                Exit;
+            end;
+
+            target_idx_local := 0;
+            while (target_idx_local < Length(Result)) and
+                (Trim(Result[target_idx_local].comment) = '') and
+                (get_candidate_text_unit_count(
+                Trim(Result[target_idx_local].text)) = expected_units) do
+            begin
+                Inc(target_idx_local);
+            end;
+            if target_idx_local >= Length(Result) then
+            begin
+                Exit;
+            end;
+
+            best_idx_local := -1;
+            best_units_local := 1;
+            for idx_local := target_idx_local to High(Result) do
+            begin
+                if Trim(Result[idx_local].comment) = '' then
+                begin
+                    Continue;
+                end;
+                text_units_local := get_candidate_text_unit_count(
+                    Trim(Result[idx_local].text));
+                tail_units_local := get_effective_compact_pinyin_unit_count(
+                    normalize_pinyin_text(Trim(Result[idx_local].comment)));
+                if (text_units_local <= best_units_local) or
+                    (text_units_local + tail_units_local <> expected_units) then
+                begin
+                    Continue;
+                end;
+                prefix_key_local := build_display_query_key(0,
+                    text_units_local);
+                if (prefix_key_local = '') or
+                    (not candidate_has_supported_prefix_path_local(idx_local,
+                    prefix_key_local, Trim(Result[idx_local].text))) then
+                begin
+                    Continue;
+                end;
+                best_idx_local := idx_local;
+                best_units_local := text_units_local;
+            end;
+            if best_idx_local <= target_idx_local then
+            begin
+                Exit;
+            end;
+
+            picked_candidate_local := Result[best_idx_local];
+            picked_source_local := visible_source_indices[best_idx_local];
+            for move_idx_local := best_idx_local downto target_idx_local + 1 do
+            begin
+                Result[move_idx_local] := Result[move_idx_local - 1];
+                visible_source_indices[move_idx_local] :=
+                    visible_source_indices[move_idx_local - 1];
+            end;
+            Result[target_idx_local] := picked_candidate_local;
+            visible_source_indices[target_idx_local] := picked_source_local;
         end;
 
         procedure promote_visible_left_boundary_when_candidate_is_stronger;
@@ -175895,6 +176600,7 @@ var
             promote_strong_short_four_two_exact_path_visible_local(Result,
                 visible_source_indices);
             build_visible_long_sentence_candidate_pool_local;
+            promote_visible_longest_exact_prefix_partial_local;
             if (Length(Result) > 0) and
                 (Trim(Result[0].comment) = '') and
                 (get_candidate_text_unit_count(Trim(Result[0].text)) =

@@ -74,6 +74,21 @@ const
 procedure short_context_difference_fill_evidence(const context_value,
     top_text, challenger_text: string;
     var features: TncShortContextDifferenceFeatures);
+procedure short_context_difference_fill_stage1_evidence(const context_value,
+    top_text, challenger_text: string;
+    var features: TncShortContextDifferenceFeatures);
+procedure short_context_difference_fill_stage2_evidence(const context_value,
+    top_text, challenger_text: string;
+    var features: TncShortContextDifferenceFeatures);
+function short_context_difference_lookup_pair_evidence(const top_text,
+    challenger_text: string; out positive_count,
+    negative_count: Integer): Boolean;
+function short_context_difference_lookup_pair_context_evidence(
+    const suffix, top_text, challenger_text: string;
+    out positive_count, negative_count: Integer): Boolean;
+function short_context_difference_lookup_mined_evidence(const suffix,
+    left_text, right_text: string; out left_count,
+    right_count: Integer): Boolean;
 function short_context_difference_has_positive_mined_evidence(
     const context_value, top_text, challenger_text: string): Boolean;
 function short_context_difference_has_positive_signal(const context_value,
@@ -95,10 +110,16 @@ const
     c_hash1_prime: Cardinal = $01000193;
     c_hash2_offset: Cardinal = $1F2BE47C;
     c_hash2_prime: Cardinal = $85EBCA77;
-    c_pair_evidence_count: Integer = 23683;
-    c_pair_context_evidence_count: Integer = 41117;
-    c_mined_evidence_count: Integer = 360769;
+    c_stage1_pair_overlay_count: Integer = 0;
+    c_stage1_pair_context_overlay_count: Integer = 0;
+    c_stage1_mined_overlay_count: Integer = 0;
     c_term_count: Integer = 36223;
+    c_stage1_pair_overlay_hashes: array[0..0] of UInt64 = ($0000000000000000);
+    c_stage1_pair_overlay_counts: array[0..0] of Cardinal = ($00000000);
+    c_stage1_pair_context_overlay_hashes: array[0..0] of UInt64 = ($0000000000000000);
+    c_stage1_pair_context_overlay_counts: array[0..0] of Cardinal = ($00000000);
+    c_stage1_mined_overlay_hashes: array[0..0] of UInt64 = ($0000000000000000);
+    c_stage1_mined_overlay_counts: array[0..0] of Cardinal = ($00000000);
     c_pair_evidence_hashes: array[0..23682] of UInt64 = (
         $00012524B4B6DD81, $000199FD586709EC, $00038FAE0C4A8C47, $00046AA0E3BAEE65,
         $000C7B0ADFC824BB, $0013EB7D41B4B1A8, $0016936E69FAB35F, $00193C0132BAD7CC,
@@ -182459,6 +182480,82 @@ begin
     Result := False;
 end;
 
+function short_context_difference_lookup_pair_evidence(const top_text,
+    challenger_text: string; out positive_count,
+    negative_count: Integer): Boolean;
+var
+    hash_value: UInt64;
+begin
+    hash_two(top_text, challenger_text, hash_value);
+    Result := find_evidence(c_pair_evidence_hashes, c_pair_evidence_counts,
+        hash_value, positive_count, negative_count);
+end;
+
+function short_context_difference_lookup_pair_context_evidence(
+    const suffix, top_text, challenger_text: string;
+    out positive_count, negative_count: Integer): Boolean;
+var
+    hash_value: UInt64;
+begin
+    hash_three(suffix, top_text, challenger_text, hash_value);
+    Result := find_evidence(c_pair_context_evidence_hashes,
+        c_pair_context_evidence_counts, hash_value, positive_count,
+        negative_count);
+end;
+
+function short_context_difference_lookup_mined_evidence(const suffix,
+    left_text, right_text: string; out left_count,
+    right_count: Integer): Boolean;
+var
+    hash_value: UInt64;
+begin
+    hash_three(suffix, left_text, right_text, hash_value);
+    Result := find_evidence(c_mined_evidence_hashes, c_mined_evidence_counts,
+        hash_value, left_count, right_count);
+end;
+
+function find_pair_evidence(const use_stage1: Boolean;
+    const hash_value: UInt64; out left_count, right_count: Integer): Boolean;
+begin
+    if use_stage1 and (c_stage1_pair_overlay_count > 0) and
+        find_evidence(c_stage1_pair_overlay_hashes,
+        c_stage1_pair_overlay_counts, hash_value, left_count,
+        right_count) then
+    begin
+        Exit((left_count <> 0) or (right_count <> 0));
+    end;
+    Result := find_evidence(c_pair_evidence_hashes, c_pair_evidence_counts,
+        hash_value, left_count, right_count);
+end;
+
+function find_pair_context_evidence(const use_stage1: Boolean;
+    const hash_value: UInt64; out left_count, right_count: Integer): Boolean;
+begin
+    if use_stage1 and (c_stage1_pair_context_overlay_count > 0) and
+        find_evidence(c_stage1_pair_context_overlay_hashes,
+        c_stage1_pair_context_overlay_counts, hash_value, left_count,
+        right_count) then
+    begin
+        Exit((left_count <> 0) or (right_count <> 0));
+    end;
+    Result := find_evidence(c_pair_context_evidence_hashes,
+        c_pair_context_evidence_counts, hash_value, left_count, right_count);
+end;
+
+function find_mined_evidence(const use_stage1: Boolean;
+    const hash_value: UInt64; out left_count, right_count: Integer): Boolean;
+begin
+    if use_stage1 and (c_stage1_mined_overlay_count > 0) and
+        find_evidence(c_stage1_mined_overlay_hashes,
+        c_stage1_mined_overlay_counts, hash_value, left_count,
+        right_count) then
+    begin
+        Exit((left_count <> 0) or (right_count <> 0));
+    end;
+    Result := find_evidence(c_mined_evidence_hashes, c_mined_evidence_counts,
+        hash_value, left_count, right_count);
+end;
+
 function find_term(const hash_value: UInt64; out novel_count,
     chat_count, formal_count: Cardinal): Boolean;
 var
@@ -182512,9 +182609,9 @@ begin
     log_total := Ln(1.0 + positive_count + negative_count);
 end;
 
-function get_best_mined_evidence(const context_value, top_text,
-    challenger_text: string; out best_positive, best_negative,
-    best_width: Integer): Boolean;
+function get_best_mined_evidence(const use_stage1: Boolean;
+    const context_value, top_text, challenger_text: string;
+    out best_positive, best_negative, best_width: Integer): Boolean;
 const
     widths: array[0..7] of Integer = (1, 2, 3, 4, 6, 8, 10, 12);
 var
@@ -182542,8 +182639,8 @@ begin
         end;
         suffix := Copy(context_value, Length(context_value) - width + 1, width);
         hash_three(suffix, top_text, challenger_text, hash_value);
-        if find_evidence(c_mined_evidence_hashes, c_mined_evidence_counts,
-            hash_value, left_count, right_count) then
+        if find_mined_evidence(use_stage1, hash_value, left_count,
+            right_count) then
         begin
             positive_count := right_count;
             negative_count := left_count;
@@ -182551,9 +182648,8 @@ begin
         else
         begin
             hash_three(suffix, challenger_text, top_text, hash_value);
-            if not find_evidence(c_mined_evidence_hashes,
-                c_mined_evidence_counts, hash_value,
-                left_count, right_count) then
+            if not find_mined_evidence(use_stage1, hash_value, left_count,
+                right_count) then
             begin
                 Continue;
             end;
@@ -182579,7 +182675,7 @@ var
     negative_count: Integer;
     width: Integer;
 begin
-    Result := get_best_mined_evidence(context_value, top_text,
+    Result := get_best_mined_evidence(False, context_value, top_text,
         challenger_text, positive_count, negative_count, width) and
         (positive_count > negative_count);
 end;
@@ -182590,6 +182686,7 @@ var
     hash_value: UInt64;
     positive_count: Integer;
     negative_count: Integer;
+    width: Integer;
     top_novel: Cardinal;
     top_chat: Cardinal;
     top_formal: Cardinal;
@@ -182598,8 +182695,7 @@ var
     challenger_formal: Cardinal;
 begin
     hash_two(top_text, challenger_text, hash_value);
-    if find_evidence(c_pair_evidence_hashes, c_pair_evidence_counts,
-        hash_value, positive_count, negative_count) and
+    if find_pair_evidence(True, hash_value, positive_count, negative_count) and
         (positive_count > negative_count) then
     begin
         Exit(True);
@@ -182616,15 +182712,16 @@ begin
         Exit(True);
     end;
 
-    if short_context_difference_has_positive_mined_evidence(context_value,
-        top_text, challenger_text) then
+    if get_best_mined_evidence(True, context_value, top_text,
+        challenger_text, positive_count, negative_count,
+        width) and (positive_count > negative_count) then
     begin
         Exit(True);
     end;
     Result := False;
 end;
 
-procedure short_context_difference_fill_evidence(const context_value,
+procedure fill_evidence(const use_stage1: Boolean; const context_value,
     top_text, challenger_text: string;
     var features: TncShortContextDifferenceFeatures);
 const
@@ -182651,8 +182748,7 @@ var
     challenger_total: UInt64;
 begin
     hash_two(top_text, challenger_text, hash_value);
-    if find_evidence(c_pair_evidence_hashes, c_pair_evidence_counts,
-        hash_value,
+    if find_pair_evidence(use_stage1, hash_value,
         positive_count, negative_count) then
     begin
         assign_count_features(positive_count, negative_count,
@@ -182674,8 +182770,7 @@ begin
         end;
         suffix := Copy(context_value, Length(context_value) - width + 1, width);
         hash_three(suffix, top_text, challenger_text, hash_value);
-        if not find_evidence(c_pair_context_evidence_hashes,
-            c_pair_context_evidence_counts, hash_value,
+        if not find_pair_context_evidence(use_stage1, hash_value,
             positive_count, negative_count) then
         begin
             Continue;
@@ -182695,7 +182790,7 @@ begin
         features.pair_context_log_odds, features.pair_context_log_total);
     features.pair_context_width := best_width;
 
-    get_best_mined_evidence(context_value, top_text, challenger_text,
+    get_best_mined_evidence(use_stage1, context_value, top_text, challenger_text,
         best_positive, best_negative, best_width);
     assign_count_features(best_positive, best_negative,
         features.mined_positive_log_count,
@@ -182727,6 +182822,28 @@ begin
     features.total_challenger_log_count := Ln(1.0 + challenger_total);
     features.total_log_odds := Ln((challenger_total + 1.0) /
         (top_total + 1.0));
+end;
+
+procedure short_context_difference_fill_stage1_evidence(const context_value,
+    top_text, challenger_text: string;
+    var features: TncShortContextDifferenceFeatures);
+begin
+    fill_evidence(True, context_value, top_text, challenger_text, features);
+end;
+
+procedure short_context_difference_fill_stage2_evidence(const context_value,
+    top_text, challenger_text: string;
+    var features: TncShortContextDifferenceFeatures);
+begin
+    fill_evidence(False, context_value, top_text, challenger_text, features);
+end;
+
+procedure short_context_difference_fill_evidence(const context_value,
+    top_text, challenger_text: string;
+    var features: TncShortContextDifferenceFeatures);
+begin
+    short_context_difference_fill_stage1_evidence(context_value, top_text,
+        challenger_text, features);
 end;
 
 function difference_stage1_tree_0(const features: TncShortContextDifferenceFeatures): Double;
@@ -240663,7 +240780,26 @@ begin
     end;
 
     FillChar(features, SizeOf(features), 0);
-    short_context_difference_fill_evidence(
+    short_context_difference_fill_stage1_evidence(
+        #$4E00,
+        #$4E00 + #$4EE3,
+        #$8863 + #$5E26, features);
+    if not short_context_difference_has_positive_signal('',
+        #$4E00 + #$4E00,
+        #$610F + #$4E49) then
+    begin
+        Exit(False);
+    end;
+    if (Abs(features.mined_positive_log_count -
+        Ln(1.0 + 14)) >= 0.000001) or
+        (Abs(features.mined_negative_log_count -
+        Ln(1.0 + 0)) >= 0.000001) then
+    begin
+        Exit(False);
+    end;
+
+    FillChar(features, SizeOf(features), 0);
+    short_context_difference_fill_stage2_evidence(
         #$4E00,
         #$4E00 + #$4EE3,
         #$8863 + #$5E26, features);
@@ -240671,12 +240807,6 @@ begin
         #$4E00,
         #$4E00 + #$4EE3,
         #$8863 + #$5E26) then
-    begin
-        Exit(False);
-    end;
-    if not short_context_difference_has_positive_signal('',
-        #$4E00 + #$4E00,
-        #$610F + #$4E49) then
     begin
         Exit(False);
     end;
