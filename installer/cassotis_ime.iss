@@ -81,6 +81,10 @@ Filename: "{#InstallRuntimeDir}\cassotis_ime_profile_reg.exe"; \
     Parameters: "start -restart"; \
     Flags: runhidden waituntilterminated runasoriginaluser; \
     StatusMsg: "Starting Cassotis IME..."
+Filename: "{#InstallRuntimeDir}\cassotis_ime_profile_reg.exe"; \
+    Parameters: "start"; \
+    Flags: runhidden waituntilterminated runasoriginaluser; \
+    StatusMsg: "Verifying Cassotis IME runtime..."
 Filename: "{sys}\cmd.exe"; \
     Parameters: "/c start """" explorer.exe"; \
     Flags: runhidden nowait runasoriginaluser; \

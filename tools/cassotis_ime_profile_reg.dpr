@@ -17,12 +17,16 @@ uses
     Winapi.ActiveX,
     Winapi.Msctf,
     ComObj,
-    nc_tsf_guids in '..\src\tsf\nc_tsf_guids.pas';
+    nc_tsf_guids in '..\src\tsf\nc_tsf_guids.pas',
+    nc_runtime_process_policy in '..\src\common\nc_runtime_process_policy.pas';
 
 const
     TF_E_ALREADY_EXISTS = HRESULT($80005006);
     CCH_RM_SESSION_KEY = 32;
     ERROR_MORE_DATA = 234;
+    c_process_query_limited_information = $1000;
+    c_runtime_handoff_attempts = 30;
+    c_runtime_handoff_wait_ms = 100;
 
 type
     TInstallLayoutOrTipUserReg = function(pszUserReg: LPCWSTR; pszSystemReg: LPCWSTR;
@@ -58,6 +62,9 @@ function RmRegisterResources(session_handle: DWORD; file_count: UINT; files: PPW
 function RmGetList(session_handle: DWORD; out proc_info_needed: UINT; var proc_info_count: UINT;
     proc_infos: Pointer; var reboot_reasons: DWORD): DWORD;
     stdcall; external 'rstrtmgr.dll';
+function nc_query_full_process_image_name(process_handle: THandle; flags: DWORD;
+    image_path: PWideChar; var image_path_chars: DWORD): BOOL; stdcall;
+    external 'kernel32.dll' name 'QueryFullProcessImageNameW';
 
 procedure print_usage;
 begin
@@ -459,16 +466,7 @@ end;
 
 function normalize_compare_path(const value: string): string;
 begin
-    Result := Trim(value).Trim(['"']);
-    if Result = '' then
-    begin
-        Exit('');
-    end;
-    try
-        Result := LowerCase(TPath.GetFullPath(Result));
-    except
-        Result := LowerCase(Result);
-    end;
+    Result := nc_normalize_runtime_executable_path(value);
 end;
 
 function is_com_registered_for_target(const clsid_text: string; const target_path: string;
@@ -604,6 +602,76 @@ begin
         end;
     finally
         CloseHandle(process_handle);
+    end;
+end;
+
+function get_process_image_path(const process_id: Cardinal; out image_path: string): Boolean;
+var
+    process_handle: THandle;
+    path_buffer: array[0..32767] of WideChar;
+    path_chars: DWORD;
+begin
+    Result := False;
+    image_path := '';
+    process_handle := OpenProcess(c_process_query_limited_information, False, process_id);
+    if process_handle = 0 then
+    begin
+        process_handle := OpenProcess(PROCESS_QUERY_INFORMATION, False, process_id);
+    end;
+    if process_handle = 0 then
+    begin
+        Exit;
+    end;
+
+    try
+        path_chars := Length(path_buffer);
+        if not nc_query_full_process_image_name(process_handle, 0,
+            @path_buffer[0], path_chars) then
+        begin
+            Exit;
+        end;
+        SetString(image_path, PWideChar(@path_buffer[0]), path_chars);
+        image_path := Trim(image_path);
+        Result := image_path <> '';
+    finally
+        CloseHandle(process_handle);
+    end;
+end;
+
+function terminate_mismatched_runtime_processes(const expected_name: string;
+    const expected_path: string; out expected_process_running: Boolean): Boolean;
+var
+    processes: TArray<TncProcessInfo>;
+    idx: Integer;
+    actual_path: string;
+    display_path: string;
+begin
+    Result := True;
+    expected_process_running := False;
+    processes := enumerate_processes_by_name(expected_name);
+    for idx := 0 to High(processes) do
+    begin
+        actual_path := '';
+        if get_process_image_path(processes[idx].pid, actual_path) and
+            nc_runtime_executable_matches(actual_path, expected_path) then
+        begin
+            expected_process_running := True;
+            Continue;
+        end;
+
+        display_path := actual_path;
+        if display_path = '' then
+        begin
+            display_path := '<unavailable>';
+        end;
+        Writeln(Format('Replacing stale %s (PID %d, path %s)',
+            [expected_name, processes[idx].pid, display_path]));
+        if not terminate_process_id(processes[idx].pid) then
+        begin
+            Writeln(Format('Failed to stop stale %s (PID %d)',
+                [expected_name, processes[idx].pid]));
+            Result := False;
+        end;
     end;
 end;
 
@@ -1210,6 +1278,72 @@ begin
     Result := NativeUInt(exec_result) > 32;
 end;
 
+function ensure_process_running_from_path(const file_path: string;
+    const process_name: string): Boolean;
+var
+    attempt: Integer;
+    expected_process_running: Boolean;
+    cleanup_succeeded: Boolean;
+    exec_result: HINST;
+begin
+    Result := False;
+    if not FileExists(file_path) then
+    begin
+        Writeln('Runtime executable not found: ' + file_path);
+        Exit;
+    end;
+
+    for attempt := 1 to c_runtime_handoff_attempts do
+    begin
+        expected_process_running := False;
+        cleanup_succeeded := terminate_mismatched_runtime_processes(process_name, file_path,
+            expected_process_running);
+        if expected_process_running and cleanup_succeeded then
+        begin
+            Exit(True);
+        end;
+
+        if (attempt = 1) or ((attempt mod 10) = 0) then
+        begin
+            Writeln(Format('Starting %s from %s (attempt %d)',
+                [process_name, file_path, attempt]));
+            exec_result := ShellExecute(0, 'open', PChar(file_path), nil,
+                PChar(ExtractFileDir(file_path)), SW_SHOWNORMAL);
+            if NativeUInt(exec_result) <= 32 then
+            begin
+                Writeln(Format('Failed to start %s: ShellExecute=%d',
+                    [process_name, NativeUInt(exec_result)]));
+            end;
+        end;
+        Sleep(c_runtime_handoff_wait_ms);
+    end;
+
+    expected_process_running := False;
+    cleanup_succeeded := terminate_mismatched_runtime_processes(process_name, file_path,
+        expected_process_running);
+    Result := expected_process_running and cleanup_succeeded;
+    if not Result then
+    begin
+        Writeln(Format('Runtime handoff failed for %s: %s',
+            [process_name, file_path]));
+    end;
+end;
+
+function ensure_runtime_process_pair(const base_dir: string): Boolean;
+var
+    host_path: string;
+    tray_path: string;
+begin
+    host_path := TPath.Combine(base_dir, 'cassotis_ime_host.exe');
+    tray_path := TPath.Combine(base_dir, 'cassotis_ime_tray_host.exe');
+    if not ensure_process_running_from_path(host_path, 'cassotis_ime_host') then
+    begin
+        Exit(False);
+    end;
+    Result := ensure_process_running_from_path(tray_path,
+        'cassotis_ime_tray_host');
+end;
+
 function register_profile: Boolean; forward;
 function unregister_profile: Boolean; forward;
 
@@ -1522,24 +1656,30 @@ begin
         Sleep(300);
     end;
 
+    if has_switch('ctfmon_only') then
+    begin
+        Writeln('Starting ctfmon...');
+        Exit(start_one_process_if_missing(ctfmon_path, 'ctfmon'));
+    end;
+
+    base_dir := ExtractFilePath(ParamStr(0));
+    { Claim the shared host/tray mutexes with this version before ctfmon can
+      activate an older DLL still loaded in an existing application. }
+    if not ensure_runtime_process_pair(base_dir) then
+    begin
+        Exit(False);
+    end;
+
     Writeln('Starting ctfmon...');
     if not start_one_process_if_missing(ctfmon_path, 'ctfmon') then
     begin
         Exit(False);
     end;
-    if has_switch('ctfmon_only') then
-    begin
-        Exit(True);
-    end;
 
-    base_dir := ExtractFilePath(ParamStr(0));
-    if not start_one_process_if_missing(TPath.Combine(base_dir, 'cassotis_ime_host.exe'),
-        'cassotis_ime_host') then
-    begin
-        Exit(False);
-    end;
-    Result := start_one_process_if_missing(TPath.Combine(base_dir, 'cassotis_ime_tray_host.exe'),
-        'cassotis_ime_tray_host');
+    { Recheck after ctfmon activation. A still-loaded old TSF DLL may race the
+      first handoff, but it must not be allowed to own the final runtime. }
+    Sleep(300);
+    Result := ensure_runtime_process_pair(base_dir);
 end;
 
 function run_stop_action: Boolean;
