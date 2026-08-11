@@ -47,6 +47,12 @@ type
 
     TncCharLmScoreMode = (clsm_full, clsm_suffix, clsm_context);
 
+    TncSearchBudgetMode = (
+        sbm_production,
+        sbm_wall_clock,
+        sbm_deterministic
+    );
+
     TncLongPathStructureCacheValue = record
         segment_count: Integer;
         single_segment_count: Integer;
@@ -588,6 +594,8 @@ type
         m_debug_long_chain_ranker_profile: Integer;
         m_debug_long_final_ranker_profile: Integer;
         m_debug_disable_long_top2_pairwise_swap: Boolean;
+        m_search_budget_mode: TncSearchBudgetMode;
+        m_search_budget_scale_percent: Integer;
         m_single_quote_open: Boolean;
         m_double_quote_open: Boolean;
         m_page_index: Integer;
@@ -611,6 +619,12 @@ type
             const base_path: string; const user_path: string): TncDictionaryProvider;
         procedure store_current_dictionary_provider(const previous_config: TncEngineConfig);
         procedure clear_cached_dictionary_providers;
+        procedure inherit_search_budget_policy_to(const engine: TncEngine);
+        function search_budget_should_stop(const start_tick: UInt64;
+            const work_count: Int64; const work_limit: Int64;
+            const timed_budget_ms: UInt64;
+            const emergency_budget_ms: UInt64;
+            const apply_configured_policy: Boolean = True): Boolean;
         procedure free_dictionary_provider(var provider: TncDictionaryProvider);
         function get_active_dictionary_path: string;
         function get_dictionary_write_time(const path: string): TDateTime;
@@ -826,6 +840,9 @@ type
         procedure debug_set_long_final_ranker_profile(const profile: Integer);
         procedure debug_disable_long_top2_pairwise_swap(
             const disabled: Boolean);
+        procedure debug_set_search_budget_policy(
+            const mode: TncSearchBudgetMode;
+            const scale_percent: Integer = 100);
         procedure debug_set_composition_text(const text: string);
         function process_key(const key_code: Word; const key_state: TncKeyState): Boolean;
         function get_candidates: TncCandidateList;
@@ -883,6 +900,11 @@ function apply_long_exact_anchor_pairwise_index_move(
     const score: Double;
     const strict_threshold: Double;
     const second_threshold: Double): Integer;
+function nc_search_budget_should_stop(const mode: TncSearchBudgetMode;
+    const elapsed_ms: UInt64; const work_count: Int64;
+    const work_limit: Int64; const timed_budget_ms: UInt64;
+    const emergency_budget_ms: UInt64;
+    const scale_percent: Integer): Boolean;
 
 implementation
 
@@ -919,6 +941,50 @@ const
     c_fast_repair_promote_margin = 6000;
     c_short_nocontext_protected_baseline_min_weight = 1000;
     c_short_residual_visibility_only_max_weight = 0;
+
+function nc_search_budget_should_stop(const mode: TncSearchBudgetMode;
+    const elapsed_ms: UInt64; const work_count: Int64;
+    const work_limit: Int64; const timed_budget_ms: UInt64;
+    const emergency_budget_ms: UInt64;
+    const scale_percent: Integer): Boolean;
+var
+    normalized_scale: Integer;
+    scaled_budget_ms: UInt64;
+begin
+    normalized_scale := EnsureRange(scale_percent, 25, 1000);
+    case mode of
+        sbm_deterministic:
+            begin
+                Exit((work_limit > 0) and (work_count >= work_limit));
+            end;
+        sbm_wall_clock:
+            begin
+                if (work_limit > 0) and (work_count >= work_limit) then
+                begin
+                    Exit(True);
+                end;
+                if timed_budget_ms = 0 then
+                begin
+                    Exit(False);
+                end;
+                scaled_budget_ms :=
+                    (timed_budget_ms * UInt64(normalized_scale) + 99) div 100;
+                Exit(elapsed_ms >= scaled_budget_ms);
+            end;
+    end;
+
+    if (work_limit > 0) and (work_count >= work_limit) then
+    begin
+        Exit(True);
+    end;
+    if emergency_budget_ms = 0 then
+    begin
+        Exit(False);
+    end;
+    scaled_budget_ms :=
+        (emergency_budget_ms * UInt64(normalized_scale) + 99) div 100;
+    Result := elapsed_ms >= scaled_budget_ms;
+end;
 
 function short_residual_exact_weight_is_eligible(
     const candidate_weight: Integer;
@@ -1231,6 +1297,8 @@ begin
     m_debug_long_chain_ranker_profile := -1;
     m_debug_long_final_ranker_profile := -1;
     m_debug_disable_long_top2_pairwise_swap := False;
+    m_search_budget_mode := sbm_production;
+    m_search_budget_scale_percent := 100;
     reset_debug_target_recall_metrics;
     m_disable_subspan_standalone_oracle := 0;
     m_single_quote_open := False;
@@ -3672,6 +3740,74 @@ procedure TncEngine.debug_disable_long_top2_pairwise_swap(
     const disabled: Boolean);
 begin
     m_debug_disable_long_top2_pairwise_swap := disabled;
+end;
+
+procedure TncEngine.debug_set_search_budget_policy(
+    const mode: TncSearchBudgetMode; const scale_percent: Integer);
+begin
+    m_search_budget_mode := mode;
+    m_search_budget_scale_percent := EnsureRange(scale_percent, 25, 1000);
+end;
+
+procedure TncEngine.inherit_search_budget_policy_to(const engine: TncEngine);
+begin
+    if engine = nil then
+    begin
+        Exit;
+    end;
+    engine.m_search_budget_mode := m_search_budget_mode;
+    engine.m_search_budget_scale_percent := m_search_budget_scale_percent;
+end;
+
+function TncEngine.search_budget_should_stop(const start_tick: UInt64;
+    const work_count: Int64; const work_limit: Int64;
+    const timed_budget_ms: UInt64;
+    const emergency_budget_ms: UInt64;
+    const apply_configured_policy: Boolean): Boolean;
+var
+    elapsed_ms: UInt64;
+begin
+    if not apply_configured_policy then
+    begin
+        if (start_tick = 0) or (timed_budget_ms = 0) then
+        begin
+            elapsed_ms := 0;
+        end
+        else
+        begin
+            elapsed_ms := GetTickCount64 - start_tick;
+        end;
+        Exit(nc_search_budget_should_stop(sbm_wall_clock, elapsed_ms,
+            work_count, 0, timed_budget_ms, 0, 100));
+    end;
+    if m_search_budget_mode = sbm_deterministic then
+    begin
+        Exit(nc_search_budget_should_stop(m_search_budget_mode, 0,
+            work_count, work_limit, timed_budget_ms,
+            emergency_budget_ms, m_search_budget_scale_percent));
+    end;
+    if (work_limit > 0) and (work_count >= work_limit) then
+    begin
+        Exit(True);
+    end;
+    if ((m_search_budget_mode = sbm_wall_clock) and
+        (timed_budget_ms = 0)) or
+        ((m_search_budget_mode = sbm_production) and
+        (emergency_budget_ms = 0)) then
+    begin
+        Exit(False);
+    end;
+    if start_tick = 0 then
+    begin
+        elapsed_ms := 0;
+    end
+    else
+    begin
+        elapsed_ms := GetTickCount64 - start_tick;
+    end;
+    Result := nc_search_budget_should_stop(m_search_budget_mode,
+        elapsed_ms, work_count, work_limit, timed_budget_ms,
+        emergency_budget_ms, m_search_budget_scale_percent);
 end;
 
 procedure TncEngine.debug_set_composition_text(const text: string);
@@ -23188,6 +23324,7 @@ var
                 subspan_oracle_config.debug_mode := False;
                 subspan_oracle_config.max_candidates := 6;
                 subspan_oracle_engine := TncEngine.Create(subspan_oracle_config);
+                inherit_search_budget_policy_to(subspan_oracle_engine);
             end;
 
             Dec(subspan_oracle_budget_remaining);
@@ -44491,6 +44628,7 @@ var
         c_consensus_budget_ms = 24;
         // Direct/offline decoding gets more room, but must remain bounded.
         c_consensus_direct_budget_ms = 96;
+        c_consensus_work_limit = 512;
     type
         TConsensusWindowCacheEntry = record
             text: string;
@@ -44530,6 +44668,7 @@ var
         oracle_support_segments_local: Integer;
         oracle_support_path_local: string;
         consensus_start_tick: UInt64;
+        consensus_work_count: Int64;
         consensus_budget_logged: Boolean;
         consensus_window_cache: TDictionary<string, TConsensusWindowCacheEntry>;
 
@@ -44545,14 +44684,18 @@ var
             begin
                 budget_ms_local := c_consensus_direct_budget_ms;
             end;
-            Result := (consensus_start_tick > 0) and
-                ((GetTickCount64 - consensus_start_tick) >= budget_ms_local);
+            Result := search_budget_should_stop(consensus_start_tick,
+                consensus_work_count, c_consensus_work_limit,
+                budget_ms_local, budget_ms_local * 4,
+                input_syllable_count >=
+                c_long_sentence_full_path_min_syllables);
             if Result and m_config.debug_mode and
                 (not consensus_budget_logged) then
             begin
                 consensus_budget_logged := True;
                 m_last_full_path_debug_info := m_last_full_path_debug_info +
-                    Format(' vcons=[budget %dms]', [c_consensus_budget_ms]);
+                    Format(' vcons=[budget mode=%d work=%d]',
+                    [Ord(m_search_budget_mode), consensus_work_count]);
             end;
         end;
 
@@ -44592,6 +44735,7 @@ var
                 span_syllables, out_text, out_score, out_segments,
                 out_path, out_has_anchor, out_anchor_units) and
                 (out_text <> '');
+            Inc(consensus_work_count);
             if consensus_window_cache <> nil then
             begin
                 cache_entry.text := out_text;
@@ -44967,6 +45111,7 @@ var
         end;
     begin
         consensus_start_tick := GetTickCount64;
+        consensus_work_count := 0;
         consensus_budget_logged := False;
         consensus_window_cache := nil;
         if (Length(candidates) <= 1) or (input_syllable_count < 4) or
@@ -45248,6 +45393,7 @@ var
         c_repair_budget_ms = 24;
         // Direct/offline decoding gets more room, but must remain bounded.
         c_repair_direct_budget_ms = 96;
+        c_repair_work_limit = 8192;
     type
         TWindowVariantCacheEntry = record
             texts: TArray<string>;
@@ -45266,6 +45412,7 @@ var
         pass_idx: Integer;
         move_idx: Integer;
         repair_start_tick: UInt64;
+        repair_work_count: Int64;
         repair_budget_logged: Boolean;
         variant_cache: TDictionary<string, TWindowVariantCacheEntry>;
 
@@ -45281,13 +45428,16 @@ var
             begin
                 budget_ms_local := c_repair_direct_budget_ms;
             end;
-            Result := (repair_start_tick > 0) and
-                ((GetTickCount64 - repair_start_tick) >= budget_ms_local);
+            Result := search_budget_should_stop(repair_start_tick,
+                repair_work_count, c_repair_work_limit, budget_ms_local,
+                budget_ms_local * 4, input_syllable_count >=
+                c_long_sentence_full_path_min_syllables);
             if Result and m_config.debug_mode and (not repair_budget_logged) then
             begin
                 repair_budget_logged := True;
                 m_last_full_path_debug_info := m_last_full_path_debug_info +
-                    Format(' vrepair=[budget %dms]', [c_repair_budget_ms]);
+                    Format(' vrepair=[budget mode=%d work=%d]',
+                    [Ord(m_search_budget_mode), repair_work_count]);
             end;
         end;
 
@@ -45571,6 +45721,7 @@ var
                 begin
                     Exit(False);
                 end;
+                Inc(repair_work_count);
 
                 local_query_key := build_query_key_local(local_start_unit,
                     local_unit_count);
@@ -45642,6 +45793,7 @@ var
                 out_anchor_units := Copy(cache_entry.anchor_units);
                 Exit(cache_entry.found);
             end;
+            Inc(repair_work_count);
 
             query_key := build_query_key_local(start_unit, unit_count);
             if (query_key <> '') and
@@ -45988,6 +46140,7 @@ var
         end;
     begin
         repair_start_tick := GetTickCount64;
+        repair_work_count := 0;
         repair_budget_logged := False;
         variant_cache := nil;
         if (Length(candidates) = 0) or (input_syllable_count < 4) or
@@ -50177,6 +50330,7 @@ var
                 standalone_chunk_config := m_config;
                 standalone_chunk_config.debug_mode := False;
                 standalone_chunk_engine := TncEngine.Create(standalone_chunk_config);
+                inherit_search_budget_policy_to(standalone_chunk_engine);
             end;
 
             standalone_chunk_states.AddOrSetValue(query_key_local, 3);
@@ -65765,6 +65919,7 @@ var
         c_solver_anchor_bonus = 3200;
         c_solver_promote_bonus = 4096;
         c_solver_probe_limit = 4;
+        c_solver_work_limit = 32768;
     type
         TSubquerySolverBeamOption = record
             text: string;
@@ -65815,28 +65970,42 @@ var
 
         solver_start_tick: UInt64;
         solver_budget_ms: UInt64;
+        solver_work_count: Int64;
         solver_budget_exceeded: Boolean;
 
         function solver_time_budget_exceeded_local: Boolean;
+        var
+            timed_budget_ms_local: UInt64;
+            emergency_budget_ms_local: UInt64;
         begin
-            if not m_composition_built_incrementally then
-            begin
-                Exit(False);
-            end;
             Result := solver_budget_exceeded;
-            if Result or (solver_budget_ms = 0) then
+            if Result then
             begin
                 Exit;
             end;
 
-            if GetTickCount64 - solver_start_tick >= solver_budget_ms then
+            Inc(solver_work_count);
+            if m_composition_built_incrementally then
+            begin
+                timed_budget_ms_local := solver_budget_ms;
+                emergency_budget_ms_local := solver_budget_ms * 2;
+            end
+            else
+            begin
+                timed_budget_ms_local := 0;
+                emergency_budget_ms_local := 0;
+            end;
+            if search_budget_should_stop(solver_start_tick,
+                solver_work_count, c_solver_work_limit,
+                timed_budget_ms_local, emergency_budget_ms_local) then
             begin
                 solver_budget_exceeded := True;
                 Result := True;
                 if m_config.debug_mode then
                 begin
                     m_last_full_path_debug_info := m_last_full_path_debug_info +
-                        Format(' tss_budget=[%d]', [solver_budget_ms]);
+                        Format(' tss_budget=[mode=%d work=%d]',
+                        [Ord(m_search_budget_mode), solver_work_count]);
                 end;
             end;
         end;
@@ -67637,6 +67806,7 @@ var
                     query_engine_config.debug_mode := False;
                     query_engine_config.max_candidates := 96;
                     query_engine := TncEngine.Create(query_engine_config);
+                    inherit_search_budget_policy_to(query_engine);
                     query_engine.m_disable_subspan_standalone_oracle :=
                         m_disable_subspan_standalone_oracle + 1;
                 end;
@@ -69491,6 +69661,7 @@ var
         end;
 
         solver_start_tick := GetTickCount64;
+        solver_work_count := 0;
         solver_budget_exceeded := False;
         if syllable_count_local >= 18 then
         begin
@@ -75377,6 +75548,7 @@ var
                 subspan_oracle_config.debug_mode := False;
                 subspan_oracle_config.max_candidates := 6;
                 subspan_oracle_engine := TncEngine.Create(subspan_oracle_config);
+                inherit_search_budget_policy_to(subspan_oracle_engine);
             end;
 
             Dec(subspan_oracle_budget_remaining);
@@ -78918,6 +79090,7 @@ var
         c_lattice_long_phrase_bonus = 720;
         c_lattice_context_scale = 4;
         c_lattice_trigram_scale = 6;
+        c_lattice_work_limit = 5000;
     type
         TExactLatticeState = record
             score: Integer;
@@ -78936,11 +79109,26 @@ var
         final_states_local: TExactLatticeStateArray;
         syllable_count_local: Integer;
         start_tick_local: UInt64;
+        lattice_work_count_local: Int64;
 
         function budget_exceeded_local: Boolean;
+        var
+            timed_budget_ms_local: UInt64;
+            emergency_budget_ms_local: UInt64;
         begin
-            Result := m_composition_built_incrementally and
-                ((GetTickCount64 - start_tick_local) > 45);
+            if m_composition_built_incrementally then
+            begin
+                timed_budget_ms_local := 45;
+                emergency_budget_ms_local := 180;
+            end
+            else
+            begin
+                timed_budget_ms_local := 0;
+                emergency_budget_ms_local := 0;
+            end;
+            Result := search_budget_should_stop(start_tick_local,
+                lattice_work_count_local, c_lattice_work_limit,
+                timed_budget_ms_local, emergency_budget_ms_local);
         end;
 
         function build_key_local(const start_idx: Integer;
@@ -79118,6 +79306,7 @@ var
             begin
                 Exit;
             end;
+            Inc(lattice_work_count_local);
 
             candidate_score := normalize_segment_weight_local(
                 get_candidate_weight_local(candidate), seg_len);
@@ -79223,6 +79412,7 @@ var
         end;
 
         start_tick_local := GetTickCount64;
+        lattice_work_count_local := 0;
         SetLength(state_map_local, syllable_count_local + 1);
         SetLength(state_map_local[0], 1);
         state_map_local[0][0].score := 0;
@@ -79258,6 +79448,10 @@ var
                     end;
                     for exact_idx := 0 to High(exact_results_local) do
                     begin
+                        if budget_exceeded_local then
+                        begin
+                            Break;
+                        end;
                         if exact_idx >= c_lattice_exact_probe_limit then
                         begin
                             Break;
@@ -79422,6 +79616,7 @@ var
         c_oracle_budget_ms = 180;
         // Bound direct/offline work while allowing a wider search than input.
         c_oracle_direct_budget_ms = 720;
+        c_oracle_work_limit = 16384;
     type
         TOracleState = record
             score: Integer;
@@ -79449,6 +79644,7 @@ var
         nested_engine: TncEngine;
         nested_engine_config: TncEngineConfig;
         oracle_start_tick: UInt64;
+        oracle_work_count: Int64;
         oracle_timed_out: Boolean;
 
         function oracle_budget_exhausted_local: Boolean;
@@ -79463,7 +79659,11 @@ var
             begin
                 budget_ms_local := c_oracle_direct_budget_ms;
             end;
-            Result := (GetTickCount64 - oracle_start_tick) > budget_ms_local;
+            Inc(oracle_work_count);
+            Result := search_budget_should_stop(oracle_start_tick,
+                oracle_work_count, c_oracle_work_limit, budget_ms_local,
+                budget_ms_local * 2, head_syllable_count_local >=
+                c_long_sentence_full_path_min_syllables);
             if Result and (not oracle_timed_out) then
             begin
                 oracle_timed_out := True;
@@ -79474,8 +79674,9 @@ var
                 if m_config.debug_mode then
                 begin
                     m_last_full_path_debug_info := m_last_full_path_debug_info +
-                        Format(' oracle_timeout=%d',
-                        [GetTickCount64 - oracle_start_tick]);
+                        Format(' oracle_budget=[mode=%d work=%d elapsed=%d]',
+                        [Ord(m_search_budget_mode), oracle_work_count,
+                        GetTickCount64 - oracle_start_tick]);
                 end;
             end;
         end;
@@ -79879,6 +80080,7 @@ var
                 subspan_oracle_config.debug_mode := False;
                 subspan_oracle_config.max_candidates := 6;
                 subspan_oracle_engine := TncEngine.Create(subspan_oracle_config);
+                inherit_search_budget_policy_to(subspan_oracle_engine);
             end;
 
             Dec(subspan_oracle_budget_remaining);
@@ -80087,6 +80289,7 @@ var
                 nested_engine_config := m_config;
                 nested_engine_config.debug_mode := False;
                 nested_engine := TncEngine.Create(nested_engine_config);
+                inherit_search_budget_policy_to(nested_engine);
                 nested_engine.m_disable_subspan_standalone_oracle :=
                     m_disable_subspan_standalone_oracle + 1;
             end;
@@ -80293,6 +80496,7 @@ var
         nested_option_cache := nil;
         nested_engine := nil;
         oracle_start_tick := GetTickCount64;
+        oracle_work_count := 0;
         oracle_timed_out := False;
         if m_dictionary = nil then
         begin
@@ -86424,7 +86628,9 @@ var
         end;
 
         total_elapsed_ms_local := GetTickCount64 - total_start_tick;
-        if total_elapsed_ms_local < c_long_postprocess_soft_budget_ms then
+        if not search_budget_should_stop(total_start_tick, 0, 0,
+            c_long_postprocess_soft_budget_ms,
+            c_long_postprocess_soft_budget_ms) then
         begin
             Exit;
         end;
@@ -86571,7 +86777,7 @@ var
     begin
         if m_composition_built_incrementally and delayed_long_decode_mode and
             (input_syllable_count > 10) and
-            (GetTickCount64 - total_start_tick > 1200) then
+            search_budget_should_stop(total_start_tick, 0, 0, 1200, 1200) then
         begin
             if m_config.debug_mode then
             begin
@@ -86587,7 +86793,8 @@ var
         if input_syllable_count > 10 then
         begin
             if (not m_composition_built_incrementally) or
-                (GetTickCount64 - total_start_tick <= 700) then
+                (not search_budget_should_stop(total_start_tick, 0, 0,
+                700, 1200)) then
             begin
                 local_phase_start_tick := GetTickCount64;
                 promote_best_visible_supported_complete_candidate_local(candidates);
@@ -136985,6 +137192,8 @@ const
     c_segment_full_path_budget_ms = 18;
     c_segment_full_path_budget_ms_long = 120;
     c_segment_full_path_budget_probe_interval = 64;
+    c_segment_full_path_work_limit = 8192;
+    c_segment_full_path_work_limit_long = 32768;
     c_segment_full_path_non_user_limit = 4;
     c_segment_full_path_non_user_limit_long = 4;
     c_segment_full_state_limit_long = 384;
@@ -139151,6 +139360,7 @@ var
         full_head_top_n: Integer;
         full_path_non_user_limit: Integer;
         full_path_budget_ms_limit: Integer;
+        full_path_work_limit_limit: Int64;
         full_state_limit_limit: Integer;
         long_sentence_full_path_mode: Boolean;
         local_state: TncSegmentPathState;
@@ -139186,6 +139396,7 @@ var
         local_chain_shape_bonus: Integer;
         full_path_budget_start_tick: UInt64;
         full_path_budget_work_counter: Integer;
+        full_path_total_work_counter: Int64;
         full_path_budget_exhausted: Boolean;
         final_complete_state_count: Integer;
         final_complete_multiseg_state_count: Integer;
@@ -140090,11 +140301,10 @@ var
         end;
 
         function full_path_budget_reached(const force_tick_check: Boolean = False): Boolean;
+        var
+            timed_budget_ms_local: UInt64;
+            emergency_budget_ms_local: UInt64;
         begin
-            if not m_composition_built_incrementally then
-            begin
-                Exit(False);
-            end;
             Result := full_path_budget_exhausted;
             if Result then
             begin
@@ -140103,16 +140313,31 @@ var
 
             if not force_tick_check then
             begin
+                Inc(full_path_total_work_counter);
                 Inc(full_path_budget_work_counter);
-                if full_path_budget_work_counter < c_segment_full_path_budget_probe_interval then
+                if (full_path_total_work_counter < full_path_work_limit_limit) and
+                    (full_path_budget_work_counter <
+                    c_segment_full_path_budget_probe_interval) then
                 begin
                     Exit(False);
                 end;
             end;
 
             full_path_budget_work_counter := 0;
-            full_path_budget_exhausted :=
-                Int64(GetTickCount64 - full_path_budget_start_tick) >= full_path_budget_ms_limit;
+            if m_composition_built_incrementally then
+            begin
+                timed_budget_ms_local := full_path_budget_ms_limit;
+                emergency_budget_ms_local := full_path_budget_ms_limit * 4;
+            end
+            else
+            begin
+                timed_budget_ms_local := 0;
+                emergency_budget_ms_local := 0;
+            end;
+            full_path_budget_exhausted := search_budget_should_stop(
+                full_path_budget_start_tick, full_path_total_work_counter,
+                full_path_work_limit_limit, timed_budget_ms_local,
+                emergency_budget_ms_local, long_sentence_full_path_mode);
             Result := full_path_budget_exhausted;
         end;
 
@@ -141661,12 +141886,14 @@ var
 
         long_sentence_full_path_mode := Length(syllables) >= c_long_sentence_full_path_min_syllables;
         full_path_budget_ms_limit := c_segment_full_path_budget_ms;
+        full_path_work_limit_limit := c_segment_full_path_work_limit;
         full_state_limit_limit := c_segment_full_state_limit;
         if long_sentence_full_path_mode then
         begin
             full_head_top_n := 4;
             full_path_non_user_limit := c_segment_full_path_non_user_limit_long;
             full_path_budget_ms_limit := c_segment_full_path_budget_ms_long;
+            full_path_work_limit_limit := c_segment_full_path_work_limit_long;
             full_state_limit_limit := c_segment_full_state_limit_long;
         end
         else if Length(syllables) >= 6 then
@@ -141717,6 +141944,7 @@ var
             SetLength(single_char_rank_maps, Length(syllables));
             full_path_budget_start_tick := GetTickCount64;
             full_path_budget_work_counter := 0;
+            full_path_total_work_counter := 0;
             full_path_budget_exhausted := False;
             final_complete_state_count := 0;
             final_complete_multiseg_state_count := 0;

@@ -36,6 +36,12 @@ Benchmark-16300 contains 16,300 eligible sentences extracted from the novel in a
 - A case is a `Top1` pass when the first complete candidate matches the original sentence under the shared scoring rule above.
 - A case is a `Top2` pass when either of the first two complete candidates matches the original sentence under the shared scoring rule above.
 
+### Accuracy and Latency Modes
+
+- Accuracy runs use deterministic-work mode: normal search paths do not stop on wall-clock time and remain bounded by fixed beam, state, edge, candidate, and work limits. Changes in machine load therefore do not change normal candidate generation.
+- Latency runs use production mode: fixed work limits are the primary boundary, with wider emergency wall-clock ceilings retained to prevent unacceptable stalls on malformed long Pinyin or slower machines.
+- The two measurements are run separately. The eight-slice runner accelerates accuracy evaluation and is not used for published latency data.
+
 ### Latency Protocol
 
 Published long-sentence latency values measure engine-only full-query decoding:
