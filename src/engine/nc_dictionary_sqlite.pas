@@ -38,6 +38,7 @@ type
         m_trigram_prune_countdown: Integer;
         m_query_path_prune_countdown: Integer;
         m_query_path_penalty_prune_countdown: Integer;
+        m_context_query_choice_prune_countdown: Integer;
         m_write_batch_depth: Integer;
         m_base_connection: TncSqliteConnection;
         m_user_connection: TncSqliteConnection;
@@ -48,6 +49,7 @@ type
         m_single_char_weight_cache: TDictionary<string, Integer>;
         m_context_bonus_cache: TDictionary<string, Integer>;
         m_query_choice_bonus_cache: TDictionary<string, Integer>;
+        m_context_query_choice_bonus_cache: TDictionary<string, Integer>;
         m_query_latest_choice_text_cache: TDictionary<string, string>;
         m_query_path_bonus_cache: TDictionary<string, Integer>;
         m_base_query_path_pinyin_cache: TDictionary<string, Boolean>;
@@ -95,6 +97,7 @@ type
         m_stmt_base_text_prefix_bonus: Psqlite3_stmt;
         m_stmt_single_char_exact_weight: Psqlite3_stmt;
         m_stmt_query_choice_bonus: Psqlite3_stmt;
+        m_stmt_context_query_choice_bonus: Psqlite3_stmt;
         m_stmt_query_latest_choice_text: Psqlite3_stmt;
         m_stmt_query_path_bonus: Psqlite3_stmt;
         m_stmt_query_path_penalty: Psqlite3_stmt;
@@ -226,6 +229,8 @@ type
         procedure prune_trigram_rows_if_needed(const force: Boolean);
         procedure prune_query_path_rows_if_needed(const force: Boolean);
         procedure prune_query_path_penalty_rows_if_needed(const force: Boolean);
+        procedure prune_context_query_choice_rows_if_needed(
+            const force: Boolean);
         procedure clear_cached_user_statements;
         procedure clear_user_read_caches;
         procedure clear_dictionary_lookup_caches;
@@ -289,12 +294,16 @@ type
         procedure record_context_pair(const left_text: string; const committed_text: string); override;
         procedure record_context_trigram(const prev_prev_text: string; const prev_text: string;
             const committed_text: string); override;
+        procedure record_context_query_choice(const context_suffix: string;
+            const query_key: string; const candidate_text: string); override;
         procedure record_query_segment_path(const query_key: string; const encoded_path: string); override;
         procedure record_query_segment_path_penalty(const query_key: string; const encoded_path: string); override;
         procedure record_candidate_penalty(const pinyin: string; const text: string); override;
         function get_context_bonus(const left_text: string; const candidate_text: string): Integer; override;
         function get_context_trigram_bonus(const prev_prev_text: string; const prev_text: string;
             const candidate_text: string): Integer; override;
+        function get_context_query_choice_bonus(const context_suffix: string;
+            const query_key: string; const candidate_text: string): Integer; override;
         function get_query_choice_bonus(const query_key: string; const candidate_text: string): Integer; override;
         function get_query_latest_choice_text(const query_key: string): string; override;
         function get_query_segment_path_bonus(const query_key: string; const encoded_path: string): Integer; override;
@@ -346,7 +355,7 @@ const
         '    value TEXT NOT NULL' + sLineBreak +
         ');' + sLineBreak +
         sLineBreak +
-        'INSERT OR IGNORE INTO meta(key, value) VALUES(''schema_version'', ''15'');' + sLineBreak +
+        'INSERT OR IGNORE INTO meta(key, value) VALUES(''schema_version'', ''16'');' + sLineBreak +
         sLineBreak +
         'CREATE TABLE IF NOT EXISTS dict_base (' + sLineBreak +
         '    id INTEGER PRIMARY KEY AUTOINCREMENT,' + sLineBreak +
@@ -438,6 +447,20 @@ const
         ');' + sLineBreak +
         sLineBreak +
         'CREATE INDEX IF NOT EXISTS idx_dict_user_query_latest_text ON dict_user_query_latest(text);' + sLineBreak +
+        sLineBreak +
+        'CREATE TABLE IF NOT EXISTS dict_user_context_query_choice (' + sLineBreak +
+        '    context_suffix TEXT NOT NULL,' + sLineBreak +
+        '    query_pinyin TEXT NOT NULL,' + sLineBreak +
+        '    text TEXT NOT NULL,' + sLineBreak +
+        '    commit_count INTEGER DEFAULT 0,' + sLineBreak +
+        '    last_used INTEGER DEFAULT 0,' + sLineBreak +
+        '    PRIMARY KEY(context_suffix, query_pinyin, text)' + sLineBreak +
+        ');' + sLineBreak +
+        sLineBreak +
+        'CREATE INDEX IF NOT EXISTS idx_dict_user_context_query_choice_lookup ' +
+        'ON dict_user_context_query_choice(context_suffix, query_pinyin);' + sLineBreak +
+        'CREATE INDEX IF NOT EXISTS idx_dict_user_context_query_choice_last_used ' +
+        'ON dict_user_context_query_choice(last_used);' + sLineBreak +
         sLineBreak +
         'CREATE TABLE IF NOT EXISTS dict_user_penalty (' + sLineBreak +
         '    pinyin TEXT NOT NULL,' + sLineBreak +
@@ -2234,6 +2257,7 @@ begin
     m_trigram_prune_countdown := 64;
     m_query_path_prune_countdown := 64;
     m_query_path_penalty_prune_countdown := 64;
+    m_context_query_choice_prune_countdown := 64;
     m_write_batch_depth := 0;
     m_stmt_context_bonus := nil;
     m_stmt_context_trigram_bonus := nil;
@@ -2247,6 +2271,7 @@ begin
     m_stmt_base_text_prefix_bonus := nil;
     m_stmt_single_char_exact_weight := nil;
     m_stmt_query_choice_bonus := nil;
+    m_stmt_context_query_choice_bonus := nil;
     m_stmt_query_latest_choice_text := nil;
     m_stmt_query_path_bonus := nil;
     m_stmt_query_path_penalty := nil;
@@ -2275,6 +2300,7 @@ begin
     m_single_char_weight_cache := TDictionary<string, Integer>.Create;
     m_context_bonus_cache := TDictionary<string, Integer>.Create;
     m_query_choice_bonus_cache := TDictionary<string, Integer>.Create;
+    m_context_query_choice_bonus_cache := TDictionary<string, Integer>.Create;
     m_query_latest_choice_text_cache := TDictionary<string, string>.Create;
     m_query_path_bonus_cache := TDictionary<string, Integer>.Create;
     m_base_query_path_pinyin_cache := TDictionary<string, Boolean>.Create;
@@ -2419,6 +2445,11 @@ begin
     begin
         m_query_choice_bonus_cache.Free;
         m_query_choice_bonus_cache := nil;
+    end;
+    if m_context_query_choice_bonus_cache <> nil then
+    begin
+        m_context_query_choice_bonus_cache.Free;
+        m_context_query_choice_bonus_cache := nil;
     end;
     if m_query_latest_choice_text_cache <> nil then
     begin
@@ -3891,6 +3922,11 @@ begin
             Exit;
         end;
         set_schema_version(connection, 15);
+    end;
+
+    if schema_version < 16 then
+    begin
+        set_schema_version(connection, 16);
     end;
 
     Result := True;
@@ -7133,6 +7169,75 @@ begin
     end;
 end;
 
+procedure TncSqliteDictionary.prune_context_query_choice_rows_if_needed(
+    const force: Boolean);
+const
+    count_sql = 'SELECT COUNT(1) FROM dict_user_context_query_choice';
+    delete_sql =
+        'DELETE FROM dict_user_context_query_choice WHERE rowid IN (' +
+        'SELECT rowid FROM dict_user_context_query_choice ' +
+        'ORDER BY last_used ASC, commit_count ASC LIMIT ?1)';
+    c_prune_interval = 64;
+    c_max_rows = 4096;
+    c_target_rows = 3584;
+var
+    stmt: Psqlite3_stmt;
+    row_count: Integer;
+    delete_count: Integer;
+begin
+    if (not m_user_ready) or (m_user_connection = nil) then
+    begin
+        Exit;
+    end;
+    if not force then
+    begin
+        Dec(m_context_query_choice_prune_countdown);
+        if m_context_query_choice_prune_countdown > 0 then
+        begin
+            Exit;
+        end;
+    end;
+    m_context_query_choice_prune_countdown := c_prune_interval;
+
+    row_count := 0;
+    stmt := nil;
+    try
+        if m_user_connection.prepare(count_sql, stmt) and
+            (m_user_connection.step(stmt) = SQLITE_ROW) then
+        begin
+            row_count := m_user_connection.column_int(stmt, 0);
+        end;
+    finally
+        if stmt <> nil then
+        begin
+            m_user_connection.finalize(stmt);
+        end;
+    end;
+    if row_count <= c_max_rows then
+    begin
+        Exit;
+    end;
+
+    delete_count := row_count - c_target_rows;
+    stmt := nil;
+    try
+        if m_user_connection.prepare(delete_sql, stmt) and
+            m_user_connection.bind_int(stmt, 1, delete_count) then
+        begin
+            m_user_connection.step(stmt);
+        end;
+    finally
+        if stmt <> nil then
+        begin
+            m_user_connection.finalize(stmt);
+        end;
+    end;
+    if m_context_query_choice_bonus_cache <> nil then
+    begin
+        m_context_query_choice_bonus_cache.Clear;
+    end;
+end;
+
 procedure TncSqliteDictionary.load_base_exact_pinyin_bloom;
 const
     c_bloom_byte_count = 1 shl 19;
@@ -7572,6 +7677,10 @@ begin
     begin
         m_query_choice_bonus_cache.Clear;
     end;
+    if m_context_query_choice_bonus_cache <> nil then
+    begin
+        m_context_query_choice_bonus_cache.Clear;
+    end;
     if m_query_latest_choice_text_cache <> nil then
     begin
         m_query_latest_choice_text_cache.Clear;
@@ -7654,6 +7763,12 @@ begin
     begin
         m_user_connection.finalize(m_stmt_query_choice_bonus);
         m_stmt_query_choice_bonus := nil;
+    end;
+    if (m_stmt_context_query_choice_bonus <> nil) and
+        (m_user_connection <> nil) then
+    begin
+        m_user_connection.finalize(m_stmt_context_query_choice_bonus);
+        m_stmt_context_query_choice_bonus := nil;
     end;
     if (m_stmt_query_latest_choice_text <> nil) and (m_user_connection <> nil) then
     begin
@@ -7746,6 +7861,10 @@ begin
     if m_query_choice_bonus_cache <> nil then
     begin
         m_query_choice_bonus_cache.Clear;
+    end;
+    if m_context_query_choice_bonus_cache <> nil then
+    begin
+        m_context_query_choice_bonus_cache.Clear;
     end;
     if m_query_latest_choice_text_cache <> nil then
     begin
@@ -12187,6 +12306,68 @@ begin
     // Persistent context learning is disabled.
 end;
 
+procedure TncSqliteDictionary.record_context_query_choice(
+    const context_suffix: string; const query_key: string;
+    const candidate_text: string);
+const
+    insert_sql =
+        'INSERT OR IGNORE INTO dict_user_context_query_choice' +
+        '(context_suffix, query_pinyin, text, commit_count, last_used) ' +
+        'VALUES(?1, ?2, ?3, 0, strftime(''%s'',''now''))';
+    update_sql =
+        'UPDATE dict_user_context_query_choice SET ' +
+        'commit_count = MIN(commit_count + 1, 255), ' +
+        'last_used = strftime(''%s'',''now'') ' +
+        'WHERE context_suffix = ?1 AND query_pinyin = ?2 AND text = ?3';
+var
+    context_value: string;
+    normalized_query: string;
+    text_value: string;
+    stmt: Psqlite3_stmt;
+
+    function execute_statement(const sql_text: string): Boolean;
+    begin
+        Result := False;
+        stmt := nil;
+        try
+            if (not m_user_connection.prepare(sql_text, stmt)) or
+                (not m_user_connection.bind_text(stmt, 1, context_value)) or
+                (not m_user_connection.bind_text(stmt, 2, normalized_query)) or
+                (not m_user_connection.bind_text(stmt, 3, text_value)) then
+            begin
+                Exit;
+            end;
+            Result := m_user_connection.step(stmt) = SQLITE_DONE;
+        finally
+            if stmt <> nil then
+            begin
+                m_user_connection.finalize(stmt);
+            end;
+        end;
+    end;
+begin
+    context_value := Trim(context_suffix);
+    normalized_query := LowerCase(Trim(query_key));
+    text_value := Trim(candidate_text);
+    if (context_value = '') or (Length(context_value) > 12) or
+        (normalized_query = '') or (text_value = '') or
+        (not is_valid_learning_text(text_value)) or (not ensure_open) or
+        (not m_user_ready) or (m_user_connection = nil) then
+    begin
+        Exit;
+    end;
+
+    if execute_statement(insert_sql) and execute_statement(update_sql) then
+    begin
+        if m_context_query_choice_bonus_cache <> nil then
+        begin
+            m_context_query_choice_bonus_cache.Clear;
+        end;
+        prune_context_query_choice_rows_if_needed(False);
+        note_user_data_changed;
+    end;
+end;
+
 procedure TncSqliteDictionary.record_query_segment_path(const query_key: string; const encoded_path: string);
 begin
     // User query-path persistence is disabled; base query paths can still
@@ -12271,6 +12452,122 @@ function TncSqliteDictionary.get_context_trigram_bonus(const prev_prev_text: str
     const candidate_text: string): Integer;
 begin
     Result := 0;
+end;
+
+function TncSqliteDictionary.get_context_query_choice_bonus(
+    const context_suffix: string; const query_key: string;
+    const candidate_text: string): Integer;
+const
+    query_sql =
+        'SELECT commit_count, last_used FROM dict_user_context_query_choice ' +
+        'WHERE context_suffix = ?1 AND query_pinyin = ?2 AND text = ?3 LIMIT 1';
+    c_day_seconds = 24 * 60 * 60;
+    c_week_seconds = 7 * c_day_seconds;
+    c_month_seconds = 30 * c_day_seconds;
+    c_expiry_seconds = 90 * c_day_seconds;
+var
+    context_value: string;
+    normalized_query: string;
+    text_value: string;
+    cache_key: string;
+    step_result: Integer;
+    commit_count: Integer;
+    last_used: Int64;
+    now_value: Int64;
+    age_seconds: Int64;
+begin
+    Result := 0;
+    context_value := Trim(context_suffix);
+    normalized_query := LowerCase(Trim(query_key));
+    text_value := Trim(candidate_text);
+    if (context_value = '') or (Length(context_value) > 12) or
+        (normalized_query = '') or (text_value = '') or (not ensure_open) or
+        (not m_user_ready) or (m_user_connection = nil) then
+    begin
+        Exit;
+    end;
+    refresh_user_data_version_if_changed(False);
+
+    cache_key := context_value + #2 + normalized_query + #1 + text_value;
+    if (m_context_query_choice_bonus_cache <> nil) and
+        m_context_query_choice_bonus_cache.TryGetValue(cache_key, Result) then
+    begin
+        Exit;
+    end;
+
+    try
+        if m_stmt_context_query_choice_bonus = nil then
+        begin
+            if not m_user_connection.prepare(query_sql,
+                m_stmt_context_query_choice_bonus) then
+            begin
+                Exit;
+            end;
+        end;
+        if (not m_user_connection.reset(m_stmt_context_query_choice_bonus)) or
+            (not m_user_connection.clear_bindings(
+            m_stmt_context_query_choice_bonus)) or
+            (not m_user_connection.bind_text(m_stmt_context_query_choice_bonus,
+            1, context_value)) or
+            (not m_user_connection.bind_text(m_stmt_context_query_choice_bonus,
+            2, normalized_query)) or
+            (not m_user_connection.bind_text(m_stmt_context_query_choice_bonus,
+            3, text_value)) then
+        begin
+            Exit;
+        end;
+
+        step_result := m_user_connection.step(
+            m_stmt_context_query_choice_bonus);
+        if step_result <> SQLITE_ROW then
+        begin
+            Exit;
+        end;
+        commit_count := m_user_connection.column_int(
+            m_stmt_context_query_choice_bonus, 0);
+        last_used := m_user_connection.column_int(
+            m_stmt_context_query_choice_bonus, 1);
+        if commit_count > 0 then
+        begin
+            Result := 72 + (Min(commit_count, 8) - 1) * 46;
+            now_value := get_unix_time_now;
+            if (last_used > 0) and (now_value > 0) then
+            begin
+                age_seconds := Max(Int64(0), now_value - last_used);
+                if age_seconds > c_expiry_seconds then
+                begin
+                    Result := 0;
+                end
+                else if age_seconds > c_month_seconds then
+                begin
+                    Result := Result div 4;
+                end
+                else if age_seconds > c_week_seconds then
+                begin
+                    Result := Result div 2;
+                end
+                else if age_seconds > c_day_seconds then
+                begin
+                    Result := (Result * 3) div 4;
+                end;
+            end;
+            if Result > 420 then
+            begin
+                Result := 420;
+            end;
+        end;
+    finally
+        if m_stmt_context_query_choice_bonus <> nil then
+        begin
+            m_user_connection.reset(m_stmt_context_query_choice_bonus);
+            m_user_connection.clear_bindings(m_stmt_context_query_choice_bonus);
+        end;
+    end;
+
+    if m_context_query_choice_bonus_cache <> nil then
+    begin
+        m_context_query_choice_bonus_cache.AddOrSetValue(cache_key, Result);
+    end;
 end;
 
 function TncSqliteDictionary.get_query_choice_bonus(const query_key: string;
@@ -14564,6 +14861,8 @@ begin
             (not m_user_connection.exec('DELETE FROM dict_user_stats;')) or
             (not m_user_connection.exec('DELETE FROM dict_user_fuzzy_choice;')) or
             (not m_user_connection.exec('DELETE FROM dict_user_query_latest;')) or
+            (not m_user_connection.exec(
+                'DELETE FROM dict_user_context_query_choice;')) or
             (not m_user_connection.exec('DELETE FROM dict_user_penalty;')) or
             (not m_user_connection.exec('DELETE FROM dict_user_bigram;')) or
             (not m_user_connection.exec('DELETE FROM dict_user_trigram;')) or
@@ -14585,6 +14884,7 @@ begin
         m_trigram_prune_countdown := 64;
         m_query_path_prune_countdown := 64;
         m_query_path_penalty_prune_countdown := 64;
+        m_context_query_choice_prune_countdown := 64;
         note_user_data_changed;
         m_literal_user_words_available := 0;
         Result := True;

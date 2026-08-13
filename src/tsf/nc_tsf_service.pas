@@ -3805,7 +3805,7 @@ end;
 
 function TncTextService.request_surrounding_text(const context: ITfContext; out left_text: string): Boolean;
 const
-    c_surrounding_max_chars = 20;
+    c_surrounding_max_chars = 64;
 var
     edit_session: ITfEditSession;
     session_hr: HRESULT;
