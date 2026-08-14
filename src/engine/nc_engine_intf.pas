@@ -735,6 +735,9 @@ type
         function get_short_four_two_exact_path_evidence(
             const query_key: string; const text_value: string;
             out encoded_path: string; out evidence_score: Integer): Boolean;
+        function get_short_four_transition_particle_path_evidence(
+            const query_key: string; const text_value: string;
+            out encoded_path: string; out evidence_score: Integer): Boolean;
         function is_current_short_two_single_pair_candidate_supported(
             const query_key: string; const candidate_text: string): Boolean;
         function is_current_short_three_exact_pair_candidate_supported(
@@ -2334,6 +2337,279 @@ begin
         evidence_score := Max(0, evidence_score - path_penalty);
     end;
     cache_evidence;
+    Result := evidence_score > 0;
+end;
+
+function TncEngine.get_short_four_transition_particle_path_evidence(
+    const query_key: string; const text_value: string;
+    out encoded_path: string; out evidence_score: Integer): Boolean;
+const
+    c_min_lm_raw_weight = 390;
+    c_min_query_path_raw_weight = 420;
+    c_min_corroborated_raw_weight = 360;
+    c_model_evidence_cap = 1560;
+    c_query_path_evidence_cap = 420;
+var
+    normalized_query: string;
+    normalized_text: string;
+    evidence_cache_key: string;
+    path_cache_key: string;
+    cached_evidence: Integer;
+    syllables: TncPinyinParseResult;
+    units: TArray<string>;
+    prefix_query: string;
+    prefix_text: string;
+    particle_key: string;
+    particle_text: string;
+    model_paths: TncPairPathEvidenceList;
+    model_idx: Integer;
+    parts: TArray<string>;
+    first_units: Integer;
+    second_units: Integer;
+    first_key: string;
+    second_key: string;
+    candidate_path: string;
+    candidate_evidence: Integer;
+    path_penalty: Integer;
+
+    procedure cache_result;
+    begin
+        if m_lookup_display_feature_cache <> nil then
+        begin
+            m_lookup_display_feature_cache.AddOrSetValue(evidence_cache_key,
+                evidence_score);
+        end;
+        if (evidence_score > 0) and (encoded_path <> '') and
+            (m_lookup_query_latest_text_cache <> nil) then
+        begin
+            m_lookup_query_latest_text_cache.AddOrSetValue(path_cache_key,
+                encoded_path);
+        end;
+    end;
+
+    function build_query_span_key(const start_idx: Integer;
+        const span_len: Integer): string;
+    var
+        idx: Integer;
+    begin
+        Result := '';
+        if (start_idx < 0) or (span_len <= 0) or
+            (start_idx + span_len > Length(syllables)) then
+        begin
+            Exit;
+        end;
+        for idx := start_idx to start_idx + span_len - 1 do
+        begin
+            Result := Result + normalize_pinyin_text(syllables[idx].text);
+        end;
+    end;
+
+    function query_path_evidence(const raw_weight: Integer): Integer;
+    begin
+        Result := 0;
+        if raw_weight <= 0 then
+        begin
+            Exit;
+        end;
+        Result := (raw_weight * 3) div 5;
+        if raw_weight >= 420 then
+        begin
+            Inc(Result, 28);
+        end;
+        if raw_weight >= 620 then
+        begin
+            Inc(Result, 42);
+        end;
+        if raw_weight >= 820 then
+        begin
+            Inc(Result, 54);
+        end;
+        Result := Min(c_query_path_evidence_cap, Result);
+    end;
+
+    function try_get_particle_text(const pinyin_value: string;
+        const text_value_local: string; out normalized_particle: string): Boolean;
+    begin
+        normalized_particle := normalize_pinyin_text(pinyin_value);
+        Result :=
+            ((normalized_particle = 'de') and
+            SameText(text_value_local, string(Char($7684)))) or
+            ((normalized_particle = 'le') and
+            SameText(text_value_local, string(Char($4E86)))) or
+            ((normalized_particle = 'zhe') and
+            SameText(text_value_local, string(Char($7740)))) or
+            ((normalized_particle = 'la') and
+            SameText(text_value_local, string(Char($5566)))) or
+            ((normalized_particle = 'ba') and
+            SameText(text_value_local, string(Char($5427)))) or
+            ((normalized_particle = 'ma') and
+            SameText(text_value_local, string(Char($5417)))) or
+            ((normalized_particle = 'a') and
+            SameText(text_value_local, string(Char($554A))));
+    end;
+
+    function exact_segment_exists(const key_value: string;
+        const exact_text: string; const expected_units: Integer): Boolean;
+    var
+        exact_results: TncCandidateList;
+        exact_idx: Integer;
+        candidate_text: string;
+    begin
+        Result := False;
+        if (m_dictionary = nil) or (key_value = '') or (exact_text = '') or
+            (get_candidate_text_unit_count(exact_text) <> expected_units) then
+        begin
+            Exit;
+        end;
+        if m_dictionary.is_base_entry(key_value, exact_text) or
+            m_dictionary.is_user_entry(key_value, exact_text) then
+        begin
+            Exit(True);
+        end;
+        if not m_dictionary.lookup_exact_full_pinyin(key_value,
+            exact_results) then
+        begin
+            Exit;
+        end;
+        for exact_idx := 0 to High(exact_results) do
+        begin
+            candidate_text := Trim(exact_results[exact_idx].text);
+            if (Trim(exact_results[exact_idx].comment) = '') and
+                SameText(candidate_text, exact_text) and
+                (get_candidate_text_unit_count(candidate_text) =
+                expected_units) and
+                ((exact_results[exact_idx].source = cs_user) or
+                exact_results[exact_idx].has_dict_weight) then
+            begin
+                Exit(True);
+            end;
+        end;
+    end;
+begin
+    Result := False;
+    encoded_path := '';
+    evidence_score := 0;
+    if m_dictionary = nil then
+    begin
+        Exit;
+    end;
+
+    normalized_query := normalize_pinyin_text(query_key);
+    normalized_text := Trim(text_value);
+    syllables := get_effective_compact_pinyin_syllables(normalized_query);
+    units := split_text_units(normalized_text);
+    if (Length(syllables) <> 4) or (Length(units) <> 4) then
+    begin
+        Exit;
+    end;
+
+    evidence_cache_key := 'S43E' + #1 + normalized_query + #1 +
+        normalized_text;
+    path_cache_key := 'S43P' + #1 + normalized_query + #1 + normalized_text;
+    if (m_lookup_display_feature_cache <> nil) and
+        m_lookup_display_feature_cache.TryGetValue(evidence_cache_key,
+        cached_evidence) then
+    begin
+        evidence_score := cached_evidence;
+        if (evidence_score > 0) and
+            (m_lookup_query_latest_text_cache <> nil) then
+        begin
+            m_lookup_query_latest_text_cache.TryGetValue(path_cache_key,
+                encoded_path);
+        end;
+        Exit(evidence_score > 0);
+    end;
+
+    particle_text := units[3];
+    if not try_get_particle_text(syllables[3].text, particle_text,
+        particle_key) then
+    begin
+        cache_result;
+        Exit;
+    end;
+    if not exact_segment_exists(particle_key, particle_text, 1) then
+    begin
+        cache_result;
+        Exit;
+    end;
+
+    prefix_query := build_query_span_key(0, 3);
+    prefix_text := units[0] + units[1] + units[2];
+    if (prefix_query = '') or (prefix_text = '') or
+        (not m_dictionary.get_exact_pair_path_evidence(prefix_query,
+        model_paths)) then
+    begin
+        cache_result;
+        Exit;
+    end;
+
+    for model_idx := 0 to High(model_paths) do
+    begin
+        candidate_path := Trim(model_paths[model_idx].encoded_path);
+        if get_encoded_path_segment_count_local(candidate_path) <> 2 then
+        begin
+            Continue;
+        end;
+        parts := candidate_path.Split([c_segment_path_separator]);
+        if Length(parts) <> 2 then
+        begin
+            Continue;
+        end;
+        parts[0] := Trim(parts[0]);
+        parts[1] := Trim(parts[1]);
+        first_units := get_candidate_text_unit_count(parts[0]);
+        second_units := get_candidate_text_unit_count(parts[1]);
+        if (first_units < 1) or (first_units > 2) or
+            (second_units < 1) or (second_units > 2) or
+            (first_units + second_units <> 3) or
+            (not SameText(parts[0] + parts[1], prefix_text)) then
+        begin
+            Continue;
+        end;
+
+        first_key := build_query_span_key(0, first_units);
+        second_key := build_query_span_key(first_units, second_units);
+        if (not exact_segment_exists(first_key, parts[0], first_units)) or
+            (not exact_segment_exists(second_key, parts[1], second_units)) then
+        begin
+            Continue;
+        end;
+
+        candidate_evidence := 0;
+        if (model_paths[model_idx].lm_transition_weight >=
+            c_min_lm_raw_weight) or
+            ((model_paths[model_idx].lm_transition_weight >=
+            c_min_corroborated_raw_weight) and
+            (model_paths[model_idx].query_path_weight >=
+            c_min_corroborated_raw_weight)) then
+        begin
+            candidate_evidence := Min(c_model_evidence_cap,
+                3 * model_paths[model_idx].lm_transition_weight);
+        end;
+        if model_paths[model_idx].query_path_weight >=
+            c_min_query_path_raw_weight then
+        begin
+            candidate_evidence := Max(candidate_evidence,
+                query_path_evidence(
+                model_paths[model_idx].query_path_weight));
+        end;
+        if candidate_evidence <= 0 then
+        begin
+            Continue;
+        end;
+
+        path_penalty := Max(0, get_cached_query_segment_path_penalty(
+            prefix_query, candidate_path));
+        candidate_evidence := Max(0, candidate_evidence - path_penalty);
+        if candidate_evidence > evidence_score then
+        begin
+            evidence_score := candidate_evidence;
+            encoded_path := candidate_path + c_segment_path_separator +
+                particle_text;
+        end;
+    end;
+
+    cache_result;
     Result := evidence_score > 0;
 end;
 
@@ -5414,6 +5690,218 @@ var
         end;
     end;
 
+    procedure ensure_supported_short_four_transition_particle_path_visible_local(
+        const query_syllables_local: TncPinyinParseResult;
+        var candidates_local: TncCandidateList);
+    const
+        c_generated_complete_base_score = 16000;
+        c_max_generated_candidates = 3;
+    var
+        query_key_local: string;
+        prefix_key_local: string;
+        particle_key_local: string;
+        particle_text_local: string;
+        model_paths_local: TncPairPathEvidenceList;
+        full_exact_results_local: TncCandidateList;
+        model_idx_local: Integer;
+        candidate_idx_local: Integer;
+        existing_idx_local: Integer;
+        move_idx_local: Integer;
+        generated_count_local: Integer;
+        evidence_score_local: Integer;
+        best_evidence_local: Integer;
+        generated_score_local: Integer;
+        generated_text_local: string;
+        evidence_path_local: string;
+        model_path_local: string;
+        path_parts_local: TArray<string>;
+        generated_candidate_local: TncCandidate;
+        picked_candidate_local: TncCandidate;
+        best_text_local: string;
+
+        function try_get_particle_text_local: Boolean;
+        begin
+            particle_key_local := normalize_pinyin_text(
+                query_syllables_local[3].text);
+            particle_text_local := '';
+            if particle_key_local = 'de' then
+            begin
+                particle_text_local := string(Char($7684));
+            end
+            else if particle_key_local = 'le' then
+            begin
+                particle_text_local := string(Char($4E86));
+            end
+            else if particle_key_local = 'zhe' then
+            begin
+                particle_text_local := string(Char($7740));
+            end
+            else if particle_key_local = 'la' then
+            begin
+                particle_text_local := string(Char($5566));
+            end
+            else if particle_key_local = 'ba' then
+            begin
+                particle_text_local := string(Char($5427));
+            end
+            else if particle_key_local = 'ma' then
+            begin
+                particle_text_local := string(Char($5417));
+            end
+            else if particle_key_local = 'a' then
+            begin
+                particle_text_local := string(Char($554A));
+            end;
+            Result := particle_text_local <> '';
+        end;
+
+        function has_full_query_exact_local: Boolean;
+        var
+            exact_idx_local: Integer;
+            exact_text_local: string;
+        begin
+            Result := False;
+            if not lookup_exact_full_pinyin_cached_local(query_key_local,
+                full_exact_results_local) then
+            begin
+                Exit;
+            end;
+            for exact_idx_local := 0 to High(full_exact_results_local) do
+            begin
+                exact_text_local := Trim(
+                    full_exact_results_local[exact_idx_local].text);
+                if (Trim(full_exact_results_local[exact_idx_local].comment) = '') and
+                    (get_candidate_text_unit_count(exact_text_local) = 4) then
+                begin
+                    Exit(True);
+                end;
+            end;
+        end;
+    begin
+        if (m_dictionary = nil) or (Length(query_syllables_local) <> 4) or
+            has_explicit_apostrophe_input or
+            (not try_get_particle_text_local) then
+        begin
+            Exit;
+        end;
+
+        query_key_local := short_four_span_query_key_local(
+            query_syllables_local, 0, 4);
+        prefix_key_local := short_four_span_query_key_local(
+            query_syllables_local, 0, 3);
+        if (query_key_local = '') or (prefix_key_local = '') or
+            has_full_query_exact_local or
+            (not m_dictionary.get_exact_pair_path_evidence(prefix_key_local,
+            model_paths_local)) then
+        begin
+            Exit;
+        end;
+
+        generated_count_local := 0;
+        best_evidence_local := 0;
+        best_text_local := '';
+        for model_idx_local := 0 to High(model_paths_local) do
+        begin
+            if generated_count_local >= c_max_generated_candidates then
+            begin
+                Break;
+            end;
+            model_path_local := Trim(
+                model_paths_local[model_idx_local].encoded_path);
+            path_parts_local := model_path_local.Split(
+                [c_segment_path_separator]);
+            if Length(path_parts_local) <> 2 then
+            begin
+                Continue;
+            end;
+            generated_text_local := Trim(path_parts_local[0]) +
+                Trim(path_parts_local[1]) + particle_text_local;
+            if not get_short_four_transition_particle_path_evidence(
+                query_key_local, generated_text_local, evidence_path_local,
+                evidence_score_local) then
+            begin
+                Continue;
+            end;
+
+            generated_score_local := c_generated_complete_base_score +
+                Min(1560, evidence_score_local);
+            existing_idx_local := -1;
+            for candidate_idx_local := 0 to High(candidates_local) do
+            begin
+                if (Trim(candidates_local[candidate_idx_local].comment) = '') and
+                    SameText(Trim(candidates_local[candidate_idx_local].text),
+                    generated_text_local) then
+                begin
+                    existing_idx_local := candidate_idx_local;
+                    Break;
+                end;
+            end;
+
+            if existing_idx_local >= 0 then
+            begin
+                generated_candidate_local :=
+                    candidates_local[existing_idx_local];
+                generated_candidate_local.score := Max(
+                    generated_candidate_local.score, generated_score_local);
+                generated_candidate_local.display_kind := cdk_lm_compound;
+                candidates_local[existing_idx_local] :=
+                    generated_candidate_local;
+            end
+            else
+            begin
+                FillChar(generated_candidate_local,
+                    SizeOf(generated_candidate_local), 0);
+                generated_candidate_local.text := generated_text_local;
+                generated_candidate_local.comment := '';
+                generated_candidate_local.source := cs_rule;
+                generated_candidate_local.score := generated_score_local;
+                generated_candidate_local.has_dict_weight := False;
+                generated_candidate_local.dict_weight := 0;
+                generated_candidate_local.display_kind := cdk_lm_compound;
+                SetLength(candidates_local, Length(candidates_local) + 1);
+                candidates_local[High(candidates_local)] :=
+                    generated_candidate_local;
+            end;
+            remember_segment_path_for_candidate(generated_text_local, '',
+                evidence_path_local, generated_score_local);
+            Inc(generated_count_local);
+
+            if (best_text_local = '') or
+                (evidence_score_local > best_evidence_local) then
+            begin
+                best_text_local := generated_text_local;
+                best_evidence_local := evidence_score_local;
+            end;
+        end;
+
+        if best_text_local = '' then
+        begin
+            Exit;
+        end;
+        sort_candidates_lightweight(candidates_local);
+        existing_idx_local := -1;
+        for candidate_idx_local := 0 to High(candidates_local) do
+        begin
+            if (Trim(candidates_local[candidate_idx_local].comment) = '') and
+                SameText(Trim(candidates_local[candidate_idx_local].text),
+                best_text_local) then
+            begin
+                existing_idx_local := candidate_idx_local;
+                Break;
+            end;
+        end;
+        if existing_idx_local > 0 then
+        begin
+            picked_candidate_local := candidates_local[existing_idx_local];
+            for move_idx_local := existing_idx_local downto 1 do
+            begin
+                candidates_local[move_idx_local] :=
+                    candidates_local[move_idx_local - 1];
+            end;
+            candidates_local[0] := picked_candidate_local;
+        end;
+    end;
+
     function is_productive_short_function_head_text_local(
         const text_value: string): Boolean;
     begin
@@ -5481,6 +5969,8 @@ var
         head_three_key_local: string;
         middle_key_local: string;
         tail_key_local: string;
+        transition_particle_path_local: string;
+        transition_particle_evidence_local: Integer;
 
         function is_short_particle_tail_unit_local(const pinyin_key_value: string;
             const text_value: string): Boolean;
@@ -5593,6 +6083,13 @@ var
             Exit;
         end;
 
+        if get_short_four_transition_particle_path_evidence(lookup_text,
+            text_value, transition_particle_path_local,
+            transition_particle_evidence_local) then
+        begin
+            Exit;
+        end;
+
         head_text_local := units_local[0] + units_local[1];
         tail_text_local := units_local[2] + units_local[3];
         head_key_local := short_four_span_query_key_local(
@@ -5675,6 +6172,8 @@ var
         end;
 
         ensure_supported_short_four_two_exact_path_visible_local(
+            get_effective_compact_pinyin_syllables(lookup_text), candidates);
+        ensure_supported_short_four_transition_particle_path_visible_local(
             get_effective_compact_pinyin_syllables(lookup_text), candidates);
         if Length(candidates) = 0 then
         begin
@@ -9284,6 +9783,8 @@ var
                 inferred_path_local: string;
                 inferred_score_local: Integer;
                 inferred_segments_local: Integer;
+                transition_particle_path_local: string;
+                transition_particle_evidence_local: Integer;
 
                 function full_query_exact_matches_text_local: Boolean;
                 var
@@ -9523,6 +10024,15 @@ var
                 end;
 
                 if full_query_exact_matches_text_local then
+                begin
+                    Exit(True);
+                end;
+
+                if (input_syllable_count = 4) and
+                    get_short_four_transition_particle_path_evidence(
+                    lookup_text, text_value,
+                    transition_particle_path_local,
+                    transition_particle_evidence_local) then
                 begin
                     Exit(True);
                 end;
@@ -12117,6 +12627,8 @@ var
                 candidate_units_local: TArray<string>;
                 unit_idx_local: Integer;
                 exact_results_local: TncCandidateList;
+                transition_particle_path_local: string;
+                transition_particle_evidence_local: Integer;
 
                 function full_query_exact_matches_text_local: Boolean;
                 var
@@ -12230,6 +12742,15 @@ var
                 if (input_syllable_count = 4) and
                     short_four_two_exact_path_is_supported_local(
                     query_syllables_local, text_value) then
+                begin
+                    Exit(True);
+                end;
+
+                if (input_syllable_count = 4) and
+                    get_short_four_transition_particle_path_evidence(
+                    lookup_text, text_value,
+                    transition_particle_path_local,
+                    transition_particle_evidence_local) then
                 begin
                     Exit(True);
                 end;
@@ -12397,6 +12918,8 @@ var
                 syllable_key_local: string;
                 matched_unit_count_local: Integer;
                 last_required_exact_unit_local: Integer;
+                transition_particle_path_local: string;
+                transition_particle_evidence_local: Integer;
 
                 function has_exact_head_phrase_match_local: Boolean;
                 var
@@ -12448,6 +12971,15 @@ var
                 if (input_syllable_count = 4) and
                     short_four_two_exact_path_is_supported_local(
                     query_syllables_local, text_value) then
+                begin
+                    Exit(False);
+                end;
+
+                if (input_syllable_count = 4) and
+                    get_short_four_transition_particle_path_evidence(
+                    lookup_text, text_value,
+                    transition_particle_path_local,
+                    transition_particle_evidence_local) then
                 begin
                     Exit(False);
                 end;
@@ -148293,6 +148825,8 @@ var
         head_three_key_local: string;
         middle_key_local: string;
         tail_key_local: string;
+        transition_particle_path_local: string;
+        transition_particle_evidence_local: Integer;
 
         function is_display_short_particle_tail_unit_local(
             const pinyin_key_value: string; const text_value: string): Boolean;
@@ -148409,6 +148943,14 @@ var
         tail_key_local := build_display_query_key(2, 2);
         if display_short_four_two_exact_path_is_supported_local(
             candidate_value) then
+        begin
+            Exit;
+        end;
+
+        if get_short_four_transition_particle_path_evidence(
+            normalized_pinyin, candidate_text_local,
+            transition_particle_path_local,
+            transition_particle_evidence_local) then
         begin
             Exit;
         end;
@@ -172024,6 +172566,8 @@ var
         prefix_results_local: TncCandidateList;
         prefix_idx_local: Integer;
         text_units_local: Integer;
+        transition_particle_path_local: string;
+        transition_particle_evidence_local: Integer;
 
         function predictive_prefix_units_allowed_local: Boolean;
         begin
@@ -172070,6 +172614,16 @@ var
             (get_candidate_text_unit_count(text_value) = expected_units) and
             display_short_four_two_exact_path_is_supported_local(
             candidate_value) then
+        begin
+            Exit(True);
+        end;
+
+        if (expected_units = 4) and (Length(syllables) = 4) and
+            (Trim(candidate_value.comment) = '') and
+            (get_candidate_text_unit_count(text_value) = expected_units) and
+            get_short_four_transition_particle_path_evidence(
+            normalized_pinyin, text_value, transition_particle_path_local,
+            transition_particle_evidence_local) then
         begin
             Exit(True);
         end;
