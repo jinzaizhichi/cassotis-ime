@@ -32,6 +32,8 @@ type
         m_base_ready: Boolean;
         m_base_connection_read_only: Boolean;
         m_user_ready: Boolean;
+        m_user_initialization_deferred: Boolean;
+        m_defer_optional_model_loads: Boolean;
         m_prune_user_entries_on_open: Boolean;
         m_limit: Integer;
         m_bigram_prune_countdown: Integer;
@@ -152,6 +154,7 @@ type
         m_contains_popularity_index_checked: Boolean;
         m_contains_popularity_index_ready: Boolean;
         function ensure_open: Boolean;
+        function open_internal(const defer_optional_model_loads: Boolean): Boolean;
         function get_module_dir: string;
         function find_schema_path: string;
         function load_schema_text(out schema_text: string): Boolean;
@@ -253,6 +256,7 @@ type
             const prune_user_entries_on_open: Boolean = True);
         destructor Destroy; override;
         function open: Boolean;
+        function open_deferred: Boolean;
         procedure close;
         procedure prewarm_short_lookup_caches;
         function get_prefix_popularity_hint(const prefix: string): Integer;
@@ -2251,6 +2255,8 @@ begin
     m_base_ready := False;
     m_base_connection_read_only := False;
     m_user_ready := False;
+    m_user_initialization_deferred := False;
+    m_defer_optional_model_loads := False;
     m_prune_user_entries_on_open := prune_user_entries_on_open;
     m_limit := 256;
     m_bigram_prune_countdown := 64;
@@ -3190,7 +3196,9 @@ function TncSqliteDictionary.ensure_open: Boolean;
 begin
     if m_ready then
     begin
-        if ((m_base_db_path = '') or m_base_ready) and ((m_user_db_path = '') or m_user_ready) then
+        if ((m_base_db_path = '') or m_base_ready) and
+            ((m_user_db_path = '') or m_user_ready or
+            m_user_initialization_deferred) then
         begin
             refresh_user_data_version_if_changed(False);
             Result := True;
@@ -3198,7 +3206,7 @@ begin
         end;
     end;
 
-    Result := open;
+    Result := open_internal(m_defer_optional_model_loads);
 end;
 
 procedure TncSqliteDictionary.configure_user_connection;
@@ -3283,6 +3291,11 @@ function TncSqliteDictionary.base_query_path_pinyin_may_exist(
 var
     present: Boolean;
 begin
+    if m_defer_optional_model_loads and
+        (not m_base_query_path_pinyin_cache_loaded) then
+    begin
+        Exit(False);
+    end;
     if not m_base_query_path_pinyin_cache_loaded then
     begin
         load_base_query_path_pinyin_cache;
@@ -7380,12 +7393,15 @@ begin
     Result := True;
 end;
 
-function TncSqliteDictionary.open: Boolean;
+function TncSqliteDictionary.open_internal(
+    const defer_optional_model_loads: Boolean): Boolean;
 begin
     m_ready := False;
     m_base_ready := False;
     m_base_connection_read_only := False;
     m_user_ready := False;
+    m_user_initialization_deferred := False;
+    m_defer_optional_model_loads := defer_optional_model_loads;
     m_literal_user_words_available := -1;
     Result := False;
 
@@ -7415,34 +7431,53 @@ begin
         if m_base_ready then
         begin
             configure_base_connection;
-            load_base_exact_pinyin_bloom;
-            load_lm_transition_bonus_cache;
+            if not m_defer_optional_model_loads then
+            begin
+                load_base_exact_pinyin_bloom;
+                load_lm_transition_bonus_cache;
+            end;
         end;
     end;
 
     if m_user_db_path <> '' then
     begin
-        if m_user_connection = nil then
+        if m_defer_optional_model_loads and
+            (not FileExists(m_user_db_path)) then
         begin
-            m_user_connection := TncSqliteConnection.create(m_user_db_path);
+            // A first-run user database is empty by definition. Let the
+            // background full provider create its schema instead of blocking
+            // the first visible key on dozens of CREATE INDEX statements.
+            m_user_initialization_deferred := True;
         end;
-
-        m_user_ready := m_user_connection.open(SQLITE_OPEN_READWRITE or SQLITE_OPEN_CREATE);
-        if m_user_ready then
+        if not m_user_initialization_deferred then
         begin
-            m_user_ready := ensure_schema(m_user_connection);
+            if m_user_connection = nil then
+            begin
+                m_user_connection := TncSqliteConnection.create(m_user_db_path);
+            end;
+
+            m_user_ready := m_user_connection.open(
+                SQLITE_OPEN_READWRITE or SQLITE_OPEN_CREATE);
             if m_user_ready then
             begin
-                configure_user_connection;
-                prune_bigram_rows_if_needed(True);
-                prune_trigram_rows_if_needed(True);
-                prune_query_path_rows_if_needed(True);
-                prune_query_path_penalty_rows_if_needed(True);
+                m_user_ready := ensure_schema(m_user_connection);
+                if m_user_ready then
+                begin
+                    configure_user_connection;
+                    if not m_defer_optional_model_loads then
+                    begin
+                        prune_bigram_rows_if_needed(True);
+                        prune_trigram_rows_if_needed(True);
+                        prune_query_path_rows_if_needed(True);
+                        prune_query_path_penalty_rows_if_needed(True);
+                    end;
+                end;
             end;
         end;
     end;
 
-    if m_base_ready and m_user_ready and m_prune_user_entries_on_open then
+    if m_base_ready and m_user_ready and m_prune_user_entries_on_open and
+        (not m_defer_optional_model_loads) then
     begin
         migrate_user_entries;
         prune_user_entries_existing_in_base;
@@ -7458,6 +7493,16 @@ begin
 
     m_ready := m_base_ready or m_user_ready;
     Result := m_ready;
+end;
+
+function TncSqliteDictionary.open: Boolean;
+begin
+    Result := open_internal(False);
+end;
+
+function TncSqliteDictionary.open_deferred: Boolean;
+begin
+    Result := open_internal(True);
 end;
 
 procedure TncSqliteDictionary.close;
@@ -7644,6 +7689,7 @@ begin
     m_base_ready := False;
     m_base_connection_read_only := False;
     m_user_ready := False;
+    m_user_initialization_deferred := False;
     m_base_exact_pinyin_bloom_ready := False;
     SetLength(m_base_exact_pinyin_bloom, 0);
     m_short_lookup_cache_prewarmed := False;
@@ -12973,6 +13019,10 @@ var
     can_query_base: Boolean;
 begin
     Result := 0;
+    if m_defer_optional_model_loads then
+    begin
+        Exit;
+    end;
     normalized_query := LowerCase(Trim(query_key));
     normalized_path := Trim(encoded_path);
     if (normalized_query = '') or (normalized_path = '') or
@@ -13061,6 +13111,10 @@ var
     cache_key: string;
 begin
     Result := 0;
+    if m_defer_optional_model_loads then
+    begin
+        Exit;
+    end;
     normalized_query := LowerCase(Trim(query_key));
     normalized_path := Trim(encoded_path);
     if (normalized_query = '') or (normalized_path = '') or
@@ -13102,6 +13156,10 @@ var
     item: TncPairPathEvidence;
 begin
     SetLength(results, 0);
+    if m_defer_optional_model_loads then
+    begin
+        Exit(False);
+    end;
     normalized_query := LowerCase(Trim(query_key));
     if (normalized_query = '') or (not ensure_open) or
         (not m_base_ready) or (m_base_connection = nil) then
@@ -13211,6 +13269,10 @@ var
     stmt: Psqlite3_stmt;
     query_sql: string;
 begin
+    if m_defer_optional_model_loads then
+    begin
+        Exit(False);
+    end;
     if reverse_model and (m_char_reverse_lm_available >= 0) then
     begin
         Exit(m_char_reverse_lm_available > 0);
@@ -14069,6 +14131,10 @@ var
     prefix_support: Integer;
 begin
     Result := 0;
+    if m_defer_optional_model_loads then
+    begin
+        Exit;
+    end;
     normalized_tail := Trim(tail_text);
     if (normalized_tail = '') or (get_valid_cjk_codepoint_count(normalized_tail) < 2) or
         (not ensure_open) or (not m_base_ready) or (m_base_connection = nil) then

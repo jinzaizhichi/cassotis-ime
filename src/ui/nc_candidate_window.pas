@@ -1543,9 +1543,10 @@ begin
             if candidate_has_pinyin_tail(candidates[i]) then
             begin
                 // A partial candidate is only an anchor for the remaining pinyin.
-                // Do not present it as a removable user word or an LM compound.
+                // Do not present it as a removable user word, but retain an LM
+                // compound marker on the generated Chinese prefix.
                 m_candidate_sources[i] := cs_rule;
-                m_candidate_display_kinds[i] := cdk_default;
+                m_candidate_display_kinds[i] := candidates[i].display_kind;
             end
             else
             begin

@@ -58,7 +58,8 @@ type
         procedure handle_remove_user_candidate(const candidate_index: Integer);
     public
         constructor create(const owner: TncEngineHost; const session_id: string; const instance_id: UInt64;
-            const config: TncEngineConfig);
+            const config: TncEngineConfig;
+            const defer_optional_dictionary_models: Boolean = False);
         destructor Destroy; override;
         procedure adopt_session_id(const session_id: string);
         procedure touch;
@@ -107,6 +108,7 @@ type
         m_lock: TCriticalSection;
         m_session_create_lock: TCriticalSection;
         m_standby_session: TncHostSession;
+        m_standby_building: Boolean;
         m_maintenance_wakeup: TEvent;
         m_active_state_event: TEvent;
         m_inactive_state_event: TEvent;
@@ -191,6 +193,7 @@ type
 implementation
 
 uses
+    nc_dictionary_intf,
     nc_sqlite,
     nc_log;
 
@@ -218,6 +221,8 @@ const
     c_session_release_grace_ms = 250;
     c_session_idle_reclaim_ms = 5 * 60 * 1000;
     c_candidate_apply_merge_ms = 35;
+    c_cold_start_foreground_grace_ms = 120;
+    c_dictionary_upgrade_idle_ms = 90;
     c_user_dict_checkpoint_idle_ms = 5000;
     c_user_dict_checkpoint_retry_ms = 5000;
     c_tray_host_mutex_name_format = 'Local\cassotis_ime_tray_host_v1_s%d';
@@ -642,7 +647,8 @@ begin
 end;
 
 constructor TncHostSession.create(const owner: TncEngineHost; const session_id: string; const instance_id: UInt64;
-    const config: TncEngineConfig);
+    const config: TncEngineConfig;
+    const defer_optional_dictionary_models: Boolean = False);
 begin
     inherited create;
     m_owner := owner;
@@ -650,7 +656,7 @@ begin
     m_instance_id := instance_id;
     m_last_activity_tick := GetTickCount64;
     m_release_requested := False;
-    m_engine := TncEngine.create(config);
+    m_engine := TncEngine.create(config, defer_optional_dictionary_models);
     m_candidate_window := nil;
     m_last_caret := Point(0, 0);
     m_has_caret := False;
@@ -1154,6 +1160,7 @@ begin
     m_lock := TCriticalSection.Create;
     m_session_create_lock := TCriticalSection.Create;
     m_standby_session := nil;
+    m_standby_building := False;
     m_maintenance_wakeup := TEvent.Create(nil, False, False, '');
     m_active_state_event := TEvent.Create(nil, False, False, get_nc_active_event);
     m_inactive_state_event := TEvent.Create(nil, False, False, get_nc_inactive_event);
@@ -1176,7 +1183,6 @@ begin
     m_last_config_write := get_config_write_time;
     m_last_config_check_tick := GetTickCount64;
     m_maintenance_thread := TncMaintenanceThread.create(Self);
-    m_maintenance_wakeup.SetEvent;
 end;
 
 destructor TncEngineHost.Destroy;
@@ -1427,7 +1433,8 @@ begin
 
         if not added_session then
         begin
-            created_session := TncHostSession.create(Self, session_id, instance_id, config_snapshot);
+            created_session := TncHostSession.create(Self, session_id, instance_id,
+                config_snapshot, True);
             m_lock.Acquire;
             try
                 created_session.update_config(m_config);
@@ -1449,7 +1456,8 @@ begin
             end
             else
             begin
-                host_log('Dictionary ' + Result.engine.get_dictionary_debug_info);
+                host_log('Dictionary fast-start ' +
+                    Result.engine.get_dictionary_debug_info);
             end;
         end;
     finally
@@ -1484,6 +1492,7 @@ begin
             m_recent_active_sessions.Clear;
             m_active_sessions.AddOrSetValue(session_id, 1);
             m_recent_active_sessions.AddOrSetValue(session_id, GetTickCount);
+            m_last_user_activity_tick := GetTickCount64;
             if m_sessions.TryGetValue(session_id, session) then
             begin
                 session.reactivate;
@@ -1733,16 +1742,30 @@ procedure TncEngineHost.perform_session_prewarm;
 var
     session_id: string;
     session: TncHostSession;
+    warmed_session: TncHostSession;
+    ready_dictionary: TncDictionaryProvider;
     create_start_tick: UInt64;
-    create_elapsed_ms: Int64;
     total_elapsed_ms: Int64;
     should_requeue: Boolean;
     instance_id: UInt64;
+    refreshed_candidates: Boolean;
+    upgraded_dictionary: Boolean;
+    refresh_generation: UInt64;
+    candidates: TncCandidateList;
+    page_index: Integer;
+    page_count: Integer;
+    selected_index: Integer;
+    preedit_text: string;
 begin
     session_id := '';
     session := nil;
+    warmed_session := nil;
+    ready_dictionary := nil;
     should_requeue := False;
     instance_id := 0;
+    refreshed_candidates := False;
+    upgraded_dictionary := False;
+    refresh_generation := 0;
 
     m_lock.Acquire;
     try
@@ -1757,32 +1780,106 @@ begin
 
     try
         create_start_tick := GetTickCount64;
-        create_elapsed_ms := 0;
 
-        if not m_lock.TryEnter then
+        if not m_session_create_lock.TryEnter then
         begin
-            // Prewarm is best-effort. If foreground input currently owns the
-            // host lock, retry on a later maintenance pass instead of blocking
-            // the next key.
             should_requeue := True;
             Exit;
         end;
         try
-            if m_sessions.TryGetValue(session_id, session) and
-                m_active_sessions.ContainsKey(session_id) and (not session.release_requested) then
+            if not m_lock.TryEnter then
             begin
-                instance_id := session.instance_id;
-                session.engine.reload_dictionary_if_needed;
-            end
-            else
-            begin
-                session := nil;
+                should_requeue := True;
+                Exit;
+            end;
+            try
+                if m_sessions.TryGetValue(session_id, session) and
+                    m_active_sessions.ContainsKey(session_id) and
+                    (not session.release_requested) then
+                begin
+                    instance_id := session.instance_id;
+                    if session.engine.dictionary_models_deferred then
+                    begin
+                        if m_standby_session = nil then
+                        begin
+                            should_requeue := True;
+                            Exit;
+                        end;
+                        if (session.engine.get_composition_text <> '') and
+                            ((GetTickCount64 - session.last_activity_tick) <
+                            c_dictionary_upgrade_idle_ms) then
+                        begin
+                            should_requeue := True;
+                            Exit;
+                        end;
+
+                        warmed_session := m_standby_session;
+                        m_standby_session := nil;
+                        ready_dictionary :=
+                            warmed_session.engine.detach_dictionary_provider;
+                        session.engine.adopt_ready_dictionary_provider(
+                            ready_dictionary);
+                        ready_dictionary := nil;
+                        upgraded_dictionary := True;
+
+                        if session.engine.rebuild_candidates_after_dictionary_upgrade then
+                        begin
+                            candidates := session.engine.get_candidates;
+                            page_index := session.engine.get_page_index;
+                            page_count := session.engine.get_page_count;
+                            selected_index := session.engine.get_selected_index;
+                            preedit_text := session.engine.get_composition_text;
+                            session.store_candidates(candidates, page_index,
+                                page_count, selected_index, preedit_text);
+                            refreshed_candidates := True;
+                            refresh_generation := session.candidate_generation;
+                        end;
+                    end
+                    else
+                    begin
+                        session.engine.reload_dictionary_if_needed;
+                    end;
+                end
+                else
+                begin
+                    session := nil;
+                end;
+            finally
+                m_lock.Release;
             end;
         finally
-            m_lock.Release;
+            m_session_create_lock.Release;
         end;
 
         total_elapsed_ms := Int64(GetTickCount64 - create_start_tick);
+        if upgraded_dictionary and host_log_enabled_for(ll_info) then
+        begin
+            host_log(Format('Dictionary full model adopted session=%s total=%d',
+                [session_id, total_elapsed_ms]));
+        end;
+        if refreshed_candidates then
+        begin
+            TThread.Queue(nil,
+                procedure
+                var
+                    queued_session: TncHostSession;
+                begin
+                    m_lock.Acquire;
+                    try
+                        if (not m_sessions.TryGetValue(session_id,
+                            queued_session)) or
+                            (not m_active_sessions.ContainsKey(session_id)) or
+                            (queued_session.instance_id <> instance_id) then
+                        begin
+                            Exit;
+                        end;
+                    finally
+                        m_lock.Release;
+                    end;
+                    queued_session.apply_candidate_content_only(
+                        refresh_generation);
+                end);
+        end;
         if session <> nil then
         begin
             TThread.Queue(nil,
@@ -1793,6 +1890,7 @@ begin
                     m_lock.Acquire;
                     try
                         if (not m_sessions.TryGetValue(session_id, queued_session)) or
+                            (not m_active_sessions.ContainsKey(session_id)) or
                             (queued_session.instance_id <> instance_id) then
                         begin
                             Exit;
@@ -1806,10 +1904,13 @@ begin
 
         if host_log_enabled_for(ll_debug) then
         begin
-            host_log_debug(Format('[DEBUG] session prewarm session=%s create=%d total=%d',
-                [session_id, create_elapsed_ms, total_elapsed_ms]));
+            host_log_debug(Format(
+                '[DEBUG] session prewarm session=%s upgraded=%d total=%d',
+                [session_id, Ord(upgraded_dictionary), total_elapsed_ms]));
         end;
     finally
+        ready_dictionary.Free;
+        warmed_session.Free;
         m_lock.Acquire;
         try
             if should_requeue and (session_id <> '') and (m_session_prewarm_queue <> nil) then
@@ -1840,49 +1941,76 @@ begin
         Exit;
     end;
 
-    // Standby creation is best-effort background work. Do not queue another
-    // standby builder while foreground session creation owns this lock.
+    // Reserve the standby slot under the short creation lock, then release it
+    // before opening SQLite and loading model tables. Foreground activation can
+    // therefore create a deferred session instead of waiting for this work.
     if not m_session_create_lock.TryEnter then
     begin
         Exit;
     end;
 
-    created_session := nil;
     installed := False;
     create_start_tick := GetTickCount64;
     try
         m_lock.Acquire;
         try
-            if (m_standby_session <> nil) or
+            if m_standby_building or (m_standby_session <> nil) or
                 (m_sessions.Count >= c_session_cache_limit) then
             begin
                 Exit;
             end;
+            if (m_last_user_activity_tick <> 0) and
+                ((GetTickCount64 - m_last_user_activity_tick) <
+                c_cold_start_foreground_grace_ms) then
+            begin
+                Exit;
+            end;
+            m_standby_building := True;
             config_snapshot := m_config;
             Inc(m_next_session_instance_id);
             instance_id := m_next_session_instance_id;
         finally
             m_lock.Release;
         end;
+    finally
+        m_session_create_lock.Release;
+    end;
 
-        created_session := TncHostSession.create(Self, '', instance_id, config_snapshot);
-        created_session.engine.prewarm_dictionary_caches;
+    try
+        created_session := TncHostSession.create(Self, '', instance_id,
+            config_snapshot, False);
+        try
+            m_session_create_lock.Acquire;
+            try
+                m_lock.Acquire;
+                try
+                    if (m_standby_session = nil) and
+                        (m_sessions.Count < c_session_cache_limit) and
+                        (m_config.dictionary_variant = config_snapshot.dictionary_variant) then
+                    begin
+                        created_session.update_config(m_config);
+                        m_standby_session := created_session;
+                        created_session := nil;
+                        installed := True;
+                    end;
+                    m_standby_building := False;
+                finally
+                    m_lock.Release;
+                end;
+            finally
+                m_session_create_lock.Release;
+            end;
+        finally
+            created_session.Free;
+        end;
+    except
         m_lock.Acquire;
         try
-            if (m_standby_session = nil) and
-                (m_sessions.Count < c_session_cache_limit) then
-            begin
-                created_session.update_config(m_config);
-                m_standby_session := created_session;
-                created_session := nil;
-                installed := True;
-            end;
+            m_standby_building := False;
         finally
             m_lock.Release;
         end;
-    finally
-        created_session.Free;
-        m_session_create_lock.Release;
+        raise;
     end;
 
     create_elapsed_ms := Int64(GetTickCount64 - create_start_tick);
@@ -2744,6 +2872,7 @@ end;
 function TncEngineHost.set_active(const session_id: string; const active: Boolean): Boolean;
 var
     session: TncHostSession;
+    session_instance_id: UInt64;
 begin
     if session_id = '' then
     begin
@@ -2759,6 +2888,7 @@ begin
         // bootstrap here avoids a visible first-key stall in the foreground
         // input path.
         session := get_or_create_session(session_id);
+        session_instance_id := session.instance_id;
         m_lock.Acquire;
         try
             if m_sessions.TryGetValue(session_id, session) then
@@ -2774,6 +2904,28 @@ begin
     set_session_active(session_id, active);
     if active then
     begin
+        // Candidate-window/VCL initialization is independent from dictionary
+        // model loading. Queue it immediately so a first key only has to paint
+        // content, even when the full ranking model is still warming.
+        TThread.Queue(nil,
+            procedure
+            var
+                queued_session: TncHostSession;
+            begin
+                m_lock.Acquire;
+                try
+                    if (not m_sessions.TryGetValue(session_id,
+                        queued_session)) or
+                        (not m_active_sessions.ContainsKey(session_id)) or
+                        (queued_session.instance_id <> session_instance_id) then
+                    begin
+                        Exit;
+                    end;
+                finally
+                    m_lock.Release;
+                end;
+                queued_session.warm_candidate_window;
+            end);
         queue_session_prewarm(session_id);
     end;
     Result := True;
@@ -3223,9 +3375,14 @@ end;
 
 constructor TncMaintenanceThread.create(const host: TncEngineHost);
 begin
+    // TThread starts from AfterConstruction when Create(False) is used, so
+    // these fields are initialized before Execute can run. Calling Start from
+    // inside this constructor bypasses that RTL lifecycle and fails on some
+    // Windows/Delphi runtime combinations.
     inherited create(False);
     FreeOnTerminate := False;
     m_host := host;
+    Priority := tpLower;
 end;
 
 procedure TncMaintenanceThread.detach_host;
