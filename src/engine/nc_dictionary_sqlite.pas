@@ -8624,28 +8624,37 @@ var
     end;
 
     procedure sort_results;
-    var
-        left_idx: Integer;
-        right_idx: Integer;
-        temp: TncCandidate;
     begin
         if Length(results) <= 1 then
         begin
             Exit;
         end;
 
-        for left_idx := 0 to High(results) - 1 do
-        begin
-            for right_idx := left_idx + 1 to High(results) do
+        TArray.Sort<TncCandidate>(results,
+            TComparer<TncCandidate>.Construct(
+            function(const left, right: TncCandidate): Integer
             begin
-                if compare_candidate(results[left_idx], results[right_idx]) > 0 then
+                if left.score <> right.score then
                 begin
-                    temp := results[left_idx];
-                    results[left_idx] := results[right_idx];
-                    results[right_idx] := temp;
+                    Exit(right.score - left.score);
                 end;
-            end;
-        end;
+                if left.source <> right.source then
+                begin
+                    if left.source = cs_user then
+                    begin
+                        Exit(-1);
+                    end;
+                    if right.source = cs_user then
+                    begin
+                        Exit(1);
+                    end;
+                end;
+                if left.dict_weight <> right.dict_weight then
+                begin
+                    Exit(right.dict_weight - left.dict_weight);
+                end;
+                Result := CompareText(left.text, right.text);
+            end));
     end;
 
     procedure add_administrative_place_prefix_candidates;
