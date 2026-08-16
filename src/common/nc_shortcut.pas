@@ -46,6 +46,23 @@ function nc_candidate_page_key_scheme_to_text(
     const scheme: TncCandidatePageKeyScheme): string;
 function nc_parse_candidate_page_key_scheme(
     const value: string): TncCandidatePageKeyScheme;
+function nc_normalize_one_key_completion_key(
+    const completion_key: TncOneKeyCompletionKey): TncOneKeyCompletionKey;
+function nc_one_key_completion_key_to_text(
+    const completion_key: TncOneKeyCompletionKey): string;
+function nc_parse_one_key_completion_key(
+    const value: string): TncOneKeyCompletionKey;
+function nc_one_key_completion_key_code(
+    const completion_key: TncOneKeyCompletionKey): Word;
+function nc_one_key_completion_matches(
+    const completion_key: TncOneKeyCompletionKey; const key_code: Word;
+    const key_state: TncKeyState): Boolean;
+function nc_candidate_page_key_conflicts_with_one_key_completion(
+    const scheme: TncCandidatePageKeyScheme;
+    const completion_key: TncOneKeyCompletionKey): Boolean;
+function nc_resolve_candidate_page_key_scheme(
+    const scheme: TncCandidatePageKeyScheme;
+    const completion_key: TncOneKeyCompletionKey): TncCandidatePageKeyScheme;
 function nc_candidate_page_key_matches_previous(
     const scheme: TncCandidatePageKeyScheme; const key_code: Word;
     const key_state: TncKeyState): Boolean;
@@ -123,6 +140,78 @@ begin
         Exit(cpks_shift_tab);
     end;
     Result := cpks_minus_plus;
+end;
+
+function nc_normalize_one_key_completion_key(
+    const completion_key: TncOneKeyCompletionKey): TncOneKeyCompletionKey;
+begin
+    if (Ord(completion_key) < Ord(Low(TncOneKeyCompletionKey))) or
+        (Ord(completion_key) > Ord(High(TncOneKeyCompletionKey))) then
+    begin
+        Exit(ock_tab);
+    end;
+    Result := completion_key;
+end;
+
+function nc_one_key_completion_key_to_text(
+    const completion_key: TncOneKeyCompletionKey): string;
+begin
+    case nc_normalize_one_key_completion_key(completion_key) of
+        ock_backtick:
+            Result := 'backtick';
+    else
+        Result := 'tab';
+    end;
+end;
+
+function nc_parse_one_key_completion_key(
+    const value: string): TncOneKeyCompletionKey;
+begin
+    if SameText(Trim(value), 'backtick') or SameText(Trim(value), '`') then
+    begin
+        Exit(ock_backtick);
+    end;
+    Result := ock_tab;
+end;
+
+function nc_one_key_completion_key_code(
+    const completion_key: TncOneKeyCompletionKey): Word;
+begin
+    case nc_normalize_one_key_completion_key(completion_key) of
+        ock_backtick:
+            Result := VK_OEM_3;
+    else
+        Result := VK_TAB;
+    end;
+end;
+
+function nc_one_key_completion_matches(
+    const completion_key: TncOneKeyCompletionKey; const key_code: Word;
+    const key_state: TncKeyState): Boolean;
+begin
+    Result := (not key_state.shift_down) and (not key_state.ctrl_down) and
+        (not key_state.alt_down) and
+        (key_code = nc_one_key_completion_key_code(completion_key));
+end;
+
+function nc_candidate_page_key_conflicts_with_one_key_completion(
+    const scheme: TncCandidatePageKeyScheme;
+    const completion_key: TncOneKeyCompletionKey): Boolean;
+begin
+    Result := (nc_normalize_candidate_page_key_scheme(scheme) = cpks_shift_tab) and
+        (nc_normalize_one_key_completion_key(completion_key) = ock_tab);
+end;
+
+function nc_resolve_candidate_page_key_scheme(
+    const scheme: TncCandidatePageKeyScheme;
+    const completion_key: TncOneKeyCompletionKey): TncCandidatePageKeyScheme;
+begin
+    Result := nc_normalize_candidate_page_key_scheme(scheme);
+    if nc_candidate_page_key_conflicts_with_one_key_completion(Result,
+        completion_key) then
+    begin
+        Result := cpks_minus_plus;
+    end;
 end;
 
 function candidate_page_key_matches(const scheme: TncCandidatePageKeyScheme;

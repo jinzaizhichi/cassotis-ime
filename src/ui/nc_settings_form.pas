@@ -26,6 +26,7 @@ uses
     nc_dpi_scale,
     nc_config,
     nc_candidate_theme,
+    nc_candidate_window,
     nc_log;
 
 type
@@ -171,9 +172,11 @@ type
         m_combo_candidate_page_size: TComboBox;
         m_combo_candidate_color_scheme: TComboBox;
         m_candidate_preview: TPaintBox;
+        m_candidate_preview_window: TncCandidateWindow;
         m_combo_shortcut_modifiers: array[TncShortcutAction] of TComboBox;
         m_combo_shortcut_keys: array[TncShortcutAction] of TComboBox;
         m_combo_candidate_page_keys: TComboBox;
+        m_combo_one_key_completion_key: TComboBox;
         m_panel_candidate_page_previous_key: TPanel;
         m_panel_candidate_page_next_key: TPanel;
         m_chk_log_enabled: TncModernCheckBox;
@@ -221,8 +224,10 @@ type
         procedure populate_shortcut_modifier_combo(const combo: TComboBox);
         procedure populate_shortcut_key_combo(const combo: TComboBox);
         procedure populate_candidate_page_key_scheme_combo;
+        procedure populate_one_key_completion_key_combo;
         procedure update_candidate_page_key_scheme_preview;
         procedure candidate_page_key_scheme_changed(Sender: TObject);
+        procedure one_key_completion_key_changed(Sender: TObject);
         function shortcut_action_caption(const action: TncShortcutAction): string;
         function shortcut_from_controls(const action: TncShortcutAction): TncShortcut;
         procedure set_shortcut_controls(const action: TncShortcutAction; const shortcut: TncShortcut);
@@ -235,6 +240,9 @@ type
         function get_selected_candidate_page_key_scheme: TncCandidatePageKeyScheme;
         procedure set_candidate_page_key_scheme_combo(
             const scheme: TncCandidatePageKeyScheme);
+        function get_selected_one_key_completion_key: TncOneKeyCompletionKey;
+        procedure set_one_key_completion_key_combo(
+            const completion_key: TncOneKeyCompletionKey);
         function get_selected_candidate_color_scheme: Integer;
         procedure set_candidate_color_scheme_combo(const color_scheme: Integer);
         procedure update_candidate_preview;
@@ -270,6 +278,7 @@ type
         procedure WMDpiChanged(var Message: TMessage); message WM_DPICHANGED;
     public
         constructor Create(AOwner: TComponent); override;
+        destructor Destroy; override;
         class function ExecuteDialog(const owner: TComponent; var config: TncEngineConfig; var log_config: TncLogConfig;
             var status_widget_visible: Boolean; const on_apply: TncApplySettingsProc;
             const on_clear_user_dictionary: TncClearUserDictionaryProc): Boolean; static;
@@ -302,13 +311,13 @@ const
     c_check_width = c_section_width - c_label_left - 20;
     c_hint_width = c_section_width - (c_label_left * 2);
     c_general_row_gap = 8;
-    c_candidate_preview_height = 104;
-    c_appearance_group_height = 360;
+    c_candidate_preview_height = 152;
+    c_appearance_group_height = 408;
     c_tbm_get_channel_rect = WM_USER + 26;
     c_official_website_url = 'https://www.yanquan.org';
 
 resourcestring
-    SSettingsTitle = 'Cassotis 设置';
+    SSettingsTitle = '言泉输入法 - 设置';
     STabGeneral = '常规';
     STabAppearance = '外观';
     STabFuzzyPinyin = '模糊拼音';
@@ -369,6 +378,9 @@ resourcestring
     SPageKeysCommaPeriod = '逗号句号';
     SPageKeysShiftTab = 'Shift+Tab / Tab';
     SCandidatePageKeysHint = '仅在候选窗口打开时生效。';
+    SGroupOneKeyCompletion = '一键补全';
+    SLabelOneKeyCompletionKey = '触发按键';
+    SOneKeyCompletionHint = '输入至少两个完整音节，并存在可继续补全的精确词库词时生效。';
     SShortcutMissingKey = '“%s”尚未选择按键。';
     SShortcutInvalidModifierKey = '“%s”的快捷键无效：单独的修饰键仅支持 Shift，且不能再叠加其他修饰键。';
     SShortcutNeedsModifier = '“%s”不能使用未带修饰键的 %s，因为这会占用正常输入。请添加 Ctrl、Shift 或 Alt；无修饰键时仅支持 Shift 或 F1-F24。';
@@ -1321,6 +1333,7 @@ begin
     Result.candidate_font_size := c_default_candidate_font_size;
     Result.candidate_page_size := c_default_candidate_page_size;
     Result.candidate_page_key_scheme := cpks_minus_plus;
+    Result.one_key_completion_key := ock_tab;
     Result.candidate_color_scheme := c_default_candidate_color_scheme;
     Result.debug_mode := False;
     Result.dictionary_variant := dv_simplified;
@@ -1338,6 +1351,7 @@ end;
 constructor TncSettingsForm.Create(AOwner: TComponent);
 begin
     inherited CreateNew(AOwner);
+    m_candidate_preview_window := nil;
     m_dirty := False;
     m_applied := False;
     m_scaled_dpi := get_ui_scale_dpi;
@@ -1354,6 +1368,12 @@ begin
     add_logging_controls;
     add_advanced_controls;
     load_from_config;
+end;
+
+destructor TncSettingsForm.Destroy;
+begin
+    FreeAndNil(m_candidate_preview_window);
+    inherited Destroy;
 end;
 
 class function TncSettingsForm.ExecuteDialog(const owner: TComponent; var config: TncEngineConfig;
@@ -2116,6 +2136,7 @@ var
     section_top: Integer;
     shortcut_group: TPanel;
     paging_group: TPanel;
+    completion_group: TPanel;
     header_label: TLabel;
 begin
     section_top := scale_ui(18);
@@ -2231,24 +2252,68 @@ begin
 
     m_combo_candidate_page_keys.OnChange := candidate_page_key_scheme_changed;
     update_candidate_page_key_scheme_preview;
+
+    section_top := paging_group.Top + paging_group.Height + scale_ui(c_section_gap);
+    completion_group := create_section_group(Self, m_tab_shortcuts,
+        SGroupOneKeyCompletion, section_top, 90);
+    top := scale_ui(54);
+    create_label(Self, completion_group, SLabelOneKeyCompletionKey, top);
+
+    m_combo_one_key_completion_key := TComboBox.Create(Self);
+    m_combo_one_key_completion_key.Parent := completion_group;
+    m_combo_one_key_completion_key.Left := scale_ui(c_control_left);
+    m_combo_one_key_completion_key.Top := top;
+    m_combo_one_key_completion_key.Width := scale_ui(160);
+    m_combo_one_key_completion_key.Style := csDropDownList;
+    m_combo_one_key_completion_key.Hint := SOneKeyCompletionHint;
+    m_combo_one_key_completion_key.ShowHint := True;
+    populate_one_key_completion_key_combo;
+    m_combo_one_key_completion_key.ItemIndex := Ord(ock_tab);
+    m_combo_one_key_completion_key.OnChange := one_key_completion_key_changed;
 end;
 
 procedure TncSettingsForm.populate_candidate_page_key_scheme_combo;
+var
+    selected_scheme: TncCandidatePageKeyScheme;
 begin
     if m_combo_candidate_page_keys = nil then
     begin
         Exit;
     end;
 
+    selected_scheme := get_selected_candidate_page_key_scheme;
+    selected_scheme := nc_resolve_candidate_page_key_scheme(selected_scheme,
+        get_selected_one_key_completion_key);
     m_combo_candidate_page_keys.Items.BeginUpdate;
     try
         m_combo_candidate_page_keys.Items.Clear;
         m_combo_candidate_page_keys.Items.Add(SPageKeysMinusPlus);
         m_combo_candidate_page_keys.Items.Add(SPageKeysBrackets);
         m_combo_candidate_page_keys.Items.Add(SPageKeysCommaPeriod);
-        m_combo_candidate_page_keys.Items.Add(SPageKeysShiftTab);
+        if get_selected_one_key_completion_key <> ock_tab then
+        begin
+            m_combo_candidate_page_keys.Items.Add(SPageKeysShiftTab);
+        end;
     finally
         m_combo_candidate_page_keys.Items.EndUpdate;
+    end;
+    m_combo_candidate_page_keys.ItemIndex := Ord(selected_scheme);
+end;
+
+procedure TncSettingsForm.populate_one_key_completion_key_combo;
+begin
+    if m_combo_one_key_completion_key = nil then
+    begin
+        Exit;
+    end;
+
+    m_combo_one_key_completion_key.Items.BeginUpdate;
+    try
+        m_combo_one_key_completion_key.Items.Clear;
+        m_combo_one_key_completion_key.Items.Add('Tab');
+        m_combo_one_key_completion_key.Items.Add('`');
+    finally
+        m_combo_one_key_completion_key.Items.EndUpdate;
     end;
 end;
 
@@ -2294,6 +2359,14 @@ begin
     mark_dirty(Sender);
 end;
 
+procedure TncSettingsForm.one_key_completion_key_changed(Sender: TObject);
+begin
+    populate_candidate_page_key_scheme_combo;
+    update_candidate_page_key_scheme_preview;
+    update_candidate_preview;
+    mark_dirty(Sender);
+end;
+
 function TncSettingsForm.get_selected_candidate_page_key_scheme:
     TncCandidatePageKeyScheme;
 begin
@@ -2309,13 +2382,44 @@ end;
 
 procedure TncSettingsForm.set_candidate_page_key_scheme_combo(
     const scheme: TncCandidatePageKeyScheme);
+var
+    resolved_scheme: TncCandidatePageKeyScheme;
 begin
     if m_combo_candidate_page_keys = nil then
     begin
         Exit;
     end;
-    m_combo_candidate_page_keys.ItemIndex := Ord(
-        nc_normalize_candidate_page_key_scheme(scheme));
+    resolved_scheme := nc_resolve_candidate_page_key_scheme(scheme,
+        get_selected_one_key_completion_key);
+    m_combo_candidate_page_keys.ItemIndex := Ord(resolved_scheme);
+    update_candidate_page_key_scheme_preview;
+end;
+
+function TncSettingsForm.get_selected_one_key_completion_key:
+    TncOneKeyCompletionKey;
+begin
+    Result := ock_tab;
+    if (m_combo_one_key_completion_key <> nil) and
+        (m_combo_one_key_completion_key.ItemIndex >=
+        Ord(Low(TncOneKeyCompletionKey))) and
+        (m_combo_one_key_completion_key.ItemIndex <=
+        Ord(High(TncOneKeyCompletionKey))) then
+    begin
+        Result := TncOneKeyCompletionKey(
+            m_combo_one_key_completion_key.ItemIndex);
+    end;
+end;
+
+procedure TncSettingsForm.set_one_key_completion_key_combo(
+    const completion_key: TncOneKeyCompletionKey);
+begin
+    if m_combo_one_key_completion_key = nil then
+    begin
+        Exit;
+    end;
+    m_combo_one_key_completion_key.ItemIndex := Ord(
+        nc_normalize_one_key_completion_key(completion_key));
+    populate_candidate_page_key_scheme_combo;
     update_candidate_page_key_scheme_preview;
 end;
 
@@ -2646,6 +2750,8 @@ begin
     else if m_page_control.ActivePage = m_tab_shortcuts then
     begin
         load_shortcut_controls(default_engine_config.shortcuts);
+        set_one_key_completion_key_combo(
+            default_engine_config.one_key_completion_key);
         set_candidate_page_key_scheme_combo(
             default_engine_config.candidate_page_key_scheme);
     end
@@ -2983,101 +3089,19 @@ end;
 
 procedure TncSettingsForm.on_candidate_preview_paint(Sender: TObject);
 const
-    c_preview_preedit_text = 'nihaoshijie';
-    c_preview_texts: array[0..2] of string = ('1. 你好', '2. 提高很多', '3. 输入法');
-    c_preview_lm_compound_index = 1;
+    c_preview_preedit_text = 'luoxiayu';
+    c_preview_candidate_texts: array[0..2] of string = (
+        '落霞', '落下', '落');
+    c_preview_completion_text = '落霞与孤鹜齐飞';
 var
     paint_box: TPaintBox;
     canvas: TCanvas;
     bounds: TRect;
-    preview_rect: TRect;
-    preview_inner_rect: TRect;
-    preedit_rect: TRect;
-    item_rect: TRect;
-    text_rect: TRect;
-    content_top: Integer;
-    content_height: Integer;
-    preview_height: Integer;
-    window_padding: Integer;
-    row_top: Integer;
-    line_height: Integer;
-    text_height: Integer;
-    preedit_height: Integer;
-    preedit_text_height: Integer;
-    meta_vertical_padding: Integer;
-    meta_horizontal_padding: Integer;
-    vertical_padding: Integer;
-    horizontal_padding: Integer;
-    item_gap: Integer;
-    x: Integer;
+    candidates: TncCandidateList;
+    completion: TncOneKeyCompletion;
     item_index: Integer;
     font_size: Integer;
     dpi: Integer;
-    font_size_delta: Integer;
-    theme: TncCandidateColorTheme;
-
-    procedure draw_preview_text(const text: string; var rect: TRect);
-    begin
-        SetBkMode(canvas.Handle, TRANSPARENT);
-        DrawTextW(canvas.Handle, PWideChar(text), Length(text), rect,
-            DT_SINGLELINE or DT_VCENTER or DT_LEFT or DT_NOPREFIX);
-    end;
-
-    procedure draw_item(const index: Integer);
-    var
-        item_width: Integer;
-        text_value: string;
-        selected: Boolean;
-        paint_item_rect: TRect;
-    begin
-        text_value := c_preview_texts[index];
-        selected := index = 0;
-        item_width := canvas.TextWidth(text_value) + (horizontal_padding * 2);
-        item_rect := Rect(x, row_top, x + item_width, row_top + line_height);
-        if not IntersectRect(paint_item_rect, item_rect, preview_inner_rect) then
-        begin
-            x := item_rect.Right + item_gap;
-            Exit;
-        end;
-
-        if selected then
-        begin
-            canvas.Brush.Color := theme.selected_background_color;
-            canvas.Pen.Color := theme.selected_border_color;
-            canvas.RoundRect(paint_item_rect.Left, paint_item_rect.Top + 1,
-                paint_item_rect.Right, paint_item_rect.Bottom - 1,
-                scale_ui_for_dpi(6, dpi), scale_ui_for_dpi(6, dpi));
-            if index = c_preview_lm_compound_index then
-            begin
-                canvas.Font.Color := theme.selected_lm_compound_text_color;
-            end
-            else
-            begin
-                canvas.Font.Color := theme.selected_text_color;
-            end;
-        end
-        else
-        begin
-            canvas.Brush.Color := theme.background_color;
-            canvas.Pen.Color := theme.background_color;
-            canvas.FillRect(paint_item_rect);
-            if index = c_preview_lm_compound_index then
-            begin
-                canvas.Font.Color := theme.lm_compound_text_color;
-            end
-            else
-            begin
-                canvas.Font.Color := theme.text_color;
-            end;
-        end;
-
-        text_rect := paint_item_rect;
-        InflateRect(text_rect, -horizontal_padding, 0);
-        SetTextColor(canvas.Handle, ColorToRGB(canvas.Font.Color));
-        draw_preview_text(text_value, text_rect);
-
-        x := item_rect.Right + item_gap;
-    end;
 begin
     if not (Sender is TPaintBox) then
     begin
@@ -3087,13 +3111,9 @@ begin
     paint_box := TPaintBox(Sender);
     canvas := paint_box.Canvas;
     bounds := paint_box.ClientRect;
-    theme := nc_candidate_color_theme(get_selected_candidate_color_scheme);
     canvas.Brush.Color := clWhite;
     canvas.FillRect(bounds);
 
-    SetBkMode(canvas.Handle, TRANSPARENT);
-    canvas.Font.Name := get_selected_candidate_font_name;
-    canvas.Font.Charset := DEFAULT_CHARSET;
     font_size := get_candidate_font_size_from_slider;
     dpi := get_control_scale_dpi(paint_box);
     if dpi <= 0 then
@@ -3104,84 +3124,34 @@ begin
     begin
         dpi := c_nc_base_dpi;
     end;
-    canvas.Font.Height := nc_font_height_for_dpi(font_size, dpi);
-    canvas.Font.Quality := fqClearTypeNatural;
-    canvas.Font.Style := [];
-    canvas.Font.Color := theme.text_color;
 
-    text_height := canvas.TextHeight('Hg国');
-    font_size_delta := font_size - c_candidate_font_layout_reference_size;
-    if font_size_delta < 0 then
+    if m_candidate_preview_window = nil then
     begin
-        font_size_delta := 0;
-    end;
-    vertical_padding := scale_ui_for_dpi(4 + (font_size_delta * 2), dpi);
-    if vertical_padding < scale_ui_for_dpi(4, dpi) then
-    begin
-        vertical_padding := scale_ui_for_dpi(4, dpi);
-    end;
-    line_height := scale_ui_for_dpi(20, dpi);
-    if line_height < text_height + vertical_padding then
-    begin
-        line_height := text_height + vertical_padding;
+        m_candidate_preview_window := TncCandidateWindow.create;
     end;
 
-    preedit_text_height := text_height;
-    meta_vertical_padding := scale_ui_for_dpi(8, dpi);
-    if meta_vertical_padding < scale_ui_for_dpi(4, dpi) then
+    SetLength(candidates, Length(c_preview_candidate_texts));
+    for item_index := Low(c_preview_candidate_texts) to
+        High(c_preview_candidate_texts) do
     begin
-        meta_vertical_padding := scale_ui_for_dpi(4, dpi);
-    end;
-    meta_horizontal_padding := scale_ui_for_dpi(8, dpi);
-    if meta_horizontal_padding < scale_ui_for_dpi(4, dpi) then
-    begin
-        meta_horizontal_padding := scale_ui_for_dpi(4, dpi);
-    end;
-    preedit_height := preedit_text_height + meta_vertical_padding;
-
-    horizontal_padding := scale_ui_for_dpi(6, dpi);
-    item_gap := scale_ui_for_dpi(12, dpi);
-    content_height := preedit_height + line_height;
-    window_padding := scale_ui_for_dpi(1, dpi);
-    if window_padding < 1 then
-    begin
-        window_padding := 1;
-    end;
-    preview_height := content_height + (window_padding * 2);
-    if preview_height > (bounds.Bottom - bounds.Top) then
-    begin
-        preview_height := bounds.Bottom - bounds.Top;
-    end;
-    preview_rect := Rect(bounds.Left, bounds.Top, bounds.Right, bounds.Top + preview_height);
-    preview_inner_rect := preview_rect;
-    InflateRect(preview_inner_rect, -window_padding, -window_padding);
-    canvas.Brush.Color := theme.background_color;
-    canvas.FillRect(preview_inner_rect);
-
-    content_top := preview_inner_rect.Top;
-    preedit_rect := Rect(preview_inner_rect.Left, content_top, preview_inner_rect.Right, content_top + preedit_height);
-    canvas.Brush.Color := theme.background_color;
-    canvas.FillRect(preedit_rect);
-    InflateRect(preedit_rect, -meta_horizontal_padding, 0);
-    canvas.Font.Color := theme.muted_text_color;
-    SetTextColor(canvas.Handle, ColorToRGB(canvas.Font.Color));
-    draw_preview_text(c_preview_preedit_text, preedit_rect);
-
-    row_top := content_top + preedit_height;
-    x := preview_inner_rect.Left + scale_ui_for_dpi(6, dpi);
-
-    for item_index := Low(c_preview_texts) to High(c_preview_texts) do
-    begin
-        draw_item(item_index);
+        candidates[item_index].text := c_preview_candidate_texts[item_index];
+        candidates[item_index].source := cs_rule;
+        candidates[item_index].display_kind := cdk_default;
     end;
 
-    // Content is clipped to the inner rectangle; draw the frame last so a
-    // large-font row can never overwrite its bottom or side edges.
-    canvas.Pen.Color := theme.border_color;
-    canvas.Brush.Style := bsClear;
-    canvas.Rectangle(preview_rect.Left, preview_rect.Top, preview_rect.Right,
-        preview_rect.Bottom);
-    canvas.Brush.Style := bsSolid;
+    completion := Default(TncOneKeyCompletion);
+    completion.text := c_preview_completion_text;
+    completion.full_pinyin := 'luoxiayuguwuqifei';
+
+    m_candidate_preview_window.apply_appearance(
+        get_selected_candidate_font_name, font_size,
+        get_selected_candidate_color_scheme);
+    m_candidate_preview_window.prepare_preview(dpi,
+        bounds.Right - bounds.Left);
+    m_candidate_preview_window.update_candidates(candidates, 0, 1, 0,
+        c_preview_preedit_text, completion,
+        get_selected_one_key_completion_key, False);
+    m_candidate_preview_window.PaintTo(canvas.Handle, bounds.Left, bounds.Top);
 end;
 
 function TncSettingsForm.browse_for_save_file(const title: string; const filter: string; const default_ext: string;
@@ -3360,6 +3330,8 @@ begin
     set_candidate_page_size_combo(m_engine_config.candidate_page_size);
     set_candidate_color_scheme_combo(m_engine_config.candidate_color_scheme);
     load_shortcut_controls(m_engine_config.shortcuts);
+    set_one_key_completion_key_combo(
+        m_engine_config.one_key_completion_key);
     set_candidate_page_key_scheme_combo(
         m_engine_config.candidate_page_key_scheme);
     if m_chk_log_enabled <> nil then
@@ -3503,8 +3475,12 @@ begin
     next_config.candidate_font_name := get_selected_candidate_font_name;
     next_config.candidate_font_size := get_candidate_font_size_from_slider;
     next_config.candidate_page_size := get_selected_candidate_page_size;
+    next_config.one_key_completion_key :=
+        get_selected_one_key_completion_key;
     next_config.candidate_page_key_scheme :=
-        get_selected_candidate_page_key_scheme;
+        nc_resolve_candidate_page_key_scheme(
+        get_selected_candidate_page_key_scheme,
+        next_config.one_key_completion_key);
     next_config.candidate_color_scheme := get_selected_candidate_color_scheme;
     shortcut_config := nc_default_shortcut_config;
     for action_index := Ord(Low(TncShortcutAction)) to Ord(High(TncShortcutAction)) do

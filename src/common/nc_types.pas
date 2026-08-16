@@ -54,6 +54,14 @@ type
 
     TncCandidateList = array of TncCandidate;
 
+    TncOneKeyCompletion = record
+        text: string;
+        full_pinyin: string;
+        weight: Integer;
+    end;
+
+    TncOneKeyCompletionList = array of TncOneKeyCompletion;
+
     TncPairPathEvidence = record
         encoded_path: string;
         query_path_weight: Integer;
@@ -92,6 +100,10 @@ type
         cpks_brackets,
         cpks_comma_period,
         cpks_shift_tab
+    );
+    TncOneKeyCompletionKey = (
+        ock_tab,
+        ock_backtick
     );
 
     TncShortcutAction = (
@@ -135,6 +147,7 @@ type
         candidate_font_size: Integer;
         candidate_page_size: Integer;
         candidate_page_key_scheme: TncCandidatePageKeyScheme;
+        one_key_completion_key: TncOneKeyCompletionKey;
         candidate_color_scheme: Integer;
         debug_mode: Boolean;
         dictionary_variant: TncDictionaryVariant;

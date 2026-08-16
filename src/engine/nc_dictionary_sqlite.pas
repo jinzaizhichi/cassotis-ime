@@ -131,6 +131,8 @@ type
         m_base_exact_pinyin_bloom: TBytes;
         m_base_exact_pinyin_bloom_ready: Boolean;
         m_prefix_lookup_result_cache: TDictionary<string, TncCandidateList>;
+        m_one_key_completion_cache:
+            TDictionary<string, TncOneKeyCompletionList>;
         m_literal_lookup_result_cache: TDictionary<string, TncCandidateList>;
         m_literal_user_words_available: Integer;
         m_exact_base_entry_cache: TDictionary<string, Boolean>;
@@ -268,6 +270,8 @@ type
             out results: TncCandidateList): Boolean; override;
         function lookup_full_pinyin_prefix(const pinyin_prefix: string;
             out results: TncCandidateList): Boolean; override;
+        function lookup_one_key_completions(const pinyin_prefix: string;
+            out results: TncOneKeyCompletionList): Boolean; override;
         function lookup_fuzzy_full_pinyin(const pinyin: string;
             out results: TncCandidateList): Boolean; override;
         function lookup_fuzzy_full_pinyin_bounded(const pinyin: string;
@@ -2356,6 +2360,8 @@ begin
     SetLength(m_base_exact_pinyin_bloom, 0);
     m_base_exact_pinyin_bloom_ready := False;
     m_prefix_lookup_result_cache := TDictionary<string, TncCandidateList>.Create;
+    m_one_key_completion_cache :=
+        TDictionary<string, TncOneKeyCompletionList>.Create;
     m_literal_lookup_result_cache := TDictionary<string, TncCandidateList>.Create;
     m_literal_user_words_available := -1;
     m_exact_base_entry_cache := TDictionary<string, Boolean>.Create;
@@ -2576,6 +2582,11 @@ begin
     begin
         m_prefix_lookup_result_cache.Free;
         m_prefix_lookup_result_cache := nil;
+    end;
+    if m_one_key_completion_cache <> nil then
+    begin
+        m_one_key_completion_cache.Free;
+        m_one_key_completion_cache := nil;
     end;
     if m_literal_lookup_result_cache <> nil then
     begin
@@ -3181,6 +3192,209 @@ begin
         m_prefix_lookup_result_cache.AddOrSetValue(normalized_prefix,
             Copy(results, 0, Length(results)));
     end;
+end;
+
+function TncSqliteDictionary.lookup_one_key_completions(
+    const pinyin_prefix: string;
+    out results: TncOneKeyCompletionList): Boolean;
+const
+    c_result_cache_limit = 4096;
+    c_query_limit = 256;
+    c_completion_limit = 8;
+    completion_sql =
+        'SELECT pinyin, text, weight FROM dict_base ' +
+        'WHERE pinyin >= ?1 AND pinyin < ?2 ' +
+        'AND weight > 0 AND COALESCE(comment, '''') = '''' ' +
+        'ORDER BY weight DESC, length(text) ASC, text ASC LIMIT ?3';
+var
+    canonical_prefix: string;
+    compact_prefix: string;
+    explicit_prefix: string;
+    cache_key: string;
+    prefix_syllables: TArray<string>;
+    prefix_idx: Integer;
+    seen_texts: TDictionary<string, Integer>;
+
+    procedure query_stored_prefix(const stored_prefix: string);
+    var
+        upper_bound: string;
+        candidate_syllables: TArray<string>;
+        candidate_pinyin: string;
+        candidate_compact_pinyin: string;
+        candidate_text: string;
+        item: TncOneKeyCompletion;
+        stmt: Psqlite3_stmt;
+        step_result: Integer;
+        syllable_idx: Integer;
+        existing_idx: Integer;
+        accepted_count: Integer;
+        prefix_matches: Boolean;
+    begin
+        if stored_prefix = '' then
+        begin
+            Exit;
+        end;
+        upper_bound := build_prefix_upper_bound(stored_prefix);
+        if upper_bound = '' then
+        begin
+            Exit;
+        end;
+
+        stmt := nil;
+        accepted_count := 0;
+        try
+            if (not m_base_connection.prepare(completion_sql, stmt)) or
+                (not m_base_connection.bind_text(stmt, 1, stored_prefix)) or
+                (not m_base_connection.bind_text(stmt, 2, upper_bound)) or
+                (not m_base_connection.bind_int(stmt, 3, c_query_limit)) then
+            begin
+                Exit;
+            end;
+
+            step_result := m_base_connection.step(stmt);
+            while step_result = SQLITE_ROW do
+            begin
+                candidate_pinyin := normalize_canonical_pinyin_key(
+                    m_base_connection.column_text(stmt, 0));
+                candidate_compact_pinyin := normalize_compact_pinyin_key(
+                    candidate_pinyin);
+                candidate_text := Trim(m_base_connection.column_text(stmt, 1));
+                candidate_syllables := split_full_pinyin_syllables(
+                    candidate_pinyin);
+                prefix_matches :=
+                    (Length(candidate_syllables) > Length(prefix_syllables)) and
+                    (get_text_unit_count_local(candidate_text) =
+                    Length(candidate_syllables));
+                if prefix_matches then
+                begin
+                    for syllable_idx := 0 to High(prefix_syllables) do
+                    begin
+                        if not SameText(prefix_syllables[syllable_idx],
+                            candidate_syllables[syllable_idx]) then
+                        begin
+                            prefix_matches := False;
+                            Break;
+                        end;
+                    end;
+                end;
+
+                if prefix_matches and (candidate_text <> '') then
+                begin
+                    item.text := candidate_text;
+                    item.full_pinyin := candidate_compact_pinyin;
+                    item.weight := m_base_connection.column_int(stmt, 2);
+                    if seen_texts.TryGetValue(candidate_text, existing_idx) then
+                    begin
+                        if item.weight > results[existing_idx].weight then
+                        begin
+                            results[existing_idx] := item;
+                        end;
+                    end
+                    else
+                    begin
+                        existing_idx := Length(results);
+                        SetLength(results, existing_idx + 1);
+                        results[existing_idx] := item;
+                        seen_texts.Add(candidate_text, existing_idx);
+                    end;
+                    Inc(accepted_count);
+                    if accepted_count >= c_completion_limit then
+                    begin
+                        Break;
+                    end;
+                end;
+                step_result := m_base_connection.step(stmt);
+            end;
+        finally
+            if stmt <> nil then
+            begin
+                m_base_connection.finalize(stmt);
+            end;
+        end;
+    end;
+begin
+    SetLength(results, 0);
+    Result := False;
+    canonical_prefix := normalize_canonical_pinyin_key(pinyin_prefix);
+    compact_prefix := normalize_compact_pinyin_key(canonical_prefix);
+    if compact_prefix = '' then
+    begin
+        Exit;
+    end;
+
+    prefix_syllables := split_full_pinyin_syllables(canonical_prefix);
+    if Length(prefix_syllables) < 2 then
+    begin
+        Exit;
+    end;
+    explicit_prefix := '';
+    for prefix_idx := 0 to High(prefix_syllables) do
+    begin
+        if explicit_prefix <> '' then
+        begin
+            explicit_prefix := explicit_prefix + '''';
+        end;
+        explicit_prefix := explicit_prefix + prefix_syllables[prefix_idx];
+    end;
+    cache_key := canonical_prefix;
+
+    if (m_one_key_completion_cache <> nil) and
+        m_one_key_completion_cache.TryGetValue(cache_key, results) then
+    begin
+        results := Copy(results, 0, Length(results));
+        Exit(Length(results) > 0);
+    end;
+
+    if not ensure_open or (not m_base_ready) or
+        (m_base_connection = nil) then
+    begin
+        Exit;
+    end;
+
+    seen_texts := TDictionary<string, Integer>.Create;
+    try
+        query_stored_prefix(compact_prefix);
+        if not SameText(explicit_prefix, compact_prefix) then
+        begin
+            query_stored_prefix(explicit_prefix);
+        end;
+        if Length(results) > 1 then
+        begin
+            TArray.Sort<TncOneKeyCompletion>(results,
+                TComparer<TncOneKeyCompletion>.Construct(
+                function(const left_value, right_value: TncOneKeyCompletion): Integer
+                begin
+                    if left_value.weight <> right_value.weight then
+                    begin
+                        Exit(right_value.weight - left_value.weight);
+                    end;
+                    if get_text_unit_count_local(left_value.text) <>
+                        get_text_unit_count_local(right_value.text) then
+                    begin
+                        Exit(get_text_unit_count_local(left_value.text) -
+                            get_text_unit_count_local(right_value.text));
+                    end;
+                    Result := CompareText(left_value.text, right_value.text);
+                end));
+        end;
+        if Length(results) > c_completion_limit then
+        begin
+            SetLength(results, c_completion_limit);
+        end;
+    finally
+        seen_texts.Free;
+    end;
+
+    if m_one_key_completion_cache <> nil then
+    begin
+        if m_one_key_completion_cache.Count >= c_result_cache_limit then
+        begin
+            m_one_key_completion_cache.Clear;
+        end;
+        m_one_key_completion_cache.AddOrSetValue(cache_key,
+            Copy(results, 0, Length(results)));
+    end;
+    Result := Length(results) > 0;
 end;
 
 procedure TncSqliteDictionary.set_debug_mode(const enabled: Boolean);
@@ -7971,6 +8185,10 @@ begin
     if m_prefix_lookup_result_cache <> nil then
     begin
         m_prefix_lookup_result_cache.Clear;
+    end;
+    if m_one_key_completion_cache <> nil then
+    begin
+        m_one_key_completion_cache.Clear;
     end;
     if m_literal_lookup_result_cache <> nil then
     begin

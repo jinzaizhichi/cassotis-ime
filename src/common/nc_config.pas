@@ -60,7 +60,7 @@ function nc_parse_fuzzy_pinyin_rules_text(
 implementation
 
 const
-    c_config_version = 15;
+    c_config_version = 16;
     c_font_name_utf8_migration_version = 11;
     c_candidate_font_size_config_version = 2;
     c_config_mutex_name = 'Local\CassotisIme_Config_v1';
@@ -885,6 +885,7 @@ begin
     Result.candidate_font_size := c_default_candidate_font_size;
     Result.candidate_page_size := c_default_candidate_page_size;
     Result.candidate_page_key_scheme := cpks_minus_plus;
+    Result.one_key_completion_key := ock_tab;
     Result.candidate_color_scheme := c_default_candidate_color_scheme;
     Result.debug_mode := False;
     Result.dictionary_variant := dv_simplified;
@@ -1160,6 +1161,11 @@ begin
         Result.candidate_page_key_scheme := nc_parse_candidate_page_key_scheme(
             safe_ini_read_string(ini, 'shortcuts', 'candidate_page_keys',
             nc_candidate_page_key_scheme_to_text(cpks_minus_plus)));
+        Result.one_key_completion_key := nc_parse_one_key_completion_key(
+            safe_ini_read_string(ini, 'shortcuts', 'one_key_completion_key',
+            nc_one_key_completion_key_to_text(ock_tab)));
+        Result.candidate_page_key_scheme := nc_resolve_candidate_page_key_scheme(
+            Result.candidate_page_key_scheme, Result.one_key_completion_key);
         shortcut_values_valid := shortcut_values_valid and
             (not nc_shortcut_config_has_duplicates(Result.shortcuts));
         nc_normalize_shortcut_config(Result.shortcuts);
@@ -1205,6 +1211,7 @@ begin
             not safe_ini_value_exists(ini, 'shortcuts', 'full_width_toggle') or
             not safe_ini_value_exists(ini, 'shortcuts', 'open_settings') or
             not safe_ini_value_exists(ini, 'shortcuts', 'candidate_page_keys') or
+            not safe_ini_value_exists(ini, 'shortcuts', 'one_key_completion_key') or
             (not shortcut_values_valid) or
             safe_ini_value_exists(ini, 'dictionary', 'db_path') or
             safe_ini_value_exists(ini, 'dictionary', 'db_path_sc') or
@@ -1256,6 +1263,8 @@ var
     ini: TMemIniFile;
     candidate_font_name: string;
     shortcut_config: TncShortcutConfig;
+    completion_key: TncOneKeyCompletionKey;
+    candidate_page_key_scheme: TncCandidatePageKeyScheme;
 begin
     if (m_config_path = '') or (not m_config_mutex_owned) then
     begin
@@ -1271,6 +1280,10 @@ begin
     try
         shortcut_config := config.shortcuts;
         nc_normalize_shortcut_config(shortcut_config);
+        completion_key := nc_normalize_one_key_completion_key(
+            config.one_key_completion_key);
+        candidate_page_key_scheme := nc_resolve_candidate_page_key_scheme(
+            config.candidate_page_key_scheme, completion_key);
         ini.EraseSection('engine');
         ini.EraseSection('pinyin');
         ini.EraseSection('appearance');
@@ -1311,7 +1324,9 @@ begin
             nc_shortcut_to_text(shortcut_config.open_settings));
         ini.WriteString('shortcuts', 'candidate_page_keys',
             nc_candidate_page_key_scheme_to_text(
-            config.candidate_page_key_scheme));
+            candidate_page_key_scheme));
+        ini.WriteString('shortcuts', 'one_key_completion_key',
+            nc_one_key_completion_key_to_text(completion_key));
         write_config_version(ini, True);
         ini.UpdateFile;
     finally

@@ -36,6 +36,7 @@ type
         m_caret_line_height: Integer;
         m_terminal_like_target: Boolean;
         m_candidates: TncCandidateList;
+        m_one_key_completion: TncOneKeyCompletion;
         m_page_index: Integer;
         m_page_count: Integer;
         m_selected_index: Integer;
@@ -73,7 +74,9 @@ type
             const terminal_like_target: Boolean): Boolean;
         function candidate_generation: UInt64;
         procedure store_candidates(const candidates: TncCandidateList; const page_index: Integer;
-            const page_count: Integer; const selected_index: Integer; const preedit_text: string);
+            const page_count: Integer; const selected_index: Integer;
+            const preedit_text: string;
+            const one_key_completion: TncOneKeyCompletion);
         procedure clear_candidates;
         function has_candidates: Boolean;
         function has_dirty_candidates: Boolean;
@@ -533,6 +536,14 @@ begin
     end;
 end;
 
+function one_key_completions_equal(const left_value: TncOneKeyCompletion;
+    const right_value: TncOneKeyCompletion): Boolean;
+begin
+    Result := (left_value.text = right_value.text) and
+        (left_value.full_pinyin = right_value.full_pinyin) and
+        (left_value.weight = right_value.weight);
+end;
+
 procedure host_log_at(const level: TncLogLevel; const text: string);
 var
     line: string;
@@ -663,6 +674,9 @@ begin
     m_caret_line_height := 0;
     m_terminal_like_target := False;
     SetLength(m_candidates, 0);
+    m_one_key_completion.text := '';
+    m_one_key_completion.full_pinyin := '';
+    m_one_key_completion.weight := 0;
     m_page_index := 0;
     m_page_count := 0;
     m_selected_index := 0;
@@ -820,7 +834,9 @@ begin
 end;
 
 procedure TncHostSession.store_candidates(const candidates: TncCandidateList; const page_index: Integer;
-    const page_count: Integer; const selected_index: Integer; const preedit_text: string);
+    const page_count: Integer; const selected_index: Integer;
+    const preedit_text: string;
+    const one_key_completion: TncOneKeyCompletion);
 var
     changed: Boolean;
 begin
@@ -828,8 +844,11 @@ begin
         (m_page_count <> page_count) or
         (m_selected_index <> selected_index) or
         (m_preedit_text <> preedit_text) or
+        (not one_key_completions_equal(m_one_key_completion,
+        one_key_completion)) or
         (not candidates_equal(m_candidates, candidates));
     m_candidates := candidates;
+    m_one_key_completion := one_key_completion;
     m_page_index := page_index;
     m_page_count := page_count;
     m_selected_index := selected_index;
@@ -844,6 +863,9 @@ end;
 procedure TncHostSession.clear_candidates;
 begin
     SetLength(m_candidates, 0);
+    m_one_key_completion.text := '';
+    m_one_key_completion.full_pinyin := '';
+    m_one_key_completion.weight := 0;
     m_page_index := 0;
     m_page_count := 0;
     m_selected_index := 0;
@@ -854,7 +876,8 @@ end;
 
 function TncHostSession.has_candidates: Boolean;
 begin
-    Result := Length(m_candidates) > 0;
+    Result := (Length(m_candidates) > 0) or
+        (m_one_key_completion.text <> '');
 end;
 
 function TncHostSession.has_dirty_candidates: Boolean;
@@ -864,7 +887,7 @@ end;
 
 procedure TncHostSession.apply_candidate_content_only(const candidate_generation: UInt64);
 begin
-    if Length(m_candidates) = 0 then
+    if not has_candidates then
     begin
         hide_candidate_window;
         if candidate_generation = m_candidate_generation then
@@ -878,7 +901,9 @@ begin
     if m_candidate_dirty or (m_last_candidate_debug_mode <> m_engine.config.debug_mode) then
     begin
         m_candidate_window.update_candidates(m_candidates, m_page_index, m_page_count, m_selected_index,
-            m_preedit_text, m_engine.config.debug_mode);
+            m_preedit_text, m_one_key_completion,
+            m_engine.config.one_key_completion_key,
+            m_engine.config.debug_mode);
         m_last_candidate_debug_mode := m_engine.config.debug_mode;
     end;
     if candidate_generation = m_candidate_generation then
@@ -906,7 +931,7 @@ var
     monitor_handle: HMONITOR;
     debug_logging: Boolean;
 begin
-    if Length(m_candidates) = 0 then
+    if not has_candidates then
     begin
         hide_candidate_window;
         if candidate_generation = m_candidate_generation then
@@ -924,7 +949,9 @@ begin
     if m_candidate_dirty or (m_last_candidate_debug_mode <> m_engine.config.debug_mode) then
     begin
         m_candidate_window.update_candidates(m_candidates, m_page_index, m_page_count, m_selected_index,
-            m_preedit_text, m_engine.config.debug_mode);
+            m_preedit_text, m_one_key_completion,
+            m_engine.config.one_key_completion_key,
+            m_engine.config.debug_mode);
         m_last_candidate_debug_mode := m_engine.config.debug_mode;
     end;
 
@@ -1752,6 +1779,7 @@ var
     upgraded_dictionary: Boolean;
     refresh_generation: UInt64;
     candidates: TncCandidateList;
+    one_key_completion: TncOneKeyCompletion;
     page_index: Integer;
     page_count: Integer;
     selected_index: Integer;
@@ -1825,12 +1853,15 @@ begin
                         if session.engine.rebuild_candidates_after_dictionary_upgrade then
                         begin
                             candidates := session.engine.get_candidates;
+                            one_key_completion :=
+                                session.engine.get_one_key_completion;
                             page_index := session.engine.get_page_index;
                             page_count := session.engine.get_page_count;
                             selected_index := session.engine.get_selected_index;
                             preedit_text := session.engine.get_composition_text;
                             session.store_candidates(candidates, page_index,
-                                page_count, selected_index, preedit_text);
+                                page_count, selected_index, preedit_text,
+                                one_key_completion);
                             refreshed_candidates := True;
                             refresh_generation := session.candidate_generation;
                         end;
@@ -2238,6 +2269,7 @@ const
 var
     session: TncHostSession;
     candidates: TncCandidateList;
+    one_key_completion: TncOneKeyCompletion;
     page_index: Integer;
     page_count: Integer;
     selected_index: Integer;
@@ -2349,6 +2381,7 @@ begin
         begin
             readback_start_tick := GetTickCount64;
             candidates := session.engine.get_candidates;
+            one_key_completion := session.engine.get_one_key_completion;
             display_text := session.engine.get_display_text;
             page_index := session.engine.get_page_index;
             page_count := session.engine.get_page_count;
@@ -2375,14 +2408,16 @@ begin
                     page_index + 1, page_count, selected_index + 1, sanitize_log_text(lookup_debug_info)]));
             end;
 
-            if Length(candidates) = 0 then
+            if (Length(candidates) = 0) and
+                (one_key_completion.text = '') then
             begin
                 session.clear_candidates;
                 should_hide_candidates := True;
             end
             else
             begin
-                session.store_candidates(candidates, page_index, page_count, selected_index, preedit_text);
+                session.store_candidates(candidates, page_index, page_count,
+                    selected_index, preedit_text, one_key_completion);
                 caret_point := session.last_caret;
                 has_caret := session.has_caret;
                 caret_line_height := session.caret_line_height;
@@ -2408,6 +2443,7 @@ begin
         begin
             readback_start_tick := GetTickCount64;
             candidates := session.engine.get_candidates;
+            one_key_completion := session.engine.get_one_key_completion;
             display_text := session.engine.get_display_text;
             page_index := session.engine.get_page_index;
             page_count := session.engine.get_page_count;
@@ -2442,14 +2478,16 @@ begin
                     page_index + 1, page_count, selected_index + 1, sanitize_log_text(lookup_debug_info)]));
             end;
 
-            if Length(candidates) = 0 then
+            if (Length(candidates) = 0) and
+                (one_key_completion.text = '') then
             begin
                 session.clear_candidates;
                 should_hide_candidates := True;
             end
             else
             begin
-                session.store_candidates(candidates, page_index, page_count, selected_index, preedit_text);
+                session.store_candidates(candidates, page_index, page_count,
+                    selected_index, preedit_text, one_key_completion);
                 caret_point := session.last_caret;
                 has_caret := session.has_caret;
                 caret_line_height := session.caret_line_height;
@@ -3131,6 +3169,7 @@ var
     candidate_text: string;
     pinyin_key: string;
     candidates: TncCandidateList;
+    one_key_completion: TncOneKeyCompletion;
     page_index: Integer;
     page_count: Integer;
     selected_index: Integer;
@@ -3264,18 +3303,21 @@ begin
         host_log(Format('[INFO] removed user candidate text=%s pinyin=%s', [candidate_text, pinyin_key]));
 
         candidates := session.engine.get_candidates;
+        one_key_completion := session.engine.get_one_key_completion;
         page_index := session.engine.get_page_index;
         page_count := session.engine.get_page_count;
         selected_index := session.engine.get_selected_index;
         preedit_text := session.engine.get_composition_text;
-        if Length(candidates) = 0 then
+        if (Length(candidates) = 0) and
+            (one_key_completion.text = '') then
         begin
             session.clear_candidates;
             should_hide := True;
         end
         else
         begin
-            session.store_candidates(candidates, page_index, page_count, selected_index, preedit_text);
+            session.store_candidates(candidates, page_index, page_count,
+                selected_index, preedit_text, one_key_completion);
             refresh_generation := session.candidate_generation;
             should_refresh := True;
         end;

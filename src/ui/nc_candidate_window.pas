@@ -16,6 +16,7 @@ uses
     Winapi.MultiMon,
     Winapi.TlHelp32,
     nc_types,
+    nc_shortcut,
     nc_dpi_scale,
     nc_candidate_theme;
 
@@ -36,6 +37,7 @@ type
         m_selected_index: Integer;
         m_list_font: TFont;
         m_weight_font: TFont;
+        m_brand_font: TFont;
         m_page_label: TLabel;
         m_preedit_label: TLabel;
         m_border_color: TColor;
@@ -57,8 +59,12 @@ type
         m_current_dpi: Integer;
         m_layout_dpi: Integer;
         m_layout_list_font_height: Integer;
+        m_preview_minimum_client_width: Integer;
         m_list_item_height: Integer;
         m_list_rect: TRect;
+        m_one_key_completion_rect: TRect;
+        m_one_key_completion_text: string;
+        m_one_key_completion_key: TncOneKeyCompletionKey;
         m_preedit_rect: TRect;
         m_page_rect: TRect;
         m_list_padding: Integer;
@@ -112,8 +118,13 @@ type
         destructor Destroy; override;
         procedure apply_appearance(const font_name: string; const font_size: Integer;
             const color_scheme: Integer);
+        procedure prepare_preview(const dpi: Integer;
+            const minimum_client_width: Integer = 0);
         procedure update_candidates(const candidates: TncCandidateList; const page_index: Integer; const page_count: Integer;
-            const selected_index: Integer; const preedit_text: string; const debug_mode: Boolean);
+            const selected_index: Integer; const preedit_text: string;
+            const one_key_completion: TncOneKeyCompletion;
+            const one_key_completion_key: TncOneKeyCompletionKey;
+            const debug_mode: Boolean);
         procedure show_at(const x: Integer; const y: Integer);
         procedure hide_window;
         property on_remove_user_candidate: TncCandidateRemoveEvent read m_on_remove_user_candidate
@@ -137,6 +148,11 @@ var
 
 const
     c_candidate_text_height_sample = 'Hg' + WideChar($56FD);
+    c_candidate_brand_text = 'Cassotis IME' + WideChar($FF0D) +
+        WideChar($8A00) + WideChar($6CC9) + WideChar($8F93) +
+        WideChar($5165) + WideChar($6CD5);
+    c_candidate_brand_font_name = 'Microsoft YaHei UI';
+    c_candidate_brand_font_size = 8;
 
 function font_family_available(const font_name: string): Boolean;
 begin
@@ -249,6 +265,71 @@ begin
     end;
 end;
 
+procedure draw_outlined_canvas_text(const canvas: TCanvas;
+    const text: string; const bounds: TRect; const flags: UINT;
+    const outline_color: TColor; const text_color: TColor);
+var
+    original_color: TColor;
+
+    procedure draw_offset(const offset_x, offset_y: Integer);
+    var
+        shifted_bounds: TRect;
+    begin
+        shifted_bounds := bounds;
+        OffsetRect(shifted_bounds, offset_x, offset_y);
+        draw_canvas_text(canvas, text, shifted_bounds, flags);
+    end;
+begin
+    if (canvas = nil) or (text = '') then
+    begin
+        Exit;
+    end;
+
+    original_color := canvas.Font.Color;
+    try
+        canvas.Font.Color := outline_color;
+        draw_offset(-1, -1);
+        draw_offset(0, -1);
+        draw_offset(1, -1);
+        draw_offset(-1, 0);
+        draw_offset(1, 0);
+        draw_offset(-1, 1);
+        draw_offset(0, 1);
+        draw_offset(1, 1);
+
+        canvas.Font.Color := text_color;
+        draw_offset(0, 0);
+    finally
+        canvas.Font.Color := original_color;
+    end;
+end;
+
+function candidate_brand_outline_color(
+    const background_color: TColor): TColor;
+var
+    rgb_color: COLORREF;
+    red_value: Integer;
+    green_value: Integer;
+    blue_value: Integer;
+    luminance: Integer;
+begin
+    rgb_color := ColorToRGB(background_color);
+    red_value := GetRValue(rgb_color);
+    green_value := GetGValue(rgb_color);
+    blue_value := GetBValue(rgb_color);
+    luminance := ((red_value * 299) + (green_value * 587) +
+        (blue_value * 114)) div 1000;
+    if luminance < 128 then
+    begin
+        Result := RGB(red_value div 3, green_value div 3,
+            blue_value div 3);
+    end
+    else
+    begin
+        Result := clWhite;
+    end;
+end;
+
 function try_get_dpi_for_window(const wnd: HWND; out dpi: Integer): Boolean;
 var
     module: HMODULE;
@@ -302,6 +383,7 @@ begin
     m_candidate_weight_lines := TStringList.Create;
     m_list_font := TFont.Create;
     m_weight_font := TFont.Create;
+    m_brand_font := TFont.Create;
     m_color_scheme := c_default_candidate_color_scheme;
     m_color_theme := nc_candidate_color_theme(m_color_scheme);
     m_border_color := m_color_theme.border_color;
@@ -321,8 +403,12 @@ begin
     m_current_dpi := 0;
     m_layout_dpi := 0;
     m_layout_list_font_height := 0;
+    m_preview_minimum_client_width := 0;
     m_list_item_height := m_base_item_height;
     m_list_rect := Rect(0, 0, 0, 0);
+    m_one_key_completion_rect := Rect(0, 0, 0, 0);
+    m_one_key_completion_text := '';
+    m_one_key_completion_key := ock_tab;
     m_preedit_rect := Rect(0, 0, 0, 0);
     m_page_rect := Rect(0, 0, 0, 0);
     m_list_padding := m_base_list_padding;
@@ -358,6 +444,12 @@ begin
     m_weight_font.Charset := DEFAULT_CHARSET;
     m_weight_font.Height := nc_font_height_for_dpi(m_base_weight_font_size, c_nc_base_dpi);
     m_weight_font.Color := m_color_theme.weight_text_color;
+
+    m_brand_font.Name := c_candidate_brand_font_name;
+    m_brand_font.Charset := DEFAULT_CHARSET;
+    m_brand_font.Height := nc_font_height_for_dpi(
+        c_candidate_brand_font_size, c_nc_base_dpi);
+    m_brand_font.Color := m_color_theme.muted_text_color;
 end;
 
 destructor TncCandidateWindow.Destroy;
@@ -384,6 +476,12 @@ begin
     begin
         m_weight_font.Free;
         m_weight_font := nil;
+    end;
+
+    if m_brand_font <> nil then
+    begin
+        m_brand_font.Free;
+        m_brand_font := nil;
     end;
 
     inherited Destroy;
@@ -442,7 +540,8 @@ begin
     if dpi <> m_current_dpi then
     begin
         apply_dpi(dpi);
-        if m_candidate_lines.Count > 0 then
+        if (m_candidate_lines.Count > 0) or
+            (m_one_key_completion_text <> '') then
         begin
             update_size;
         end;
@@ -757,6 +856,8 @@ begin
     m_current_dpi := dpi;
     m_list_font.Height := nc_font_height_for_dpi(m_base_list_font_size, dpi);
     m_weight_font.Height := nc_font_height_for_dpi(m_base_weight_font_size, dpi);
+    m_brand_font.Height := nc_font_height_for_dpi(
+        c_candidate_brand_font_size, dpi);
     m_list_item_height := nc_scale_for_dpi(m_base_item_height, dpi);
     m_page_label.Font.Height := nc_font_height_for_dpi(m_base_label_font_size, dpi);
     m_page_label.Height := nc_scale_for_dpi(m_base_label_height, dpi);
@@ -801,7 +902,8 @@ begin
         (Color = effective_color_theme.background_color) and
         (m_border_color = effective_color_theme.border_color) and
         (m_list_font.Color = effective_color_theme.text_color) and
-        (m_weight_font.Color = effective_color_theme.weight_text_color) then
+        (m_weight_font.Color = effective_color_theme.weight_text_color) and
+        (m_brand_font.Color = effective_color_theme.muted_text_color) then
     begin
         Exit;
     end;
@@ -822,6 +924,7 @@ begin
     m_weight_font.Name := effective_font_name;
     m_weight_font.Charset := DEFAULT_CHARSET;
     m_weight_font.Color := m_color_theme.weight_text_color;
+    m_brand_font.Color := m_color_theme.muted_text_color;
     if m_preedit_label <> nil then
     begin
         m_preedit_label.Font.Name := effective_font_name;
@@ -846,6 +949,19 @@ begin
         apply_dpi(c_nc_base_dpi);
     end;
     update_size;
+    Invalidate;
+end;
+
+procedure TncCandidateWindow.prepare_preview(const dpi: Integer;
+    const minimum_client_width: Integer);
+begin
+    m_preview_minimum_client_width := Max(0, minimum_client_width);
+    apply_dpi(nc_normalize_dpi(dpi));
+    if (m_candidate_lines.Count > 0) or
+        (m_one_key_completion_text <> '') then
+    begin
+        update_size;
+    end;
     Invalidate;
 end;
 
@@ -1178,9 +1294,16 @@ var
     meta_horizontal_padding: Integer;
     list_vertical_padding: Integer;
     font_size_delta: Integer;
+    completion_height: Integer;
+    completion_width: Integer;
+    completion_key_text: string;
+    completion_key_width: Integer;
+    completion_gap: Integer;
+    brand_width: Integer;
+    brand_gap: Integer;
 begin
     item_count := m_candidate_lines.Count;
-    if item_count = 0 then
+    if (item_count = 0) and (m_one_key_completion_text = '') then
     begin
         Exit;
     end;
@@ -1244,7 +1367,8 @@ begin
     begin
         row_width := m_candidate_offsets[item_count - 1] + m_candidate_widths[item_count - 1];
     end;
-    if row_width < nc_scale_for_dpi(120, m_current_dpi) then
+    if (item_count > 0) and
+        (row_width < nc_scale_for_dpi(120, m_current_dpi)) then
     begin
         row_width := nc_scale_for_dpi(120, m_current_dpi);
     end;
@@ -1259,6 +1383,40 @@ begin
     if meta_horizontal_padding < 8 then
     begin
         meta_horizontal_padding := 8;
+    end;
+
+    // Reserve the completion row for the lifetime of the candidate window so
+    // suggestions can appear or disappear without moving the window anchor.
+    completion_height := Max(m_list_item_height,
+        main_text_height + list_vertical_padding) + 1;
+    Canvas.Font.Assign(m_brand_font);
+    brand_width := Canvas.TextWidth(c_candidate_brand_text) + 2;
+    brand_gap := nc_scale_for_dpi(12, m_current_dpi);
+    completion_width := (m_list_padding * 2) + brand_width;
+    if m_one_key_completion_text <> '' then
+    begin
+        completion_key_text := 'Tab';
+        if m_one_key_completion_key = ock_backtick then
+        begin
+            completion_key_text := '`';
+        end;
+        Canvas.Font.Assign(m_weight_font);
+        completion_key_width := Canvas.TextWidth(completion_key_text);
+        assign_list_font_for_text(m_one_key_completion_text,
+            m_color_theme.lm_compound_text_color);
+        completion_gap := nc_scale_for_dpi(8, m_current_dpi);
+        completion_width := (m_list_padding * 2) + completion_key_width +
+            completion_gap + Canvas.TextWidth(m_one_key_completion_text) +
+            brand_gap + brand_width;
+    end;
+    if completion_width > max_width then
+    begin
+        max_width := completion_width;
+    end;
+    if m_preview_minimum_client_width > 0 then
+    begin
+        max_width := Max(max_width, m_preview_minimum_client_width -
+            Padding.Left - Padding.Right);
     end;
 
     label_height := 0;
@@ -1287,9 +1445,17 @@ begin
         preedit_height := meta_text_height + meta_vertical_padding;
     end;
 
-    list_height := m_list_item_height;
+    if item_count > 0 then
+    begin
+        list_height := m_list_item_height;
+    end
+    else
+    begin
+        list_height := 0;
+    end;
     ClientWidth := max_width + Padding.Left + Padding.Right;
-    ClientHeight := preedit_height + list_height + label_height + Padding.Top + Padding.Bottom;
+    ClientHeight := preedit_height + list_height + completion_height +
+        label_height + Padding.Top + Padding.Bottom;
 
     inner_left := Padding.Left;
     inner_top := Padding.Top;
@@ -1297,6 +1463,8 @@ begin
     current_top := inner_top;
     m_preedit_rect := Rect(0, 0, 0, 0);
     m_page_rect := Rect(0, 0, 0, 0);
+    m_list_rect := Rect(0, 0, 0, 0);
+    m_one_key_completion_rect := Rect(0, 0, 0, 0);
 
     if m_show_preedit_text then
     begin
@@ -1304,8 +1472,19 @@ begin
         current_top := current_top + preedit_height;
     end;
 
-    m_list_rect := Rect(inner_left, current_top, inner_left + inner_width, current_top + list_height);
-    current_top := current_top + list_height;
+    if list_height > 0 then
+    begin
+        m_list_rect := Rect(inner_left, current_top,
+            inner_left + inner_width, current_top + list_height);
+        current_top := current_top + list_height;
+    end;
+
+    if completion_height > 0 then
+    begin
+        m_one_key_completion_rect := Rect(inner_left, current_top,
+            inner_left + inner_width, current_top + completion_height);
+        current_top := current_top + completion_height;
+    end;
 
     if m_show_page_text then
     begin
@@ -1343,6 +1522,14 @@ var
     edge_padding: Integer;
     preedit_rect: TRect;
     page_rect: TRect;
+    completion_rect: TRect;
+    completion_key_rect: TRect;
+    completion_text_rect: TRect;
+    brand_rect: TRect;
+    completion_key_text: string;
+    completion_key_width: Integer;
+    brand_text_width: Integer;
+    brand_gap: Integer;
 begin
     inherited;
     Canvas.Brush.Style := bsSolid;
@@ -1352,6 +1539,12 @@ begin
     Canvas.Brush.Style := bsClear;
     Canvas.Pen.Color := m_border_color;
     Canvas.Rectangle(0, 0, Width, Height);
+
+    if (m_layout_dpi <> m_current_dpi) or
+        (m_layout_list_font_height <> m_list_font.Height) then
+    begin
+        update_size;
+    end;
 
     if m_show_preedit_text and (m_preedit_label.Caption <> '') and (not IsRectEmpty(m_preedit_rect)) then
     begin
@@ -1375,14 +1568,60 @@ begin
             DT_RIGHT or DT_VCENTER or DT_SINGLELINE or DT_END_ELLIPSIS or DT_NOPREFIX);
     end;
 
+    if not IsRectEmpty(m_one_key_completion_rect) then
+    begin
+        completion_rect := m_one_key_completion_rect;
+        Canvas.Font.Assign(m_brand_font);
+        brand_text_width := Canvas.TextWidth(c_candidate_brand_text);
+        brand_rect := completion_rect;
+        brand_rect.Right := completion_rect.Right - m_list_padding - 1;
+        brand_rect.Left := brand_rect.Right - brand_text_width;
+        brand_gap := nc_scale_for_dpi(12, m_current_dpi);
+
+        if m_one_key_completion_text <> '' then
+        begin
+            Canvas.Pen.Color := m_border_color;
+            Canvas.MoveTo(completion_rect.Left + m_list_padding,
+                completion_rect.Top);
+            Canvas.LineTo(completion_rect.Right - m_list_padding,
+                completion_rect.Top);
+
+            completion_key_text := 'Tab';
+            if m_one_key_completion_key = ock_backtick then
+            begin
+                completion_key_text := '`';
+            end;
+            Canvas.Font.Assign(m_weight_font);
+            Canvas.Font.Color := m_color_theme.muted_text_color;
+            completion_key_width := Canvas.TextWidth(completion_key_text);
+            completion_key_rect := completion_rect;
+            completion_key_rect.Left := completion_rect.Left + m_list_padding;
+            completion_key_rect.Right := completion_key_rect.Left +
+                completion_key_width;
+            draw_canvas_text(Canvas, completion_key_text,
+                completion_key_rect, DT_LEFT or DT_VCENTER or DT_SINGLELINE or
+                DT_NOPREFIX);
+
+            completion_text_rect := completion_rect;
+            completion_text_rect.Left := completion_key_rect.Right +
+                nc_scale_for_dpi(8, m_current_dpi);
+            completion_text_rect.Right := brand_rect.Left - brand_gap;
+            assign_list_font_for_text(m_one_key_completion_text,
+                m_color_theme.lm_compound_text_color);
+            draw_canvas_text(Canvas, m_one_key_completion_text,
+                completion_text_rect, DT_LEFT or DT_VCENTER or DT_SINGLELINE or
+                DT_END_ELLIPSIS or DT_NOPREFIX);
+        end;
+
+        Canvas.Font.Assign(m_brand_font);
+        draw_outlined_canvas_text(Canvas, c_candidate_brand_text, brand_rect,
+            DT_RIGHT or DT_VCENTER or DT_SINGLELINE or DT_NOPREFIX,
+            candidate_brand_outline_color(Color), m_brand_font.Color);
+    end;
+
     if (m_candidate_lines = nil) or (m_candidate_lines.Count = 0) then
     begin
         Exit;
-    end;
-
-    if (m_layout_dpi <> m_current_dpi) or (m_layout_list_font_height <> m_list_font.Height) then
-    begin
-        update_size;
     end;
 
     SetBkMode(Canvas.Handle, TRANSPARENT);
@@ -1509,7 +1748,11 @@ begin
 end;
 
 procedure TncCandidateWindow.update_candidates(const candidates: TncCandidateList; const page_index: Integer;
-    const page_count: Integer; const selected_index: Integer; const preedit_text: string; const debug_mode: Boolean);
+    const page_count: Integer; const selected_index: Integer;
+    const preedit_text: string;
+    const one_key_completion: TncOneKeyCompletion;
+    const one_key_completion_key: TncOneKeyCompletionKey;
+    const debug_mode: Boolean);
 const
     c_show_page_label = False;
 var
@@ -1517,6 +1760,9 @@ var
     count: Integer;
 begin
     m_debug_mode := debug_mode;
+    m_one_key_completion_text := Trim(one_key_completion.text);
+    m_one_key_completion_key := nc_normalize_one_key_completion_key(
+        one_key_completion_key);
     m_candidate_lines.BeginUpdate;
     m_candidate_weight_lines.BeginUpdate;
     try
@@ -1594,7 +1840,8 @@ begin
     end;
     m_preedit_label.Visible := False;
 
-    if m_candidate_lines.Count = 0 then
+    if (m_candidate_lines.Count = 0) and
+        (m_one_key_completion_text = '') then
     begin
         hide_window;
         Exit;

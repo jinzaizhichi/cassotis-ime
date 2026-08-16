@@ -450,6 +450,8 @@ type
         m_composition_text: string;
         m_composition_display_text: string;
         m_candidates: TncCandidateList;
+        m_one_key_completion: TncOneKeyCompletion;
+        m_allow_one_key_completion_lookup: Boolean;
         m_visible_candidates_cache: TncCandidateList;
         m_visible_candidate_source_indices_cache: TArray<Integer>;
         m_visible_candidates_cache_composition_text: string;
@@ -808,6 +810,10 @@ type
         function merge_candidate_lists(const primary_candidates: TncCandidateList;
             const secondary_candidates: TncCandidateList; const max_candidates: Integer): TncCandidateList;
         procedure build_candidates;
+        procedure build_candidates_core;
+        procedure clear_one_key_completion;
+        procedure refresh_one_key_completion;
+        function accept_one_key_completion: Boolean;
         procedure apply_long_complete_candidate_pool(
             var candidates: TncCandidateList;
             var source_indices: TArray<Integer>;
@@ -864,7 +870,8 @@ type
         function is_debug_target_recall_prefix(const text: string): Boolean;
     public
         constructor create(const config: TncEngineConfig;
-            const defer_optional_dictionary_models: Boolean = False);
+            const defer_optional_dictionary_models: Boolean = False;
+            const allow_one_key_completion_lookup: Boolean = True);
         destructor Destroy; override;
         procedure reset;
         procedure update_config(const config: TncEngineConfig);
@@ -895,6 +902,7 @@ type
         procedure debug_set_composition_text(const text: string);
         function process_key(const key_code: Word; const key_state: TncKeyState): Boolean;
         function get_candidates: TncCandidateList;
+        function get_one_key_completion: TncOneKeyCompletion;
         function get_page_index: Integer;
         function get_page_count: Integer;
         function get_selected_index: Integer;
@@ -1284,18 +1292,25 @@ begin
 end;
 
 constructor TncEngine.create(const config: TncEngineConfig;
-    const defer_optional_dictionary_models: Boolean = False);
+    const defer_optional_dictionary_models: Boolean = False;
+    const allow_one_key_completion_lookup: Boolean = True);
 begin
     inherited create;
     m_config := config;
     m_defer_optional_dictionary_models :=
         defer_optional_dictionary_models;
+    m_allow_one_key_completion_lookup := allow_one_key_completion_lookup;
     nc_normalize_shortcut_config(m_config.shortcuts);
+    m_config.one_key_completion_key :=
+        nc_normalize_one_key_completion_key(
+        m_config.one_key_completion_key);
     m_config.candidate_page_key_scheme :=
-        nc_normalize_candidate_page_key_scheme(
-        m_config.candidate_page_key_scheme);
+        nc_resolve_candidate_page_key_scheme(
+        m_config.candidate_page_key_scheme,
+        m_config.one_key_completion_key);
     m_composition_text := '';
     m_composition_display_text := '';
+    clear_one_key_completion;
     m_pending_commit_text := '';
     m_pending_commit_remaining := '';
     m_pending_commit_remaining_input_code := '';
@@ -3857,6 +3872,7 @@ end;
 
 procedure TncEngine.reset;
 begin
+    clear_one_key_completion;
     m_composition_text := '';
     m_composition_display_text := '';
     m_pending_commit_text := '';
@@ -4208,9 +4224,13 @@ begin
         (m_config.fuzzy_pinyin_rules <> config.fuzzy_pinyin_rules);
     m_config := config;
     nc_normalize_shortcut_config(m_config.shortcuts);
+    m_config.one_key_completion_key :=
+        nc_normalize_one_key_completion_key(
+        m_config.one_key_completion_key);
     m_config.candidate_page_key_scheme :=
-        nc_normalize_candidate_page_key_scheme(
-        m_config.candidate_page_key_scheme);
+        nc_resolve_candidate_page_key_scheme(
+        m_config.candidate_page_key_scheme,
+        m_config.one_key_completion_key);
     if input_scheme_changed then
     begin
         reset;
@@ -4910,7 +4930,91 @@ begin
     end;
 end;
 
+procedure TncEngine.clear_one_key_completion;
+begin
+    m_one_key_completion.text := '';
+    m_one_key_completion.full_pinyin := '';
+    m_one_key_completion.weight := 0;
+end;
+
+procedure TncEngine.refresh_one_key_completion;
+var
+    query_text: string;
+    syllables: TncPinyinParseResult;
+    completions: TncOneKeyCompletionList;
+    shuangpin_decode: TncShuangpinDecodeResult;
+begin
+    clear_one_key_completion;
+    if (not m_allow_one_key_completion_lookup) or (m_dictionary = nil) or
+        (m_config.input_mode <> im_chinese) or
+        (Trim(m_confirmed_text) <> '') or (Trim(m_composition_text) = '') or
+        m_has_pending_commit then
+    begin
+        Exit;
+    end;
+
+    query_text := LowerCase(Trim(m_composition_text));
+    if is_shuangpin_input then
+    begin
+        shuangpin_decode := nc_decode_shuangpin(
+            m_config.pinyin_input_scheme, m_composition_display_text);
+        if (not shuangpin_decode.valid) or shuangpin_decode.has_pending_key then
+        begin
+            Exit;
+        end;
+    end;
+    if not is_full_pinyin_key(query_text) then
+    begin
+        Exit;
+    end;
+    syllables := get_effective_compact_pinyin_syllables(query_text, False);
+    if Length(syllables) < 2 then
+    begin
+        Exit;
+    end;
+    if (not m_dictionary.lookup_one_key_completions(query_text,
+        completions)) or (Length(completions) = 0) then
+    begin
+        Exit;
+    end;
+
+    m_one_key_completion := completions[0];
+end;
+
+function TncEngine.accept_one_key_completion: Boolean;
+var
+    completion_text: string;
+    completion_pinyin: string;
+begin
+    completion_text := Trim(m_one_key_completion.text);
+    completion_pinyin := normalize_pinyin_text(
+        m_one_key_completion.full_pinyin);
+    Result := completion_text <> '';
+    if not Result then
+    begin
+        Exit;
+    end;
+
+    // The prefix is intentionally incomplete, so never persist it as the
+    // pronunciation of the completed lexicon word. Keep the real full pinyin
+    // for later context bookkeeping instead of associating the text with the
+    // typed prefix.
+    set_pending_commit(completion_text, '', False, '', True, '', False,
+        False, '', True);
+    if completion_pinyin <> '' then
+    begin
+        m_pending_commit_query_key := completion_pinyin;
+    end;
+    clear_one_key_completion;
+end;
+
 procedure TncEngine.build_candidates;
+begin
+    build_candidates_core;
+    refresh_one_key_completion;
+end;
+
+procedure TncEngine.build_candidates_core;
 const
     c_long_prefast_catchup_char_lm_threshold = -6500;
 type
@@ -24034,7 +24138,8 @@ var
                 subspan_oracle_config := m_config;
                 subspan_oracle_config.debug_mode := False;
                 subspan_oracle_config.max_candidates := 6;
-                subspan_oracle_engine := TncEngine.Create(subspan_oracle_config);
+                subspan_oracle_engine := TncEngine.Create(
+                    subspan_oracle_config, False, False);
                 inherit_search_budget_policy_to(subspan_oracle_engine);
             end;
 
@@ -51237,7 +51342,8 @@ var
             begin
                 standalone_chunk_config := m_config;
                 standalone_chunk_config.debug_mode := False;
-                standalone_chunk_engine := TncEngine.Create(standalone_chunk_config);
+                standalone_chunk_engine := TncEngine.Create(
+                    standalone_chunk_config, False, False);
                 inherit_search_budget_policy_to(standalone_chunk_engine);
             end;
 
@@ -69053,7 +69159,8 @@ var
                     query_engine_config := m_config;
                     query_engine_config.debug_mode := False;
                     query_engine_config.max_candidates := 96;
-                    query_engine := TncEngine.Create(query_engine_config);
+                    query_engine := TncEngine.Create(query_engine_config,
+                        False, False);
                     inherit_search_budget_policy_to(query_engine);
                     query_engine.m_disable_subspan_standalone_oracle :=
                         m_disable_subspan_standalone_oracle + 1;
@@ -76795,7 +76902,8 @@ var
                 subspan_oracle_config := m_config;
                 subspan_oracle_config.debug_mode := False;
                 subspan_oracle_config.max_candidates := 6;
-                subspan_oracle_engine := TncEngine.Create(subspan_oracle_config);
+                subspan_oracle_engine := TncEngine.Create(
+                    subspan_oracle_config, False, False);
                 inherit_search_budget_policy_to(subspan_oracle_engine);
             end;
 
@@ -81328,7 +81436,8 @@ var
                 subspan_oracle_config := m_config;
                 subspan_oracle_config.debug_mode := False;
                 subspan_oracle_config.max_candidates := 6;
-                subspan_oracle_engine := TncEngine.Create(subspan_oracle_config);
+                subspan_oracle_engine := TncEngine.Create(
+                    subspan_oracle_config, False, False);
                 inherit_search_budget_policy_to(subspan_oracle_engine);
             end;
 
@@ -81537,7 +81646,8 @@ var
             begin
                 nested_engine_config := m_config;
                 nested_engine_config.debug_mode := False;
-                nested_engine := TncEngine.Create(nested_engine_config);
+                nested_engine := TncEngine.Create(nested_engine_config,
+                    False, False);
                 inherit_search_budget_policy_to(nested_engine);
                 nested_engine.m_disable_subspan_standalone_oracle :=
                     m_disable_subspan_standalone_oracle + 1;
@@ -148496,6 +148606,14 @@ begin
         Exit;
     end;
 
+    if (m_one_key_completion.text <> '') and
+        nc_one_key_completion_matches(m_config.one_key_completion_key,
+        key_code, key_state) then
+    begin
+        Result := accept_one_key_completion;
+        Exit;
+    end;
+
     if (key_code = VK_OEM_3) and (m_composition_text <> '') and (not key_state.shift_down) and
         (not key_state.ctrl_down) and (not key_state.alt_down) then
     begin
@@ -181124,6 +181242,11 @@ begin
     build_current_page_result;
 end;
 
+function TncEngine.get_one_key_completion: TncOneKeyCompletion;
+begin
+    Result := m_one_key_completion;
+end;
+
 function TncEngine.get_page_count_internal(const page_size: Integer): Integer;
 var
     total_count: Integer;
@@ -181676,6 +181799,14 @@ begin
         Exit;
     end;
 
+    if (m_one_key_completion.text <> '') and
+        nc_one_key_completion_matches(m_config.one_key_completion_key,
+        key_code, key_state) then
+    begin
+        Result := True;
+        Exit;
+    end;
+
     if get_punctuation_char(key_code, key_state, punct_char) then
     begin
         if m_composition_text <> '' then
@@ -181690,7 +181821,9 @@ begin
     end;
 
     has_candidates := Length(m_candidates) > 0;
-    if (m_composition_text = '') and (m_confirmed_text = '') and (not has_candidates) and (not m_has_pending_commit) then
+    if (m_composition_text = '') and (m_confirmed_text = '') and
+        (not has_candidates) and (m_one_key_completion.text = '') and
+        (not m_has_pending_commit) then
     begin
         Exit(False);
     end;
