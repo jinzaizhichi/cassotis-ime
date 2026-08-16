@@ -8691,9 +8691,39 @@ var
                 Result := 1;
             end;
         end;
+
+        function admin_place_prefix_may_exist_local: Boolean;
+        const
+            c_admin_suffix_pinyin: array[0..12] of string = (
+                'qu', 'xian', 'shi', 'zhen', 'xiang', 'cun', 'zhou',
+                'sheng', 'qi', 'xinqu', 'zizhiqu', 'zizhizhou',
+                'zizhixian');
+        var
+            compact_prefix_local: string;
+            suffix_idx_local: Integer;
+        begin
+            compact_prefix_local := normalize_compact_pinyin_key(
+                exact_query_key);
+            if compact_prefix_local = '' then
+            begin
+                Exit(False);
+            end;
+
+            for suffix_idx_local := Low(c_admin_suffix_pinyin) to
+                High(c_admin_suffix_pinyin) do
+            begin
+                if base_exact_pinyin_may_exist(compact_prefix_local +
+                    c_admin_suffix_pinyin[suffix_idx_local]) then
+                begin
+                    Exit(True);
+                end;
+            end;
+            Result := False;
+        end;
     begin
         if (not full_pinyin_query) or (query_syllable_count < 2) or
-            (not m_base_ready) then
+            (not m_base_ready) or
+            (not admin_place_prefix_may_exist_local) then
         begin
             Exit;
         end;
@@ -9642,7 +9672,7 @@ var
     function has_separator_normalized_base_variant(const normalized_key: string): Boolean;
     const
         base_separator_variant_sql =
-            'SELECT 1 FROM dict_base WHERE pinyin <> ?1 AND replace(pinyin, ?2, ?3) = ?1 LIMIT 1';
+            'SELECT 1 FROM dict_base_pinyin_alias WHERE compact_pinyin = ?1 LIMIT 1';
     var
         local_stmt: Psqlite3_stmt;
     begin
@@ -9655,9 +9685,7 @@ var
         local_stmt := nil;
         try
             if m_base_connection.prepare(base_separator_variant_sql, local_stmt) and
-                m_base_connection.bind_text(local_stmt, 1, normalized_key) and
-                m_base_connection.bind_text(local_stmt, 2, '''') and
-                m_base_connection.bind_text(local_stmt, 3, '') then
+                m_base_connection.bind_text(local_stmt, 1, normalized_key) then
             begin
                 Result := m_base_connection.step(local_stmt) = SQLITE_ROW;
             end;
