@@ -363,7 +363,7 @@ const
         '    value TEXT NOT NULL' + sLineBreak +
         ');' + sLineBreak +
         sLineBreak +
-        'INSERT OR IGNORE INTO meta(key, value) VALUES(''schema_version'', ''16'');' + sLineBreak +
+        'INSERT OR IGNORE INTO meta(key, value) VALUES(''schema_version'', ''17'');' + sLineBreak +
         sLineBreak +
         'CREATE TABLE IF NOT EXISTS dict_base (' + sLineBreak +
         '    id INTEGER PRIMARY KEY AUTOINCREMENT,' + sLineBreak +
@@ -543,6 +543,15 @@ const
         sLineBreak +
         'CREATE INDEX IF NOT EXISTS idx_dict_base_lm_transition_query ' +
         'ON dict_base_lm_transition(query_pinyin);' +
+        sLineBreak +
+        sLineBreak +
+        'CREATE TABLE IF NOT EXISTS dict_base_transition_completion (' + sLineBreak +
+        '    typed_prefix TEXT NOT NULL PRIMARY KEY,' + sLineBreak +
+        '    full_pinyin TEXT NOT NULL,' + sLineBreak +
+        '    text TEXT NOT NULL,' + sLineBreak +
+        '    path_text TEXT NOT NULL,' + sLineBreak +
+        '    evidence INTEGER NOT NULL DEFAULT 0' + sLineBreak +
+        ') WITHOUT ROWID;' +
         sLineBreak +
         sLineBreak +
         'CREATE TABLE IF NOT EXISTS dict_base_char_lm (' + sLineBreak +
@@ -3200,12 +3209,23 @@ function TncSqliteDictionary.lookup_one_key_completions(
 const
     c_result_cache_limit = 4096;
     c_query_limit = 256;
-    c_completion_limit = 8;
-    completion_sql =
+    base_completion_sql =
         'SELECT pinyin, text, weight FROM dict_base ' +
         'WHERE pinyin >= ?1 AND pinyin < ?2 ' +
         'AND weight > 0 AND COALESCE(comment, '''') = '''' ' +
         'ORDER BY weight DESC, length(text) ASC, text ASC LIMIT ?3';
+    user_completion_sql =
+        'SELECT pinyin, text, weight, last_used FROM dict_user ' +
+        'WHERE pinyin >= ?1 AND pinyin < ?2 ' +
+        'ORDER BY weight DESC, last_used DESC, text ASC LIMIT ?3';
+    literal_completion_sql =
+        'SELECT pinyin, text, created_at FROM dict_user_literal ' +
+        'WHERE pinyin >= ?1 AND pinyin < ?2 ' +
+        'ORDER BY created_at DESC, text ASC LIMIT ?3';
+    transition_completion_sql =
+        'SELECT full_pinyin, text, evidence ' +
+        'FROM dict_base_transition_completion ' +
+        'WHERE typed_prefix = ?1 AND evidence > 0 LIMIT 1';
 var
     canonical_prefix: string;
     compact_prefix: string;
@@ -3213,37 +3233,93 @@ var
     cache_key: string;
     prefix_syllables: TArray<string>;
     prefix_idx: Integer;
-    seen_texts: TDictionary<string, Integer>;
+    best_item: TncOneKeyCompletion;
+    best_primary: Integer;
+    best_secondary: Int64;
+    has_best: Boolean;
 
-    procedure query_stored_prefix(const stored_prefix: string);
+    function candidate_matches_prefix(const candidate_pinyin: string;
+        const candidate_text: string; out candidate_compact_pinyin: string): Boolean;
     var
-        upper_bound: string;
         candidate_syllables: TArray<string>;
-        candidate_pinyin: string;
-        candidate_compact_pinyin: string;
-        candidate_text: string;
-        item: TncOneKeyCompletion;
-        stmt: Psqlite3_stmt;
-        step_result: Integer;
         syllable_idx: Integer;
-        existing_idx: Integer;
-        accepted_count: Integer;
-        prefix_matches: Boolean;
     begin
-        if stored_prefix = '' then
+        candidate_compact_pinyin := normalize_compact_pinyin_key(
+            candidate_pinyin);
+        candidate_syllables := split_full_pinyin_syllables(
+            normalize_canonical_pinyin_key(candidate_pinyin));
+        Result :=
+            (Length(candidate_syllables) > Length(prefix_syllables)) and
+            (get_text_unit_count_local(candidate_text) =
+            Length(candidate_syllables));
+        if not Result then
         begin
             Exit;
         end;
+        for syllable_idx := 0 to High(prefix_syllables) do
+        begin
+            if not SameText(prefix_syllables[syllable_idx],
+                candidate_syllables[syllable_idx]) then
+            begin
+                Exit(False);
+            end;
+        end;
+    end;
+
+    function consider_candidate(const candidate_pinyin: string;
+        const candidate_text: string; const candidate_weight: Integer;
+        const candidate_source: TncOneKeyCompletionSource;
+        const rank_primary: Integer; const rank_secondary: Int64): Boolean;
+    var
+        candidate_compact_pinyin: string;
+        item: TncOneKeyCompletion;
+    begin
+        Result := False;
+        if (Trim(candidate_text) = '') or
+            (not candidate_matches_prefix(candidate_pinyin, candidate_text,
+            candidate_compact_pinyin)) then
+        begin
+            Exit;
+        end;
+        Result := True;
+        if has_best and ((rank_primary < best_primary) or
+            ((rank_primary = best_primary) and
+            (rank_secondary < best_secondary)) or
+            ((rank_primary = best_primary) and
+            (rank_secondary = best_secondary) and
+            (CompareText(Trim(candidate_text), best_item.text) >= 0))) then
+        begin
+            Exit;
+        end;
+        item := Default(TncOneKeyCompletion);
+        item.text := Trim(candidate_text);
+        item.full_pinyin := candidate_compact_pinyin;
+        item.weight := candidate_weight;
+        item.source := candidate_source;
+        best_item := item;
+        best_primary := rank_primary;
+        best_secondary := rank_secondary;
+        has_best := True;
+    end;
+
+    procedure query_base_stored_prefix(const stored_prefix: string);
+    var
+        upper_bound: string;
+        candidate_pinyin: string;
+        candidate_text: string;
+        candidate_weight: Integer;
+        stmt: Psqlite3_stmt;
+        step_result: Integer;
+    begin
         upper_bound := build_prefix_upper_bound(stored_prefix);
-        if upper_bound = '' then
+        if (stored_prefix = '') or (upper_bound = '') then
         begin
             Exit;
         end;
 
         stmt := nil;
-        accepted_count := 0;
         try
-            if (not m_base_connection.prepare(completion_sql, stmt)) or
+            if (not m_base_connection.prepare(base_completion_sql, stmt)) or
                 (not m_base_connection.bind_text(stmt, 1, stored_prefix)) or
                 (not m_base_connection.bind_text(stmt, 2, upper_bound)) or
                 (not m_base_connection.bind_int(stmt, 3, c_query_limit)) then
@@ -3254,54 +3330,14 @@ var
             step_result := m_base_connection.step(stmt);
             while step_result = SQLITE_ROW do
             begin
-                candidate_pinyin := normalize_canonical_pinyin_key(
-                    m_base_connection.column_text(stmt, 0));
-                candidate_compact_pinyin := normalize_compact_pinyin_key(
-                    candidate_pinyin);
+                candidate_pinyin := m_base_connection.column_text(stmt, 0);
                 candidate_text := Trim(m_base_connection.column_text(stmt, 1));
-                candidate_syllables := split_full_pinyin_syllables(
-                    candidate_pinyin);
-                prefix_matches :=
-                    (Length(candidate_syllables) > Length(prefix_syllables)) and
-                    (get_text_unit_count_local(candidate_text) =
-                    Length(candidate_syllables));
-                if prefix_matches then
+                candidate_weight := m_base_connection.column_int(stmt, 2);
+                if consider_candidate(candidate_pinyin, candidate_text,
+                    candidate_weight, okcs_base_exact, candidate_weight,
+                    -get_text_unit_count_local(candidate_text)) then
                 begin
-                    for syllable_idx := 0 to High(prefix_syllables) do
-                    begin
-                        if not SameText(prefix_syllables[syllable_idx],
-                            candidate_syllables[syllable_idx]) then
-                        begin
-                            prefix_matches := False;
-                            Break;
-                        end;
-                    end;
-                end;
-
-                if prefix_matches and (candidate_text <> '') then
-                begin
-                    item.text := candidate_text;
-                    item.full_pinyin := candidate_compact_pinyin;
-                    item.weight := m_base_connection.column_int(stmt, 2);
-                    if seen_texts.TryGetValue(candidate_text, existing_idx) then
-                    begin
-                        if item.weight > results[existing_idx].weight then
-                        begin
-                            results[existing_idx] := item;
-                        end;
-                    end
-                    else
-                    begin
-                        existing_idx := Length(results);
-                        SetLength(results, existing_idx + 1);
-                        results[existing_idx] := item;
-                        seen_texts.Add(candidate_text, existing_idx);
-                    end;
-                    Inc(accepted_count);
-                    if accepted_count >= c_completion_limit then
-                    begin
-                        Break;
-                    end;
+                    Break;
                 end;
                 step_result := m_base_connection.step(stmt);
             end;
@@ -3311,6 +3347,128 @@ var
                 m_base_connection.finalize(stmt);
             end;
         end;
+    end;
+
+    procedure query_user_stored_prefix(const stored_prefix: string;
+        const literal_words: Boolean);
+    var
+        upper_bound: string;
+        candidate_pinyin: string;
+        candidate_text: string;
+        candidate_weight: Integer;
+        candidate_last_used: Int64;
+        stmt: Psqlite3_stmt;
+        step_result: Integer;
+        sql_text: string;
+    begin
+        if (not m_user_ready) or (m_user_connection = nil) then
+        begin
+            Exit;
+        end;
+        upper_bound := build_prefix_upper_bound(stored_prefix);
+        if (stored_prefix = '') or (upper_bound = '') then
+        begin
+            Exit;
+        end;
+        if literal_words then
+        begin
+            sql_text := literal_completion_sql;
+        end
+        else
+        begin
+            sql_text := user_completion_sql;
+        end;
+        stmt := nil;
+        try
+            if (not m_user_connection.prepare(sql_text, stmt)) or
+                (not m_user_connection.bind_text(stmt, 1, stored_prefix)) or
+                (not m_user_connection.bind_text(stmt, 2, upper_bound)) or
+                (not m_user_connection.bind_int(stmt, 3, c_query_limit)) then
+            begin
+                Exit;
+            end;
+            step_result := m_user_connection.step(stmt);
+            while step_result = SQLITE_ROW do
+            begin
+                candidate_pinyin := m_user_connection.column_text(stmt, 0);
+                candidate_text := Trim(m_user_connection.column_text(stmt, 1));
+                if literal_words then
+                begin
+                    candidate_weight := 0;
+                    candidate_last_used := m_user_connection.column_int(stmt, 2);
+                    if consider_candidate(candidate_pinyin, candidate_text,
+                        candidate_weight, okcs_user_exact, MaxInt,
+                        candidate_last_used) then
+                    begin
+                        Break;
+                    end;
+                end
+                else
+                begin
+                    candidate_weight := m_user_connection.column_int(stmt, 2);
+                    candidate_last_used := m_user_connection.column_int(stmt, 3);
+                    if consider_candidate(candidate_pinyin, candidate_text,
+                        candidate_weight, okcs_user_exact, candidate_weight,
+                        candidate_last_used) then
+                    begin
+                        Break;
+                    end;
+                end;
+                step_result := m_user_connection.step(stmt);
+            end;
+        finally
+            if stmt <> nil then
+            begin
+                m_user_connection.finalize(stmt);
+            end;
+        end;
+    end;
+
+    procedure query_transition_completion;
+    var
+        stmt: Psqlite3_stmt;
+        step_result: Integer;
+        candidate_pinyin: string;
+        candidate_text: string;
+        evidence: Integer;
+    begin
+        stmt := nil;
+        try
+            if (not m_base_connection.prepare(transition_completion_sql,
+                stmt)) or
+                (not m_base_connection.bind_text(stmt, 1, compact_prefix)) then
+            begin
+                Exit;
+            end;
+            step_result := m_base_connection.step(stmt);
+            if step_result = SQLITE_ROW then
+            begin
+                candidate_pinyin := m_base_connection.column_text(stmt, 0);
+                candidate_text := Trim(m_base_connection.column_text(stmt, 1));
+                evidence := m_base_connection.column_int(stmt, 2);
+                consider_candidate(candidate_pinyin, candidate_text, evidence,
+                    okcs_transition, evidence, 0);
+            end;
+        finally
+            if stmt <> nil then
+            begin
+                m_base_connection.finalize(stmt);
+            end;
+        end;
+    end;
+
+    procedure cache_results;
+    begin
+        if m_one_key_completion_cache = nil then
+        begin
+            Exit;
+        end;
+        if m_one_key_completion_cache.Count >= c_result_cache_limit then
+        begin
+            m_one_key_completion_cache.Clear;
+        end;
+        m_one_key_completion_cache.AddOrSetValue(cache_key,
+            Copy(results, 0, Length(results)));
     end;
 begin
     SetLength(results, 0);
@@ -3338,6 +3496,11 @@ begin
     end;
     cache_key := canonical_prefix;
 
+    if not ensure_open or (not m_base_ready) or
+        (m_base_connection = nil) then
+    begin
+        Exit;
+    end;
     if (m_one_key_completion_cache <> nil) and
         m_one_key_completion_cache.TryGetValue(cache_key, results) then
     begin
@@ -3345,55 +3508,49 @@ begin
         Exit(Length(results) > 0);
     end;
 
-    if not ensure_open or (not m_base_ready) or
-        (m_base_connection = nil) then
+    // User completions are a separate priority class. Literal words are
+    // explicit user selections, so they win inside that class.
+    best_item := Default(TncOneKeyCompletion);
+    best_primary := Low(Integer);
+    best_secondary := Low(Int64);
+    has_best := False;
+    query_user_stored_prefix(compact_prefix, False);
+    query_user_stored_prefix(compact_prefix, True);
+    if not SameText(explicit_prefix, compact_prefix) then
     begin
-        Exit;
+        query_user_stored_prefix(explicit_prefix, False);
+        query_user_stored_prefix(explicit_prefix, True);
+    end;
+    if has_best then
+    begin
+        SetLength(results, 1);
+        results[0] := best_item;
+        cache_results;
+        Exit(True);
     end;
 
-    seen_texts := TDictionary<string, Integer>.Create;
-    try
-        query_stored_prefix(compact_prefix);
-        if not SameText(explicit_prefix, compact_prefix) then
-        begin
-            query_stored_prefix(explicit_prefix);
-        end;
-        if Length(results) > 1 then
-        begin
-            TArray.Sort<TncOneKeyCompletion>(results,
-                TComparer<TncOneKeyCompletion>.Construct(
-                function(const left_value, right_value: TncOneKeyCompletion): Integer
-                begin
-                    if left_value.weight <> right_value.weight then
-                    begin
-                        Exit(right_value.weight - left_value.weight);
-                    end;
-                    if get_text_unit_count_local(left_value.text) <>
-                        get_text_unit_count_local(right_value.text) then
-                    begin
-                        Exit(get_text_unit_count_local(left_value.text) -
-                            get_text_unit_count_local(right_value.text));
-                    end;
-                    Result := CompareText(left_value.text, right_value.text);
-                end));
-        end;
-        if Length(results) > c_completion_limit then
-        begin
-            SetLength(results, c_completion_limit);
-        end;
-    finally
-        seen_texts.Free;
+    has_best := False;
+    query_base_stored_prefix(compact_prefix);
+    if not SameText(explicit_prefix, compact_prefix) then
+    begin
+        query_base_stored_prefix(explicit_prefix);
+    end;
+    if has_best then
+    begin
+        SetLength(results, 1);
+        results[0] := best_item;
+        cache_results;
+        Exit(True);
     end;
 
-    if m_one_key_completion_cache <> nil then
+    has_best := False;
+    query_transition_completion;
+    if has_best then
     begin
-        if m_one_key_completion_cache.Count >= c_result_cache_limit then
-        begin
-            m_one_key_completion_cache.Clear;
-        end;
-        m_one_key_completion_cache.AddOrSetValue(cache_key,
-            Copy(results, 0, Length(results)));
+        SetLength(results, 1);
+        results[0] := best_item;
     end;
+    cache_results;
     Result := Length(results) > 0;
 end;
 
@@ -4040,6 +4197,19 @@ begin
     end;
 
     if not connection.exec(
+        'CREATE TABLE IF NOT EXISTS dict_base_transition_completion (' +
+        'typed_prefix TEXT NOT NULL PRIMARY KEY,' +
+        'full_pinyin TEXT NOT NULL,' +
+        'text TEXT NOT NULL,' +
+        'path_text TEXT NOT NULL,' +
+        'evidence INTEGER NOT NULL DEFAULT 0' +
+        ') WITHOUT ROWID;') then
+    begin
+        Result := False;
+        Exit;
+    end;
+
+    if not connection.exec(
         'CREATE TABLE IF NOT EXISTS dict_base_char_lm (' +
         'ngram TEXT NOT NULL PRIMARY KEY,' +
         'score INTEGER NOT NULL DEFAULT 0,' +
@@ -4154,6 +4324,11 @@ begin
     if schema_version < 16 then
     begin
         set_schema_version(connection, 16);
+    end;
+
+    if schema_version < 17 then
+    begin
+        set_schema_version(connection, 17);
     end;
 
     Result := True;

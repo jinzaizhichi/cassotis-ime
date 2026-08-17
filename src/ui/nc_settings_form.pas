@@ -152,6 +152,12 @@ type
         m_tab_shortcuts: TTabSheet;
         m_tab_logging: TTabSheet;
         m_tab_advanced: TTabSheet;
+        m_scroll_general: TScrollBox;
+        m_scroll_appearance: TScrollBox;
+        m_scroll_fuzzy_pinyin: TScrollBox;
+        m_scroll_shortcuts: TScrollBox;
+        m_scroll_logging: TScrollBox;
+        m_scroll_advanced: TScrollBox;
         m_label_website: TLabel;
         m_btn_reset: TncModernButton;
         m_btn_apply: TncModernButton;
@@ -1092,6 +1098,20 @@ begin
     end;
 end;
 
+function create_page_scroll_box(const owner: TComponent;
+    const tab_sheet: TTabSheet): TScrollBox;
+begin
+    Result := TScrollBox.Create(owner);
+    Result.Parent := tab_sheet;
+    Result.Align := alClient;
+    Result.BorderStyle := bsNone;
+    Result.AutoScroll := True;
+    Result.HorzScrollBar.Visible := False;
+    Result.VertScrollBar.Tracking := True;
+    Result.ParentColor := True;
+    Result.TabStop := False;
+end;
+
 function measure_wrapped_label_height(const font: TFont; const text: string; const width: Integer): Integer;
 var
     dc: HDC;
@@ -1420,8 +1440,12 @@ end;
 procedure TncSettingsForm.update_dialog_height_for_content;
 var
     tab_sheet: TTabSheet;
+    content_parent: TWinControl;
     control: TControl;
     display_rect: TRect;
+    work_area: TRect;
+    monitor_info: TMonitorInfo;
+    monitor_handle: HMONITOR;
     tab_index: Integer;
     control_index: Integer;
     max_content_bottom: Integer;
@@ -1432,6 +1456,13 @@ var
     desired_page_client_width: Integer;
     desired_client_height: Integer;
     desired_client_width: Integer;
+    max_client_height: Integer;
+    max_client_width: Integer;
+    nonclient_height: Integer;
+    nonclient_width: Integer;
+    work_area_margin: Integer;
+    target_left: Integer;
+    target_top: Integer;
     dpi: Integer;
 begin
     if m_page_control = nil then
@@ -1467,9 +1498,16 @@ begin
             Continue;
         end;
 
-        for control_index := 0 to tab_sheet.ControlCount - 1 do
+        content_parent := tab_sheet;
+        if (tab_sheet.ControlCount = 1) and
+            (tab_sheet.Controls[0] is TScrollBox) then
         begin
-            control := tab_sheet.Controls[control_index];
+            content_parent := TScrollBox(tab_sheet.Controls[0]);
+        end;
+
+        for control_index := 0 to content_parent.ControlCount - 1 do
+        begin
+            control := content_parent.Controls[control_index];
             if (control <> nil) and control.Visible then
             begin
                 if (control.Top + control.Height) > max_content_bottom then
@@ -1497,6 +1535,31 @@ begin
         desired_client_height := scale_ui_for_dpi(c_footer_height, dpi) + scale_ui_for_dpi(220, dpi);
     end;
 
+    work_area_margin := scale_ui_for_dpi(8, dpi);
+    work_area := Rect(0, 0, Screen.Width, Screen.Height);
+    monitor_handle := MonitorFromWindow(Handle, MONITOR_DEFAULTTONEAREST);
+    FillChar(monitor_info, SizeOf(monitor_info), 0);
+    monitor_info.cbSize := SizeOf(monitor_info);
+    if (monitor_handle <> 0) and GetMonitorInfo(monitor_handle, @monitor_info) then
+    begin
+        work_area := monitor_info.rcWork;
+    end;
+
+    nonclient_width := Max(0, Width - ClientWidth);
+    nonclient_height := Max(0, Height - ClientHeight);
+    max_client_width := (work_area.Right - work_area.Left) -
+        nonclient_width - (work_area_margin * 2);
+    max_client_height := (work_area.Bottom - work_area.Top) -
+        nonclient_height - (work_area_margin * 2);
+    if max_client_width > 0 then
+    begin
+        desired_client_width := Min(desired_client_width, max_client_width);
+    end;
+    if max_client_height > 0 then
+    begin
+        desired_client_height := Min(desired_client_height, max_client_height);
+    end;
+
     if ClientWidth <> desired_client_width then
     begin
         ClientWidth := desired_client_width;
@@ -1504,6 +1567,29 @@ begin
     if ClientHeight <> desired_client_height then
     begin
         ClientHeight := desired_client_height;
+    end;
+
+    target_left := Left;
+    target_top := Top;
+    if target_left < (work_area.Left + work_area_margin) then
+    begin
+        target_left := work_area.Left + work_area_margin;
+    end;
+    if (target_left + Width) > (work_area.Right - work_area_margin) then
+    begin
+        target_left := work_area.Right - work_area_margin - Width;
+    end;
+    if target_top < (work_area.Top + work_area_margin) then
+    begin
+        target_top := work_area.Top + work_area_margin;
+    end;
+    if (target_top + Height) > (work_area.Bottom - work_area_margin) then
+    begin
+        target_top := work_area.Bottom - work_area_margin - Height;
+    end;
+    if (Left <> target_left) or (Top <> target_top) then
+    begin
+        SetBounds(target_left, target_top, Width, Height);
     end;
     update_website_link_layout;
 end;
@@ -1694,6 +1780,13 @@ begin
     m_tab_advanced.PageControl := m_page_control;
     m_tab_advanced.Caption := STabAdvanced;
 
+    m_scroll_general := create_page_scroll_box(Self, m_tab_general);
+    m_scroll_appearance := create_page_scroll_box(Self, m_tab_appearance);
+    m_scroll_fuzzy_pinyin := create_page_scroll_box(Self, m_tab_fuzzy_pinyin);
+    m_scroll_shortcuts := create_page_scroll_box(Self, m_tab_shortcuts);
+    m_scroll_logging := create_page_scroll_box(Self, m_tab_logging);
+    m_scroll_advanced := create_page_scroll_box(Self, m_tab_advanced);
+
     m_label_website := TLabel.Create(Self);
     m_label_website.Parent := m_page_control;
     m_label_website.Caption := c_official_website_url;
@@ -1803,7 +1896,7 @@ var
     defaults_group: TPanel;
 begin
     section_top := scale_ui(18);
-    defaults_group := create_section_group(Self, m_tab_general, SGroupDefaultBehavior, section_top, 194);
+    defaults_group := create_section_group(Self, m_scroll_general, SGroupDefaultBehavior, section_top, 194);
 
     top := scale_ui(c_section_inner_top);
     create_label(Self, defaults_group, SLabelInputMode, top);
@@ -1867,7 +1960,7 @@ const
         'an / ang', 'en / eng', 'in / ing', 'ian / iang', 'uan / uang'
     );
 begin
-    fuzzy_group := create_section_group(Self, m_tab_fuzzy_pinyin, '',
+    fuzzy_group := create_section_group(Self, m_scroll_fuzzy_pinyin, '',
         scale_ui(18), 158);
     top := scale_ui(c_untitled_section_inner_top);
     m_chk_fuzzy_pinyin_enabled := create_check_box(Self, fuzzy_group, top,
@@ -1914,7 +2007,7 @@ begin
     size_label_texts[High(size_label_texts)] := SSizeMaximum;
 
     section_top := scale_ui(18);
-    appearance_group := create_section_group(Self, m_tab_appearance, '',
+    appearance_group := create_section_group(Self, m_scroll_appearance, '',
         section_top, c_appearance_group_height);
 
     top := scale_ui(c_untitled_section_inner_top);
@@ -2140,7 +2233,7 @@ var
     header_label: TLabel;
 begin
     section_top := scale_ui(18);
-    shortcut_group := create_section_group(Self, m_tab_shortcuts, '', section_top, 260);
+    shortcut_group := create_section_group(Self, m_scroll_shortcuts, '', section_top, 260);
 
     top := scale_ui(c_untitled_section_inner_top);
     header_label := create_label(Self, shortcut_group, SLabelShortcutAction, top);
@@ -2193,7 +2286,7 @@ begin
         top + scale_ui(2), scale_ui(c_hint_width));
 
     section_top := shortcut_group.Top + shortcut_group.Height + scale_ui(c_section_gap);
-    paging_group := create_section_group(Self, m_tab_shortcuts,
+    paging_group := create_section_group(Self, m_scroll_shortcuts,
         SGroupCandidatePaging, section_top, 90);
     top := scale_ui(54);
     create_label(Self, paging_group, SLabelCandidatePageKeys, top);
@@ -2254,7 +2347,7 @@ begin
     update_candidate_page_key_scheme_preview;
 
     section_top := paging_group.Top + paging_group.Height + scale_ui(c_section_gap);
-    completion_group := create_section_group(Self, m_tab_shortcuts,
+    completion_group := create_section_group(Self, m_scroll_shortcuts,
         SGroupOneKeyCompletion, section_top, 90);
     top := scale_ui(54);
     create_label(Self, completion_group, SLabelOneKeyCompletionKey, top);
@@ -2517,7 +2610,7 @@ var
     files_group: TPanel;
 begin
     section_top := scale_ui(18);
-    logging_group := create_section_group(Self, m_tab_logging, SGroupLogging, section_top, 152);
+    logging_group := create_section_group(Self, m_scroll_logging, SGroupLogging, section_top, 152);
 
     top := scale_ui(c_section_inner_top);
     m_chk_log_enabled := create_check_box(Self, logging_group, top, SCheckEnableLogging, mark_dirty);
@@ -2547,7 +2640,7 @@ begin
     m_edit_log_max_size_kb.OnChange := mark_dirty;
 
     section_top := logging_group.Top + logging_group.Height + scale_ui(c_section_gap);
-    files_group := create_section_group(Self, m_tab_logging, SGroupLogFiles, section_top, 108);
+    files_group := create_section_group(Self, m_scroll_logging, SGroupLogFiles, section_top, 108);
 
     top := scale_ui(c_section_inner_top);
     create_label(Self, files_group, SLabelLogPath, top);
@@ -2577,7 +2670,7 @@ var
     debug_hint: TLabel;
 begin
     section_top := scale_ui(18);
-    debug_group := create_section_group(Self, m_tab_advanced, SGroupDebug, section_top, 154);
+    debug_group := create_section_group(Self, m_scroll_advanced, SGroupDebug, section_top, 154);
 
     top := scale_ui(c_section_inner_top);
     m_chk_debug_mode := create_check_box(Self, debug_group, top, SCheckEnableDebugMode, mark_dirty);
@@ -2590,7 +2683,7 @@ begin
         m_btn_clear_user_dictionary.Top + m_btn_clear_user_dictionary.Height + scale_ui(14));
 
     section_top := debug_group.Top + debug_group.Height + scale_ui(c_section_gap);
-    tools_group := create_section_group(Self, m_tab_advanced, SGroupConfigTools, section_top, 134);
+    tools_group := create_section_group(Self, m_scroll_advanced, SGroupConfigTools, section_top, 134);
 
     top := scale_ui(c_section_inner_top);
     m_btn_open_config_folder := create_action_button(Self, tools_group, scale_ui(c_label_left), top,

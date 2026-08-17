@@ -13,14 +13,14 @@ uses
 
 type
     TncImportMode = (imBaseDict, imQueryPathPrior, imLmTransition, imCharLm,
-        imCharReverseLm);
+        imCharReverseLm, imTransitionCompletion);
 
 const
     c_segment_path_separator = #3;
 
 procedure print_usage;
 begin
-    Writeln('Usage: cassotis_ime_dict_init <db_path> <schema_path> [import_path] [base|query_path|lm_transition|char_lm|char_reverse_lm]');
+    Writeln('Usage: cassotis_ime_dict_init <db_path> <schema_path> [import_path] [base|query_path|lm_transition|char_lm|char_reverse_lm|transition_completion]');
     Writeln('       cassotis_ime_dict_init <db_path> <schema_path> --build-contains-index');
 end;
 
@@ -91,6 +91,32 @@ begin
     end;
 
     Result := (query_pinyin <> '') and (path_text <> '');
+end;
+
+function split_transition_completion_line(const line: string;
+    out typed_prefix: string; out full_pinyin: string; out text: string;
+    out path_text: string; out evidence: Integer): Boolean;
+var
+    parts: TArray<string>;
+begin
+    Result := False;
+    typed_prefix := '';
+    full_pinyin := '';
+    text := '';
+    path_text := '';
+    evidence := 0;
+    parts := line.Split([#9]);
+    if Length(parts) <> 5 then
+    begin
+        Exit;
+    end;
+    typed_prefix := Trim(parts[0]);
+    full_pinyin := Trim(parts[1]);
+    text := Trim(parts[2]);
+    path_text := Trim(parts[3]);
+    evidence := StrToIntDef(Trim(parts[4]), 0);
+    Result := (typed_prefix <> '') and (full_pinyin <> '') and
+        (text <> '') and (path_text <> '') and (evidence > 0);
 end;
 
 function split_char_lm_line(const line: string; out ngram: string;
@@ -205,6 +231,52 @@ begin
     end;
 end;
 
+function get_query_path_plain_text(const encoded_path: string): string;
+begin
+    Result := StringReplace(encoded_path, c_segment_path_separator, '',
+        [rfReplaceAll]);
+end;
+
+function transition_completion_boundary_valid(const parser: TncPinyinParser;
+    const typed_prefix: string; const full_pinyin: string): Boolean;
+var
+    prefix_parts: TncPinyinParseResult;
+    full_parts: TncPinyinParseResult;
+    index: Integer;
+    rebuilt_prefix: string;
+    rebuilt_full: string;
+begin
+    Result := False;
+    if parser = nil then
+    begin
+        Exit;
+    end;
+    prefix_parts := parser.parse(typed_prefix);
+    full_parts := parser.parse(full_pinyin);
+    if (Length(prefix_parts) < 2) or
+        (Length(full_parts) <= Length(prefix_parts)) or
+        (Length(full_parts) - Length(prefix_parts) > 3) then
+    begin
+        Exit;
+    end;
+    rebuilt_prefix := '';
+    for index := 0 to High(prefix_parts) do
+    begin
+        rebuilt_prefix := rebuilt_prefix + prefix_parts[index].text;
+        if not SameText(prefix_parts[index].text, full_parts[index].text) then
+        begin
+            Exit;
+        end;
+    end;
+    rebuilt_full := '';
+    for index := 0 to High(full_parts) do
+    begin
+        rebuilt_full := rebuilt_full + full_parts[index].text;
+    end;
+    Result := SameText(rebuilt_prefix, typed_prefix) and
+        SameText(rebuilt_full, normalize_compact_pinyin_key(full_pinyin));
+end;
+
 function parse_import_mode(const value: string; const import_path: string): TncImportMode;
 var
     normalized: string;
@@ -220,6 +292,10 @@ begin
         if Pos('lm_transition', normalized) > 0 then
         begin
             Exit(imLmTransition);
+        end;
+        if Pos('transition_completion', normalized) > 0 then
+        begin
+            Exit(imTransitionCompletion);
         end;
         if Pos('char_reverse_lm', normalized) > 0 then
         begin
@@ -242,6 +318,13 @@ begin
         (normalized = 'lm') or (normalized = 'transition') then
     begin
         Exit(imLmTransition);
+    end;
+
+    if (normalized = 'transition_completion') or
+        (normalized = 'transition-completion') or
+        (normalized = 'completion') then
+    begin
+        Exit(imTransitionCompletion);
     end;
 
     if (normalized = 'char_lm') or (normalized = 'char-lm') or
@@ -434,6 +517,10 @@ const
         'INSERT OR REPLACE INTO dict_base_query_path(query_pinyin, path_text, weight) VALUES (?1, ?2, ?3);';
     insert_lm_transition_sql =
         'INSERT OR REPLACE INTO dict_base_lm_transition(query_pinyin, path_text, weight) VALUES (?1, ?2, ?3);';
+    insert_transition_completion_sql =
+        'INSERT OR REPLACE INTO dict_base_transition_completion' +
+        '(typed_prefix, full_pinyin, text, path_text, evidence) ' +
+        'VALUES (?1, ?2, ?3, ?4, ?5);';
     insert_char_lm_sql =
         'INSERT OR REPLACE INTO dict_base_char_lm(ngram, score, backoff) VALUES (?1, ?2, ?3);';
     insert_char_reverse_lm_sql =
@@ -447,7 +534,9 @@ var
     stmt_query_path: Psqlite3_stmt;
     line: string;
     pinyin: string;
+    full_pinyin: string;
     text: string;
+    path_text: string;
     weight: Integer;
     backoff: Integer;
     word_id: Integer;
@@ -459,9 +548,12 @@ var
     inserted_aliases: Integer;
     inserted_query_paths: Integer;
     inserted_char_lm: Integer;
+    inserted_transition_completions: Integer;
+    completion_parser: TncPinyinParser;
     jianpin_variants: TArray<string>;
     jianpin_value: string;
     compact_pinyin: string;
+    compact_full_pinyin: string;
 begin
     Result := False;
     if not FileExists(import_path) then
@@ -480,6 +572,7 @@ begin
     stmt_alias := nil;
     stmt_last_rowid := nil;
     stmt_query_path := nil;
+    completion_parser := nil;
     has_error := False;
     line_count := 0;
     inserted := 0;
@@ -487,6 +580,7 @@ begin
     inserted_aliases := 0;
     inserted_query_paths := 0;
     inserted_char_lm := 0;
+    inserted_transition_completions := 0;
     try
         if import_mode = imQueryPathPrior then
         begin
@@ -512,6 +606,19 @@ begin
         else if import_mode = imCharReverseLm then
         begin
             if not conn.prepare(insert_char_reverse_lm_sql,
+                stmt_query_path) then
+            begin
+                Exit;
+            end;
+        end
+        else if import_mode = imTransitionCompletion then
+        begin
+            completion_parser := TncPinyinParser.Create;
+            if not conn.exec('DELETE FROM dict_base_transition_completion;') then
+            begin
+                Exit;
+            end;
+            if not conn.prepare(insert_transition_completion_sql,
                 stmt_query_path) then
             begin
                 Exit;
@@ -564,6 +671,55 @@ begin
                     Break;
                 end;
                 Inc(inserted_char_lm);
+                if (not conn.reset(stmt_query_path)) or
+                    (not conn.clear_bindings(stmt_query_path)) then
+                begin
+                    has_error := True;
+                    Break;
+                end;
+                Continue;
+            end;
+
+            if import_mode = imTransitionCompletion then
+            begin
+                if not split_transition_completion_line(line, pinyin,
+                    full_pinyin, text, path_text, weight) then
+                begin
+                    Continue;
+                end;
+                pinyin := normalize_compact_pinyin_key(pinyin);
+                full_pinyin := normalize_pinyin_key(full_pinyin);
+                compact_full_pinyin := normalize_compact_pinyin_key(
+                    full_pinyin);
+                path_text := normalize_query_path_text(path_text);
+                if (pinyin = '') or (full_pinyin = '') or
+                    (Length(compact_full_pinyin) <= Length(pinyin)) or
+                    (not compact_full_pinyin.StartsWith(pinyin, True)) or
+                    (not transition_completion_boundary_valid(
+                    completion_parser, pinyin, full_pinyin)) or
+                    (text = '') or
+                    (get_query_path_segment_count(path_text) <> 2) or
+                    (get_query_path_plain_text(path_text) <> text) or
+                    (weight <= 0) then
+                begin
+                    Continue;
+                end;
+                if (not conn.bind_text(stmt_query_path, 1, pinyin)) or
+                    (not conn.bind_text(stmt_query_path, 2, full_pinyin)) or
+                    (not conn.bind_text(stmt_query_path, 3, text)) or
+                    (not conn.bind_text(stmt_query_path, 4, path_text)) or
+                    (not conn.bind_int(stmt_query_path, 5, weight)) then
+                begin
+                    has_error := True;
+                    Break;
+                end;
+                rc := conn.step(stmt_query_path);
+                if rc <> SQLITE_DONE then
+                begin
+                    has_error := True;
+                    Break;
+                end;
+                Inc(inserted_transition_completions);
                 if (not conn.reset(stmt_query_path)) or
                     (not conn.clear_bindings(stmt_query_path)) then
                 begin
@@ -753,6 +909,7 @@ begin
         begin
             conn.finalize(stmt_query_path);
         end;
+        completion_parser.Free;
         reader.Free;
     end;
 
@@ -784,6 +941,12 @@ begin
             Writeln(Format(
                 'Imported %d reverse character LM rows from %d lines.',
                 [inserted_char_lm, line_count]));
+        end
+        else if import_mode = imTransitionCompletion then
+        begin
+            Writeln(Format(
+                'Imported %d transition completion rows from %d lines.',
+                [inserted_transition_completions, line_count]));
         end
         else
         begin

@@ -64,6 +64,7 @@ type
         m_list_rect: TRect;
         m_one_key_completion_rect: TRect;
         m_one_key_completion_text: string;
+        m_one_key_completion_source: TncOneKeyCompletionSource;
         m_one_key_completion_key: TncOneKeyCompletionKey;
         m_preedit_rect: TRect;
         m_page_rect: TRect;
@@ -408,6 +409,7 @@ begin
     m_list_rect := Rect(0, 0, 0, 0);
     m_one_key_completion_rect := Rect(0, 0, 0, 0);
     m_one_key_completion_text := '';
+    m_one_key_completion_source := okcs_none;
     m_one_key_completion_key := ock_tab;
     m_preedit_rect := Rect(0, 0, 0, 0);
     m_page_rect := Rect(0, 0, 0, 0);
@@ -1402,8 +1404,16 @@ begin
         end;
         Canvas.Font.Assign(m_weight_font);
         completion_key_width := Canvas.TextWidth(completion_key_text);
-        assign_list_font_for_text(m_one_key_completion_text,
-            m_color_theme.lm_compound_text_color);
+        if m_one_key_completion_source = okcs_transition then
+        begin
+            assign_list_font_for_text(m_one_key_completion_text,
+                m_color_theme.lm_compound_text_color);
+        end
+        else
+        begin
+            assign_list_font_for_text(m_one_key_completion_text,
+                m_color_theme.text_color);
+        end;
         completion_gap := nc_scale_for_dpi(8, m_current_dpi);
         completion_width := (m_list_padding * 2) + completion_key_width +
             completion_gap + Canvas.TextWidth(m_one_key_completion_text) +
@@ -1606,8 +1616,16 @@ begin
             completion_text_rect.Left := completion_key_rect.Right +
                 nc_scale_for_dpi(8, m_current_dpi);
             completion_text_rect.Right := brand_rect.Left - brand_gap;
-            assign_list_font_for_text(m_one_key_completion_text,
-                m_color_theme.lm_compound_text_color);
+            if m_one_key_completion_source = okcs_transition then
+            begin
+                assign_list_font_for_text(m_one_key_completion_text,
+                    m_color_theme.lm_compound_text_color);
+            end
+            else
+            begin
+                assign_list_font_for_text(m_one_key_completion_text,
+                    m_color_theme.text_color);
+            end;
             draw_canvas_text(Canvas, m_one_key_completion_text,
                 completion_text_rect, DT_LEFT or DT_VCENTER or DT_SINGLELINE or
                 DT_END_ELLIPSIS or DT_NOPREFIX);
@@ -1761,6 +1779,7 @@ var
 begin
     m_debug_mode := debug_mode;
     m_one_key_completion_text := Trim(one_key_completion.text);
+    m_one_key_completion_source := one_key_completion.source;
     m_one_key_completion_key := nc_normalize_one_key_completion_key(
         one_key_completion_key);
     m_candidate_lines.BeginUpdate;

@@ -541,7 +541,8 @@ function one_key_completions_equal(const left_value: TncOneKeyCompletion;
 begin
     Result := (left_value.text = right_value.text) and
         (left_value.full_pinyin = right_value.full_pinyin) and
-        (left_value.weight = right_value.weight);
+        (left_value.weight = right_value.weight) and
+        (left_value.source = right_value.source);
 end;
 
 procedure host_log_at(const level: TncLogLevel; const text: string);
@@ -677,6 +678,7 @@ begin
     m_one_key_completion.text := '';
     m_one_key_completion.full_pinyin := '';
     m_one_key_completion.weight := 0;
+    m_one_key_completion.source := okcs_none;
     m_page_index := 0;
     m_page_count := 0;
     m_selected_index := 0;
@@ -866,6 +868,7 @@ begin
     m_one_key_completion.text := '';
     m_one_key_completion.full_pinyin := '';
     m_one_key_completion.weight := 0;
+    m_one_key_completion.source := okcs_none;
     m_page_index := 0;
     m_page_count := 0;
     m_selected_index := 0;

@@ -222,6 +222,8 @@ $lexicon_query_path_sc = Join-Path $lexicon_root 'data\generated\dict_query_path
 $lexicon_query_path_tc = Join-Path $lexicon_root 'data\generated\dict_query_path_prior_tc.txt'
 $lexicon_lm_transition_sc = Join-Path $lexicon_root 'data\generated\dict_lm_transition_sc.txt'
 $lexicon_lm_transition_tc = Join-Path $lexicon_root 'data\generated\dict_lm_transition_tc.txt'
+$lexicon_transition_completion_sc = Join-Path $lexicon_root 'data\generated\dict_transition_completion_sc.txt'
+$lexicon_transition_completion_tc = Join-Path $lexicon_root 'data\generated\dict_transition_completion_tc.txt'
 $lexicon_char_lm_sc = Join-Path $lexicon_root 'data\generated\dict_char_lm_sc.txt'
 $lexicon_char_lm_tc = Join-Path $lexicon_root 'data\generated\dict_char_lm_tc.txt'
 $lexicon_char_reverse_lm_sc = Join-Path $lexicon_root 'data\generated\dict_char_reverse_lm_sc.txt'
@@ -299,6 +301,20 @@ try {
         }
         else {
             Write-Warning "LM transition files not found under lexicon data/generated; skipping LM transition import."
+        }
+
+        if ((Test-Path -LiteralPath $lexicon_transition_completion_sc) -and
+            (Test-Path -LiteralPath $lexicon_transition_completion_tc)) {
+            Write-Host ("Importing lexicon transition completions from: " + $lexicon_transition_completion_sc)
+            invoke_tool 'cassotis_ime_dict_init (lexicon transition completion sc)' $dict_init @(
+                $base_db_sc_path, $schema_path, $lexicon_transition_completion_sc, 'transition_completion')
+
+            Write-Host ("Importing lexicon transition completions from: " + $lexicon_transition_completion_tc)
+            invoke_tool 'cassotis_ime_dict_init (lexicon transition completion tc)' $dict_init @(
+                $base_db_tc_path, $schema_path, $lexicon_transition_completion_tc, 'transition_completion')
+        }
+        else {
+            Write-Warning "Transition completion files not found under lexicon data/generated; skipping transition completion import."
         }
 
         if (Test-Path -LiteralPath $lexicon_char_lm_sc) {

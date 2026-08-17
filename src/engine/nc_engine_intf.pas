@@ -4935,6 +4935,7 @@ begin
     m_one_key_completion.text := '';
     m_one_key_completion.full_pinyin := '';
     m_one_key_completion.weight := 0;
+    m_one_key_completion.source := okcs_none;
 end;
 
 procedure TncEngine.refresh_one_key_completion;
@@ -148614,6 +148615,15 @@ begin
         Exit;
     end;
 
+    if (m_config.one_key_completion_key = ock_backtick) and
+        (m_composition_text <> '') and
+        nc_one_key_completion_matches(m_config.one_key_completion_key,
+        key_code, key_state) then
+    begin
+        Result := True;
+        Exit;
+    end;
+
     if (key_code = VK_OEM_3) and (m_composition_text <> '') and (not key_state.shift_down) and
         (not key_state.ctrl_down) and (not key_state.alt_down) then
     begin
@@ -181800,6 +181810,15 @@ begin
     end;
 
     if (m_one_key_completion.text <> '') and
+        nc_one_key_completion_matches(m_config.one_key_completion_key,
+        key_code, key_state) then
+    begin
+        Result := True;
+        Exit;
+    end;
+
+    if (m_config.one_key_completion_key = ock_backtick) and
+        (m_composition_text <> '') and
         nc_one_key_completion_matches(m_config.one_key_completion_key,
         key_code, key_state) then
     begin

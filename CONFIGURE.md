@@ -25,7 +25,7 @@ Notes:
 
 | Key | Meaning | Allowed values | Default | Notes |
 | --- | --- | --- | --- | --- |
-| `version` | Config schema version | Integer | `8` | Internal migration marker. Updated automatically on save. Do not edit manually. |
+| `version` | Config schema version | Integer | `16` | Internal migration marker. Updated automatically on save. Do not edit manually. |
 
 ---
 
@@ -39,7 +39,7 @@ Notes:
 | `punctuation_full_width` | Chinese punctuation style | `true` / `false` | `true` | `punctuation_full_width=true` | When enabled, punctuation keys produce Chinese full-width symbols. Toggle at runtime with Ctrl+Period. |
 | `debug` | Debug mode | `0` / `1` | `0` | `debug=1` | Shows candidate scores and path info in the candidate window. |
 
-> **Note:** Candidates per page (9), segment candidate enhancement, and keyboard shortcut toggles are fixed at runtime and are not configurable via the INI file.
+> **Note:** Candidate count, candidate appearance, and shortcuts can be changed in Settings. Shortcut values are stored in `[shortcuts]`.
 
 Double Pinyin follows these rules:
 
@@ -47,6 +47,42 @@ Double Pinyin follows these rules:
 - Candidate lookup and user learning use decoded canonical Full Pinyin, so all Pinyin schemes share ranking and user data.
 - An apostrophe explicitly separates syllables. In Microsoft, Sogou, and Ziguang Double Pinyin, semicolon represents the `ing` final only as the second key of a pair; elsewhere it remains punctuation.
 - The status widget uses `拼`, `微`, `鹤`, `自`, `搜`, `紫`, and `加` for Full Pinyin, Microsoft, Xiaohe, Ziranma, Sogou, Ziguang, and Pinyin Jiajia respectively.
+
+---
+
+## `[pinyin]`
+
+| Key | Meaning | Allowed values | Default | Notes |
+| --- | --- | --- | --- | --- |
+| `fuzzy_enabled` | Master fuzzy-Pinyin switch | `true` / `false` | `false` | When enabled, only rules listed in `fuzzy_rules` are applied. |
+| `fuzzy_rules` | Enabled fuzzy-Pinyin rules | Comma-separated rule names | Empty | Supports `z-zh`, `c-ch`, `s-sh`, `l-n`, `f-h`, `r-l`, `an-ang`, `en-eng`, `in-ing`, `ian-iang`, and `uan-uang`. |
+
+---
+
+## `[appearance]`
+
+| Key | Meaning | Allowed values | Default | Notes |
+| --- | --- | --- | --- | --- |
+| `candidate_font_name` | Candidate font | Installed font family | `Microsoft YaHei UI` | Can also be selected in Settings. |
+| `candidate_font_size` | Candidate font size | `7` through `18` | `12` | Settings uses predefined levels; INI values are clamped to the valid range. |
+| `candidate_page_size` | Candidates per page | `3` through `9` | `9` | Changes page size without reducing the total candidate pool. |
+| `candidate_color_scheme` | Candidate window theme | `clear-white` / `moon-white` / `celadon` / `clear-blue` / `pine-ink` / `indigo-night` | `clear-white` | Corresponds to the six built-in light and dark themes. |
+
+---
+
+## `[shortcuts]`
+
+| Key | Meaning | Allowed values | Default | Notes |
+| --- | --- | --- | --- | --- |
+| `input_mode_toggle` | Chinese/English mode toggle | Shortcut text | `Shift` | Press Shift alone to toggle. |
+| `punctuation_toggle` | Chinese/English punctuation toggle | Shortcut text | `Ctrl+.` | Toggles full-width Chinese and English punctuation. |
+| `dictionary_variant_toggle` | Simplified/Traditional dictionary toggle | Shortcut text | `Ctrl+Shift+T` | Switches between simplified and traditional dictionaries. |
+| `full_width_toggle` | Full-width mode toggle | Shortcut text | `Shift+Space` | Toggles half-width and full-width ASCII output. |
+| `open_settings` | Open Settings | Shortcut text | `Ctrl+Shift+F10` | Opens the Settings window. |
+| `candidate_page_keys` | Candidate paging key scheme | `minus-plus` / `brackets` / `comma-period` / `shift-tab` | `minus-plus` | Represents `-/=`, `[/]`, `,/.`, or `Shift+Tab/Tab`. |
+| `one_key_completion_key` | One-key completion trigger | `tab` / `backtick` | `tab` | After at least two complete syllables, accepts the single completion shown at the bottom of the candidate window. Sources are checked in order: user lexicon, base lexicon, then the offline-generated strong-transition index. Transition completions use the theme accent and are not learned as ordinary user words. `backtick` means the `` ` `` key. |
+
+When `one_key_completion_key=tab`, `candidate_page_keys=shift-tab` conflicts with completion. Settings therefore hides that paging option, and an INI file containing both values is normalized to `minus-plus`.
 
 ---
 
@@ -81,7 +117,7 @@ Runtime dictionary files are stored at a fixed runtime location and are not conf
 
 ```ini
 [meta]
-version=8
+version=16
 
 [engine]
 input_mode=0
@@ -90,8 +126,27 @@ full_width_mode=false
 punctuation_full_width=true
 debug=0
 
+[pinyin]
+fuzzy_enabled=false
+fuzzy_rules=
+
+[appearance]
+candidate_font_name=Microsoft YaHei UI
+candidate_font_size=12
+candidate_page_size=9
+candidate_color_scheme=clear-white
+
 [dictionary]
 variant=simplified
+
+[shortcuts]
+input_mode_toggle=Shift
+punctuation_toggle=Ctrl+.
+dictionary_variant_toggle=Ctrl+Shift+T
+full_width_toggle=Shift+Space
+open_settings=Ctrl+Shift+F10
+candidate_page_keys=minus-plus
+one_key_completion_key=tab
 
 [log]
 enabled=false

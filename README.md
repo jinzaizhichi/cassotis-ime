@@ -29,6 +29,7 @@ The project focus is:
 - TSF text service pipeline is available (registration, activation, composition lifecycle).
 - TSF binaries support Win64 and Win32 (`svr.dll` / `svr32.dll`), while host process is Win64 only.
 - Candidate window, paging, selection, and commit flow are implemented.
+- Configurable one-key completion shows one suggestion at a time, preferring user and base exact words before an offline-vetted strong-transition completion.
 - Full Pinyin and six selectable Double Pinyin schemes—Microsoft, Xiaohe, Ziranma, Sogou, Ziguang, and Pinyin Jiajia—share the same candidate ranking and user-learning data.
 - Configurable fuzzy Pinyin is supported for common initial and final pairs.
 - Dictionary split is supported: simplified base DB, traditional base DB, and user DB.

@@ -5,7 +5,7 @@ CREATE TABLE IF NOT EXISTS meta (
     value TEXT NOT NULL
 );
 
-INSERT OR IGNORE INTO meta(key, value) VALUES('schema_version', '16');
+INSERT OR IGNORE INTO meta(key, value) VALUES('schema_version', '17');
 
 CREATE TABLE IF NOT EXISTS dict_base (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -181,6 +181,14 @@ CREATE TABLE IF NOT EXISTS dict_base_lm_transition (
 
 CREATE INDEX IF NOT EXISTS idx_dict_base_lm_transition_query
     ON dict_base_lm_transition(query_pinyin);
+
+CREATE TABLE IF NOT EXISTS dict_base_transition_completion (
+    typed_prefix TEXT NOT NULL PRIMARY KEY,
+    full_pinyin TEXT NOT NULL,
+    text TEXT NOT NULL,
+    path_text TEXT NOT NULL,
+    evidence INTEGER NOT NULL DEFAULT 0
+) WITHOUT ROWID;
 
 CREATE TABLE IF NOT EXISTS dict_base_char_lm (
     ngram TEXT NOT NULL PRIMARY KEY,

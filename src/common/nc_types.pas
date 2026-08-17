@@ -54,10 +54,18 @@ type
 
     TncCandidateList = array of TncCandidate;
 
+    TncOneKeyCompletionSource = (
+        okcs_none,
+        okcs_user_exact,
+        okcs_base_exact,
+        okcs_transition
+    );
+
     TncOneKeyCompletion = record
         text: string;
         full_pinyin: string;
         weight: Integer;
+        source: TncOneKeyCompletionSource;
     end;
 
     TncOneKeyCompletionList = array of TncOneKeyCompletion;
