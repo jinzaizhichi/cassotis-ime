@@ -3209,6 +3209,7 @@ function TncSqliteDictionary.lookup_one_key_completions(
 const
     c_result_cache_limit = 4096;
     c_query_limit = 256;
+    c_base_exact_prefix_anchor_bonus = 128;
     base_completion_sql =
         'SELECT pinyin, text, weight FROM dict_base ' +
         'WHERE pinyin >= ?1 AND pinyin < ?2 ' +
@@ -3308,6 +3309,8 @@ var
         candidate_pinyin: string;
         candidate_text: string;
         candidate_weight: Integer;
+        candidate_rank: Integer;
+        candidate_prefix_text: string;
         stmt: Psqlite3_stmt;
         step_result: Integer;
     begin
@@ -3333,9 +3336,22 @@ var
                 candidate_pinyin := m_base_connection.column_text(stmt, 0);
                 candidate_text := Trim(m_base_connection.column_text(stmt, 1));
                 candidate_weight := m_base_connection.column_int(stmt, 2);
+                candidate_rank := candidate_weight;
+                candidate_prefix_text := copy_first_text_units(candidate_text,
+                    Length(prefix_syllables));
+                if (candidate_prefix_text <> '') and
+                    normalized_base_entry_exists(canonical_prefix,
+                    candidate_prefix_text) then
+                begin
+                    // A completed exact word at the typed boundary is stronger
+                    // evidence than an accidental prefix through another word.
+                    Inc(candidate_rank, c_base_exact_prefix_anchor_bonus);
+                end;
                 if consider_candidate(candidate_pinyin, candidate_text,
-                    candidate_weight, okcs_base_exact, candidate_weight,
-                    -get_text_unit_count_local(candidate_text)) then
+                    candidate_weight, okcs_base_exact, candidate_rank,
+                    -get_text_unit_count_local(candidate_text)) and has_best and
+                    (candidate_weight + c_base_exact_prefix_anchor_bonus <
+                    best_primary) then
                 begin
                     Break;
                 end;
