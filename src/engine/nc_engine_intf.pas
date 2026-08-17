@@ -1001,6 +1001,7 @@ uses
     nc_short_context_boundary_residual_model,
     nc_short_context_difference_model,
     nc_short_context_top2_difference_model,
+    nc_short_context_expanded_evidence,
     nc_short_nocontext_residual_model;
 
 const
@@ -152889,6 +152890,18 @@ var
                             candidate_texts_local[
                             difference_second_idx_local],
                             difference_features_local);
+                        { Long-sentence search reuses this ranker for internal
+                          chunks, so lower-support evidence is short-only. }
+                        if (expected_units >= 2) and (expected_units <= 4) then
+                        begin
+                            short_context_top2_overlay_expanded_evidence(
+                                context_value_local,
+                                candidate_texts_local[
+                                difference_top_idx_local],
+                                candidate_texts_local[
+                                difference_second_idx_local],
+                                difference_features_local);
+                        end;
                         if short_context_top2_passes(
                             difference_features_local,
                             top2_difference_threshold_local,
