@@ -8,7 +8,7 @@
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-GPL--3.0-blue" alt="License: GPL-3.0"></a>
 </p>
 <p align="center">
-  <img src="snapshot.png" alt="Cassotis IME snapshot" width="550">
+  <img src="snapshot.png" alt="Cassotis IME snapshot" width="550" height="442">
 </p>
 
 [English](README.md) | [簡體中文](README.zh-Hans.md) | 繁體中文
