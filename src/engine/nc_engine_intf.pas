@@ -5033,6 +5033,7 @@ const
     c_completion_warm_anchor_bonus = 120;
     c_completion_cold_anchor_bonus = 48;
     c_completion_cold_unanchored_vertical_penalty = 220;
+    c_completion_cold_vertical_context_lm_margin = 0;
     c_completion_hot_transition_penalty = 1200;
     c_completion_warm_transition_penalty = 1100;
     c_completion_cold_vertical_transition_penalty = 500;
@@ -5109,6 +5110,9 @@ var
     previous_compatible: Boolean;
     previous_present: Boolean;
     transition_challenge_allowed: Boolean;
+    stronger_general_idx: Integer;
+    selected_lm_per_unit: Integer;
+    general_lm_per_unit: Integer;
 
     function has_stronger_general_anchor(const cold_idx: Integer): Boolean;
     var
@@ -5136,6 +5140,41 @@ var
             begin
                 Result := True;
                 Exit;
+            end;
+        end;
+    end;
+
+    function find_best_stronger_general_anchor(
+        const cold_idx: Integer): Integer;
+    var
+        candidate_idx: Integer;
+    begin
+        Result := -1;
+        if (cold_idx < 0) or (cold_idx > High(completions)) then
+        begin
+            Exit;
+        end;
+        for candidate_idx := 0 to High(completions) do
+        begin
+            if (candidate_idx = cold_idx) or
+                (candidate_idx > High(eligible)) or
+                (not eligible[candidate_idx]) or
+                (completions[candidate_idx].source <> okcs_base_exact) or
+                (not completions[candidate_idx].has_popularity_prior) or
+                (not completions[candidate_idx].prefix_anchored) or
+                (completions[candidate_idx].vertical_layer_kind <> 0) or
+                (completions[candidate_idx].popularity_prior <
+                completions[cold_idx].popularity_prior + 24) or
+                (completions[candidate_idx].corpus_score <=
+                completions[cold_idx].corpus_score) then
+            begin
+                Continue;
+            end;
+            if (Result < 0) or (scores[candidate_idx] > scores[Result]) or
+                ((scores[candidate_idx] = scores[Result]) and
+                (candidate_idx < Result)) then
+            begin
+                Result := candidate_idx;
             end;
         end;
     end;
@@ -5405,20 +5444,22 @@ begin
         begin
             scores[idx] := completions[idx].weight;
         end;
-        if (context_value = '') and
-            (completions[idx].source = okcs_base_exact) and
+        if (completions[idx].source = okcs_base_exact) and
             completions[idx].has_popularity_prior and
             (not completions[idx].prefix_anchored) and
             (completions[idx].vertical_layer_kind > 0) and
+            ((context_value = '') or
+            (completions[idx].vertical_layer_kind = 3)) and
             (completions[idx].popularity_prior < 300) and
             (completions[idx].corpus_score = 0) and
             (completions[idx].document_score = 0) and
             (completions[idx].path_score = 0) and
             has_stronger_general_anchor(idx) then
         begin
-            // Without left context, a cold vertical phrase must not win only
-            // because its raw weight or character LM is high when a general
-            // exact-boundary completion has stronger corpus evidence.
+            // A cold vertical phrase must not win only because its raw weight
+            // is high when a general exact-boundary completion has stronger
+            // corpus evidence. Context may still restore it below when the
+            // normalized language evidence is genuinely stronger.
             Dec(scores[idx], c_completion_cold_unanchored_vertical_penalty);
         end;
         if (completions[idx].source = okcs_base_exact) and
@@ -5794,6 +5835,35 @@ begin
         c_completion_hysteresis_margin) then
     begin
         best_idx := previous_idx;
+    end;
+
+    // Reused short-word models can prefer a short specialist phrase merely
+    // because its raw LM sum contains fewer characters. Do not let that
+    // replace a better-supported general completion unless the specialist
+    // phrase also wins after normalizing the context LM score by text length.
+    // A relation accepted repeatedly remains an explicit user preference.
+    if (context_value <> '') and has_char_lm and (best_idx >= 0) and
+        (completions[best_idx].source = okcs_base_exact) and
+        completions[best_idx].has_popularity_prior and
+        (completions[best_idx].vertical_layer_kind = 3) and
+        (completions[best_idx].popularity_prior < 300) and
+        (completions[best_idx].feedback_count < 2) then
+    begin
+        stronger_general_idx := find_best_stronger_general_anchor(best_idx);
+        if stronger_general_idx >= 0 then
+        begin
+            selected_lm_per_unit := char_lm_scores[best_idx] div
+                Max(1, get_candidate_text_unit_count(
+                completions[best_idx].text));
+            general_lm_per_unit := char_lm_scores[stronger_general_idx] div
+                Max(1, get_candidate_text_unit_count(
+                completions[stronger_general_idx].text));
+            if selected_lm_per_unit - general_lm_per_unit <
+                c_completion_cold_vertical_context_lm_margin then
+            begin
+                best_idx := stronger_general_idx;
+            end;
+        end;
     end;
 
     // Keep every reliable transition in the internal pool, but only let it
