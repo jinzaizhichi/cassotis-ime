@@ -614,7 +614,22 @@ begin
         else if import_mode = imTransitionCompletion then
         begin
             completion_parser := TncPinyinParser.Create;
-            if not conn.exec('DELETE FROM dict_base_transition_completion;') then
+            // This generated table is rebuilt atomically. Recreating it also
+            // migrates databases whose legacy schema allowed one row per
+            // prefix to the Top-K composite key.
+            if (not conn.exec('DROP TABLE IF EXISTS dict_base_transition_completion;')) or
+                (not conn.exec(
+                'CREATE TABLE dict_base_transition_completion (' +
+                'typed_prefix TEXT NOT NULL,' +
+                'full_pinyin TEXT NOT NULL,' +
+                'text TEXT NOT NULL,' +
+                'path_text TEXT NOT NULL,' +
+                'evidence INTEGER NOT NULL DEFAULT 0,' +
+                'PRIMARY KEY(typed_prefix, full_pinyin, text)' +
+                ') WITHOUT ROWID;')) or
+                (not conn.exec(
+                'CREATE INDEX idx_dict_base_transition_completion_prefix ' +
+                'ON dict_base_transition_completion(typed_prefix, evidence DESC);')) then
             begin
                 Exit;
             end;

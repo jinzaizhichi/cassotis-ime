@@ -64,7 +64,10 @@ type
     TncOneKeyCompletion = record
         text: string;
         full_pinyin: string;
+        path_text: string;
         weight: Integer;
+        feedback_count: Integer;
+        prefix_anchored: Boolean;
         source: TncOneKeyCompletionSource;
     end;
 

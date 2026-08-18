@@ -451,6 +451,8 @@ type
         m_composition_display_text: string;
         m_candidates: TncCandidateList;
         m_one_key_completion: TncOneKeyCompletion;
+        m_one_key_completion_query_prefix: string;
+        m_one_key_completion_score: Integer;
         m_allow_one_key_completion_lookup: Boolean;
         m_visible_candidates_cache: TncCandidateList;
         m_visible_candidate_source_indices_cache: TArray<Integer>;
@@ -885,6 +887,11 @@ type
         procedure reload_dictionary_if_needed;
         procedure prewarm_dictionary_caches;
         procedure set_external_left_context(const left_context: string);
+        function debug_query_one_key_completion(const query_text: string;
+            const left_context: string): TncOneKeyCompletion;
+        function debug_query_one_key_completion_candidates(
+            const query_text: string;
+            out completions: TncOneKeyCompletionList): Boolean;
         procedure debug_set_target_recall_text(const text: string);
         procedure debug_enable_long_beam_state_capture(const enabled: Boolean);
         procedure debug_enable_long_ranking_stage_capture(
@@ -4211,6 +4218,32 @@ begin
     normalize_page_and_selection;
 end;
 
+function TncEngine.debug_query_one_key_completion(const query_text: string;
+    const left_context: string): TncOneKeyCompletion;
+begin
+    reload_dictionary_if_needed;
+    m_composition_built_incrementally := False;
+    m_composition_display_text := LowerCase(Trim(query_text));
+    m_composition_text := m_composition_display_text;
+    m_confirmed_text := '';
+    m_pending_commit_text := '';
+    m_pending_commit_remaining := '';
+    m_pending_commit_remaining_input_code := '';
+    m_has_pending_commit := False;
+    set_external_left_context(left_context);
+    refresh_one_key_completion;
+    Result := m_one_key_completion;
+end;
+
+function TncEngine.debug_query_one_key_completion_candidates(
+    const query_text: string;
+    out completions: TncOneKeyCompletionList): Boolean;
+begin
+    SetLength(completions, 0);
+    Result := (m_dictionary <> nil) and
+        m_dictionary.lookup_one_key_completions(query_text, completions);
+end;
+
 procedure TncEngine.update_config(const config: TncEngineConfig);
 var
     previous_config: TncEngineConfig;
@@ -4936,19 +4969,79 @@ end;
 
 procedure TncEngine.clear_one_key_completion;
 begin
-    m_one_key_completion.text := '';
-    m_one_key_completion.full_pinyin := '';
-    m_one_key_completion.weight := 0;
-    m_one_key_completion.source := okcs_none;
+    m_one_key_completion := Default(TncOneKeyCompletion);
+    m_one_key_completion_query_prefix := '';
+    m_one_key_completion_score := Low(Integer);
 end;
 
 procedure TncEngine.refresh_one_key_completion;
+const
+    c_completion_context_length = 12;
+    c_completion_feedback_base = 96;
+    c_completion_feedback_step = 48;
+    c_completion_feedback_cap = 480;
+    c_completion_transition_lm_divisor = 3;
+    c_completion_transition_evidence_floor = 420;
+    c_completion_transition_evidence_divisor = 4;
+    c_completion_transition_base_penalty = 320;
+    c_completion_char_lm_divisor = 4;
+    c_completion_long_tail_penalty = 18;
+    c_completion_no_context_transition_evidence_margin = 24;
+    c_completion_no_context_margin = 32;
+    c_completion_context_margin = 18;
+    c_completion_hysteresis_margin = 96;
+    c_completion_no_context_switch_margin = 144;
+    c_completion_context_switch_margin = 88;
+    c_completion_context_model_margin = 1.0;
+    c_completion_context_residual_margin = 2.7;
 var
     query_text: string;
+    compact_query: string;
     syllables: TncPinyinParseResult;
     completions: TncOneKeyCompletionList;
     shuangpin_decode: TncShuangpinDecodeResult;
+    previous_completion: TncOneKeyCompletion;
+    previous_query_prefix: string;
+    context_value: string;
+    completion_texts: TArray<string>;
+    char_lm_scores: TArray<Integer>;
+    scores: TArray<Integer>;
+    eligible: TArray<Boolean>;
+    has_char_lm: Boolean;
+    has_base_completion: Boolean;
+    has_anchored_base: Boolean;
+    has_feedback: Boolean;
+    eligible_count: Integer;
+    baseline_idx: Integer;
+    best_idx: Integer;
+    second_idx: Integer;
+    previous_idx: Integer;
+    idx: Integer;
+    units: Integer;
+    remaining_units: Integer;
+    feedback_bonus: Integer;
+    transition_bonus: Integer;
+    required_margin: Integer;
+    top_margin: Integer;
+    model_baseline_idx: Integer;
+    model_best_idx: Integer;
+    model_best_lm_idx: Integer;
+    model_candidate_count: Integer;
+    model_rank: Integer;
+    model_idx: Integer;
+    model_baseline_score: Double;
+    model_best_score: Double;
+    model_candidate_score: Double;
+    model_current_score: Double;
+    residual_best_idx: Integer;
+    residual_best_score: Double;
+    residual_candidate_score: Double;
+    residual_current_score: Double;
+    previous_compatible: Boolean;
+    previous_present: Boolean;
 begin
+    previous_completion := m_one_key_completion;
+    previous_query_prefix := m_one_key_completion_query_prefix;
     clear_one_key_completion;
     if (not m_allow_one_key_completion_lookup) or (m_dictionary = nil) or
         (m_config.input_mode <> im_chinese) or
@@ -4983,7 +5076,459 @@ begin
         Exit;
     end;
 
-    m_one_key_completion := completions[0];
+    compact_query := normalize_pinyin_text(query_text);
+
+    // User completions are already reduced to their best relation by the
+    // dictionary and remain an absolute priority class.
+    if completions[0].source = okcs_user_exact then
+    begin
+        m_one_key_completion := completions[0];
+        m_one_key_completion_query_prefix := compact_query;
+        m_one_key_completion_score := MaxInt;
+        Exit;
+    end;
+
+    previous_compatible :=
+        (previous_completion.source in [okcs_base_exact, okcs_transition]) and
+        (Trim(previous_completion.text) <> '') and
+        (previous_query_prefix <> '') and
+        compact_query.StartsWith(previous_query_prefix, True) and
+        previous_completion.full_pinyin.StartsWith(compact_query, True);
+    if previous_compatible then
+    begin
+        previous_present := False;
+        for idx := 0 to High(completions) do
+        begin
+            if SameText(completions[idx].text, previous_completion.text) and
+                SameText(completions[idx].full_pinyin,
+                previous_completion.full_pinyin) then
+            begin
+                previous_present := True;
+                Break;
+            end;
+        end;
+        if not previous_present then
+        begin
+            SetLength(completions, Length(completions) + 1);
+            previous_completion.prefix_anchored := False;
+            completions[High(completions)] := previous_completion;
+        end;
+    end;
+
+    context_value := m_left_context;
+    if m_segment_left_context <> '' then
+    begin
+        context_value := m_segment_left_context;
+    end
+    else if m_external_left_context <> '' then
+    begin
+        context_value := m_external_left_context;
+    end;
+    context_value := trim_left_context_to_sentence(context_value,
+        c_completion_context_length);
+
+    has_base_completion := completions[0].source = okcs_base_exact;
+    has_anchored_base := False;
+    has_feedback := False;
+    for idx := 0 to High(completions) do
+    begin
+        if (completions[idx].source = okcs_base_exact) and
+            completions[idx].prefix_anchored then
+        begin
+            has_anchored_base := True;
+        end;
+        if completions[idx].feedback_count > 0 then
+        begin
+            has_feedback := True;
+        end;
+    end;
+
+    // With no left context, preserve the deterministic legacy result exactly.
+    // Dedicated feedback is the only signal allowed to override it.
+    if (context_value = '') and (not has_feedback) then
+    begin
+        if (completions[0].source = okcs_transition) and
+            (Length(completions) > 1) and
+            (completions[1].source = okcs_transition) and
+            (completions[0].weight - completions[1].weight <
+            c_completion_no_context_transition_evidence_margin) then
+        begin
+            Exit;
+        end;
+        m_one_key_completion := completions[0];
+        m_one_key_completion_query_prefix := compact_query;
+        m_one_key_completion_score := completions[0].weight;
+        Exit;
+    end;
+
+    SetLength(completion_texts, Length(completions));
+    SetLength(scores, Length(completions));
+    SetLength(eligible, Length(completions));
+    eligible_count := 0;
+    for idx := 0 to High(completions) do
+    begin
+        completion_texts[idx] := completions[idx].text;
+        if context_value = '' then
+        begin
+            eligible[idx] := (idx = 0) or
+                (completions[idx].feedback_count > 0);
+        end
+        else if has_base_completion then
+        begin
+            if completions[idx].source = okcs_base_exact then
+            begin
+                // Once an exact word boundary is available, keep all such
+                // base alternatives for context ranking and suppress weaker
+                // ordinary-prefix variants. Preserve index zero as the
+                // established fallback even if it is unanchored.
+                eligible[idx] := (not has_anchored_base) or
+                    completions[idx].prefix_anchored or (idx = 0);
+            end
+            else
+            begin
+                // A transition may challenge an ordinary base prefix only
+                // when its first exact segment ends at the typed boundary.
+                eligible[idx] := (not has_anchored_base) and
+                    completions[idx].prefix_anchored;
+            end;
+            eligible[idx] := eligible[idx] or
+                (completions[idx].feedback_count > 0) or
+                (previous_compatible and
+                SameText(completions[idx].text, previous_completion.text) and
+                SameText(completions[idx].full_pinyin,
+                previous_completion.full_pinyin));
+        end
+        else
+        begin
+            eligible[idx] := True;
+        end;
+        if eligible[idx] then
+        begin
+            Inc(eligible_count);
+        end;
+    end;
+    has_char_lm := (eligible_count > 1) and
+        get_cached_char_lm_scores(completion_texts,
+        char_lm_scores, clsm_context, context_value) and
+        (Length(char_lm_scores) = Length(completions));
+
+    best_idx := -1;
+    second_idx := -1;
+    previous_idx := -1;
+    baseline_idx := -1;
+    for idx := 0 to High(completions) do
+    begin
+        if not eligible[idx] then
+        begin
+            scores[idx] := Low(Integer);
+            Continue;
+        end;
+        if baseline_idx < 0 then
+        begin
+            baseline_idx := idx;
+        end;
+
+        if (completions[idx].source = okcs_transition) and
+            (completions[0].source = okcs_base_exact) then
+        begin
+            // Transition evidence and lexicon weight have different scales.
+            // Treat evidence as a bounded advantage relative to the legacy
+            // base choice instead of comparing the raw integers directly.
+            scores[idx] := completions[0].weight -
+                c_completion_transition_base_penalty +
+                (Max(0, completions[idx].weight -
+                c_completion_transition_evidence_floor) div
+                c_completion_transition_evidence_divisor);
+        end
+        else
+        begin
+            scores[idx] := completions[idx].weight;
+        end;
+        if (completions[idx].source = okcs_base_exact) and
+            completions[idx].prefix_anchored then
+        begin
+            scores[idx] := completions[idx].weight * 2;
+        end
+        else if (completions[idx].source = okcs_transition) and
+            (Trim(completions[idx].path_text) <> '') then
+        begin
+            transition_bonus := m_dictionary.get_lm_transition_bonus(
+                completions[idx].full_pinyin,
+                completions[idx].path_text);
+            if transition_bonus > 0 then
+            begin
+                Inc(scores[idx], transition_bonus div
+                    c_completion_transition_lm_divisor);
+            end;
+        end;
+
+        units := Max(1, get_candidate_text_unit_count(
+            completions[idx].text));
+        if has_char_lm then
+        begin
+            Inc(scores[idx], (char_lm_scores[idx] div units) div
+                c_completion_char_lm_divisor);
+        end;
+
+        if completions[idx].feedback_count > 0 then
+        begin
+            feedback_bonus := c_completion_feedback_base +
+                ((Min(completions[idx].feedback_count, 9) - 1) *
+                c_completion_feedback_step);
+            feedback_bonus := Min(feedback_bonus,
+                c_completion_feedback_cap);
+            Inc(scores[idx], feedback_bonus);
+        end;
+
+        remaining_units := units - Length(syllables);
+        if remaining_units > 2 then
+        begin
+            Dec(scores[idx], (remaining_units - 2) *
+                c_completion_long_tail_penalty);
+        end;
+
+        if SameText(completions[idx].text, previous_completion.text) and
+            SameText(completions[idx].full_pinyin,
+            previous_completion.full_pinyin) then
+        begin
+            previous_idx := idx;
+        end;
+
+        if (best_idx < 0) or (scores[idx] > scores[best_idx]) or
+            ((scores[idx] = scores[best_idx]) and
+            (CompareText(completions[idx].text,
+            completions[best_idx].text) < 0)) then
+        begin
+            second_idx := best_idx;
+            best_idx := idx;
+        end
+        else if (second_idx < 0) or
+            (scores[idx] > scores[second_idx]) or
+            ((scores[idx] = scores[second_idx]) and
+            (CompareText(completions[idx].text,
+            completions[second_idx].text) < 0)) then
+        begin
+            second_idx := idx;
+        end;
+    end;
+
+    if best_idx < 0 then
+    begin
+        Exit;
+    end;
+
+    // Preserve the deterministic legacy choice unless a challenger has
+    // genuinely strong evidence. This makes Top-K additive rather than
+    // allowing a weak LM fluctuation to rewrite every existing completion.
+    if (baseline_idx >= 0) and (best_idx <> baseline_idx) and
+        (completions[best_idx].feedback_count <= 0) then
+    begin
+        if context_value = '' then
+        begin
+            required_margin := c_completion_no_context_switch_margin;
+        end
+        else
+        begin
+            required_margin := c_completion_context_switch_margin;
+        end;
+        if scores[best_idx] - scores[baseline_idx] < required_margin then
+        begin
+            best_idx := baseline_idx;
+        end;
+    end;
+
+    // Completion candidates are longer than the ordinary short-word choices,
+    // but their leading characters and the left-context boundary use the same
+    // independently trained evidence. Apply that model only within the base
+    // lexicon class; user feedback and transition recall keep their own rules.
+    if (context_value <> '') and has_char_lm and has_base_completion and
+        (best_idx >= 0) and
+        (completions[best_idx].source = okcs_base_exact) then
+    begin
+        model_baseline_idx := -1;
+        model_best_lm_idx := -1;
+        model_candidate_count := 0;
+        for model_idx := 0 to High(completions) do
+        begin
+            if eligible[model_idx] and
+                (completions[model_idx].source = okcs_base_exact) then
+            begin
+                if model_baseline_idx < 0 then
+                begin
+                    model_baseline_idx := model_idx;
+                end;
+                if (model_best_lm_idx < 0) or
+                    (char_lm_scores[model_idx] >
+                    char_lm_scores[model_best_lm_idx]) then
+                begin
+                    model_best_lm_idx := model_idx;
+                end;
+                Inc(model_candidate_count);
+            end;
+        end;
+        if model_candidate_count > 1 then
+        begin
+            model_best_idx := model_baseline_idx;
+            model_rank := 1;
+            model_baseline_score := short_context_reranker_score(
+                context_value, completions[model_baseline_idx].text,
+                model_rank, char_lm_scores[model_baseline_idx],
+                completions[model_baseline_idx].weight,
+                scores[model_baseline_idx], True, 0, 0,
+                char_lm_scores[model_baseline_idx] -
+                char_lm_scores[model_best_lm_idx],
+                model_baseline_idx = model_best_lm_idx,
+                model_candidate_count, Length(context_value),
+                Length(completions[model_baseline_idx].text));
+            model_best_score := model_baseline_score;
+            model_current_score := model_baseline_score;
+            for model_idx := 0 to High(completions) do
+            begin
+                if (not eligible[model_idx]) or
+                    (completions[model_idx].source <> okcs_base_exact) then
+                begin
+                    Continue;
+                end;
+                if model_idx = model_baseline_idx then
+                begin
+                    Continue;
+                end;
+                Inc(model_rank);
+                model_candidate_score := short_context_reranker_score(
+                    context_value, completions[model_idx].text, model_rank,
+                    char_lm_scores[model_idx], completions[model_idx].weight,
+                    scores[model_idx], False,
+                    char_lm_scores[model_idx] -
+                    char_lm_scores[model_baseline_idx],
+                    completions[model_idx].weight -
+                    completions[model_baseline_idx].weight,
+                    char_lm_scores[model_idx] -
+                    char_lm_scores[model_best_lm_idx],
+                    model_idx = model_best_lm_idx, model_candidate_count,
+                    Length(context_value), Length(completions[model_idx].text));
+                if model_idx = best_idx then
+                begin
+                    model_current_score := model_candidate_score;
+                end;
+                if model_candidate_score > model_best_score then
+                begin
+                    model_best_idx := model_idx;
+                    model_best_score := model_candidate_score;
+                end;
+            end;
+            if (model_best_idx <> best_idx) and
+                (model_best_score - model_current_score >=
+                c_completion_context_model_margin) then
+            begin
+                best_idx := model_best_idx;
+            end;
+
+            residual_best_idx := best_idx;
+            residual_current_score := short_context_residual_score(
+                context_value, completions[best_idx].text, 1,
+                char_lm_scores[best_idx], completions[best_idx].weight,
+                scores[best_idx], True, 0, 0,
+                char_lm_scores[best_idx] -
+                char_lm_scores[model_best_lm_idx],
+                best_idx = model_best_lm_idx, model_candidate_count,
+                Length(context_value), Length(completions[best_idx].text));
+            residual_best_score := residual_current_score;
+            model_rank := 0;
+            for model_idx := 0 to High(completions) do
+            begin
+                if (not eligible[model_idx]) or
+                    (completions[model_idx].source <> okcs_base_exact) then
+                begin
+                    Continue;
+                end;
+                Inc(model_rank);
+                if model_idx = best_idx then
+                begin
+                    Continue;
+                end;
+                residual_candidate_score := short_context_residual_score(
+                    context_value, completions[model_idx].text, model_rank,
+                    char_lm_scores[model_idx], completions[model_idx].weight,
+                    scores[model_idx], False,
+                    char_lm_scores[model_idx] - char_lm_scores[best_idx],
+                    completions[model_idx].weight -
+                    completions[best_idx].weight,
+                    char_lm_scores[model_idx] -
+                    char_lm_scores[model_best_lm_idx],
+                    model_idx = model_best_lm_idx, model_candidate_count,
+                    Length(context_value), Length(completions[model_idx].text));
+                if residual_candidate_score > residual_best_score then
+                begin
+                    residual_best_idx := model_idx;
+                    residual_best_score := residual_candidate_score;
+                end;
+            end;
+            if (residual_best_idx <> best_idx) and
+                (residual_best_score - residual_current_score >=
+                c_completion_context_residual_margin) then
+            begin
+                best_idx := residual_best_idx;
+            end;
+
+        end;
+    end;
+
+    // Keep a compatible suggestion stable while the user continues typing.
+    // A challenger must win by a visible margin before replacing it.
+    if (previous_idx >= 0) and (previous_query_prefix <> '') and
+        compact_query.StartsWith(previous_query_prefix, True) and
+        completions[previous_idx].full_pinyin.StartsWith(compact_query,
+        True) and (best_idx <> previous_idx) and
+        (scores[best_idx] - scores[previous_idx] <
+        c_completion_hysteresis_margin) then
+    begin
+        best_idx := previous_idx;
+    end;
+
+    // best_idx may have changed through the baseline guard or hysteresis.
+    // Recompute its actual runner-up before applying ambiguity abstention.
+    second_idx := -1;
+    for idx := 0 to High(completions) do
+    begin
+        if (idx = best_idx) or (not eligible[idx]) then
+        begin
+            Continue;
+        end;
+        if (second_idx < 0) or (scores[idx] > scores[second_idx]) or
+            ((scores[idx] = scores[second_idx]) and
+            (CompareText(completions[idx].text,
+            completions[second_idx].text) < 0)) then
+        begin
+            second_idx := idx;
+        end;
+    end;
+
+    // Anchored lexicon completions remain available. For ordinary prefix and
+    // transition competition, abstain when the evidence cannot separate the
+    // two best alternatives reliably.
+    if (not has_anchored_base) and (second_idx >= 0) and
+        (completions[baseline_idx].source = okcs_transition) and
+        (best_idx <> previous_idx) then
+    begin
+        if context_value = '' then
+        begin
+            required_margin := c_completion_no_context_margin;
+        end
+        else
+        begin
+            required_margin := c_completion_context_margin;
+        end;
+        top_margin := scores[best_idx] - scores[second_idx];
+        if (top_margin < required_margin) and
+            (completions[best_idx].feedback_count <= 0) then
+        begin
+            Exit;
+        end;
+    end;
+
+    m_one_key_completion := completions[best_idx];
+    m_one_key_completion_query_prefix := compact_query;
+    m_one_key_completion_score := scores[best_idx];
 end;
 
 function TncEngine.accept_one_key_completion: Boolean;
@@ -4998,6 +5543,15 @@ begin
     if not Result then
     begin
         Exit;
+    end;
+
+    if (m_dictionary <> nil) and
+        (m_one_key_completion_query_prefix <> '') and
+        (completion_pinyin <> '') then
+    begin
+        m_dictionary.record_one_key_completion_accept(
+            m_one_key_completion_query_prefix, completion_pinyin,
+            completion_text);
     end;
 
     // The prefix is intentionally incomplete, so never persist it as the

@@ -1,16 +1,16 @@
 # Cassotis Corpus Benchmarks
 
-Cassotis publishes two fixed corpus benchmarks for tracking decoding quality and engine performance across releases: the Long Sentence Benchmark-16300 and the Short-word Context Benchmark-65000. They turn release quality into reproducible measurements instead of relying only on hand-picked examples.
+Cassotis publishes three fixed corpus benchmarks for tracking decoding quality and engine performance across releases: the Long Sentence Benchmark-16300, the Short-word Context Benchmark-65000, and the One-key Completion Context Benchmark-12831. They turn release quality into reproducible measurements instead of relying only on hand-picked examples.
 
 ## Shared Corpus Source
 
-Both benchmarks are derived from the developer's own novel, [**Elegance in Timelessness**](https://www.qidian.com/book/1037259117/) (Chinese title: [**永恒的舞动**](https://www.qidian.com/book/1037259117/)).
+All three benchmarks are derived from the developer's own novel, [**Elegance in Timelessness**](https://www.qidian.com/book/1037259117/) (Chinese title: [**永恒的舞动**](https://www.qidian.com/book/1037259117/)).
 
-Both benchmarks use this novel text as their source. Benchmark-16300 fixes 16,300 eligible sentences, while Benchmark-65000 fixes 65,000 short-word occurrences. Benchmark cases are kept separate from the corresponding model-training data.
+Benchmark-16300 fixes 16,300 eligible sentences, while Benchmark-65000 fixes 65,000 short-word occurrences. The completion benchmark derives 12,831 incremental completion opportunities from the same short-word cases. Benchmark cases are kept separate from the corresponding model-training data.
 
 ## Shared Accuracy Equivalence Rule
 
-The following rule applies to visible-candidate accuracy metrics in both benchmark suites, including `Top1`, `Top2`, other reported `TopN` values, and the short-word `Contested` metrics:
+The following rule applies to visible-candidate accuracy metrics in the long-sentence and short-word context suites, including `Top1`, `Top2`, other reported `TopN` values, and the short-word `Contested` metrics:
 
 - `他` and `她` are treated as equivalent only when they occur at the same character positions, because the benchmark Pinyin query cannot distinguish them.
 - `它`, all other homophones, missing or additional characters, and every other textual difference remain distinct.
@@ -84,6 +84,32 @@ Published short-word latency values measure engine-only candidate retrieval for 
 - Install the already committed sentence prefix before timing, assign the complete target Pinyin query, and stop timing after candidate retrieval.
 - Exclude corpus segmentation, Pinyin generation, process startup, dictionary opening, report writing, TSF integration, candidate-window rendering, real keystrokes, and inter-key timing.
 
+## One-key Completion Context Benchmark-12831
+
+### Case Construction and Scoring
+
+The completion benchmark reuses the frozen Benchmark-65000 cases and their left context to measure one-key continuation before the target word has been fully typed:
+
+- Evaluate only targets containing at least three complete Pinyin syllables.
+- Starting after two syllables, advance one syllable at a time and stop before the complete Pinyin. Each intermediate state is one completion opportunity.
+- For example, the target `往常一样` is queried at both `wangchang` and `wangchangyi`.
+- The complete 65,000-source corpus deterministically produces 12,831 opportunities, hence the name One-key Completion Context Benchmark-12831.
+- Use the simplified base-dictionary snapshot for the tested release and disable the user dictionary. Published results use only the context-enabled track.
+- Read only the single completion that the UI would display. It is a hit only when it strictly equals the corpus target; the `他`/`她` equivalence rule is not applied.
+
+Published results retain only four metrics that are straightforward to interpret across releases:
+
+- `Completion Hit`: correct completions divided by all 12,831 opportunities; this is the primary quality metric.
+- `Avg Keys Saved`: average net keystrokes saved by each correct completion, after charging one keystroke for accepting it.
+- `Stability`: when the previous completion remains compatible after another syllable is typed, the proportion for which the displayed completion remains unchanged.
+- `P95`: 95% of completion queries finish within this many milliseconds.
+
+Internal reports continue to retain the no-context track, prompt coverage, strict wrong-prompt rate, internal Top-K Oracle recall, source attribution, and per-opportunity rows for diagnosis. They are intentionally omitted from the public release table. Because each corpus position has only one reference target, a different but linguistically valid completion is still scored as a miss.
+
+### Latency Protocol
+
+Latency covers dictionary lookup, context/language-model scoring, completion selection, and hysteresis only. It excludes process and dictionary cold start, TSF/host communication, candidate-window rendering, real inter-key timing, and learning writes after acceptance. The engine is reset before each source case; adjacent prefixes of the same target are processed consecutively, while the dictionary connection and runtime caches remain open for the complete run.
+
 ## Latency Statistics
 
 Latency columns are reported in milliseconds:
@@ -97,7 +123,7 @@ These values quantify complete-query engine performance and long-tail cost. They
 
 ## Result Publication
 
-Version-specific results for both benchmarks are published in `README.md`. This document defines their shared source, case construction, accuracy scoring, and latency protocols.
+Version-specific results are published in `README.md`. Completion results begin with `v1.15.0`, the earliest release reproduced with the same corpus, dictionary snapshot rules, and runner behavior; earlier versions are not backfilled. This document defines their shared source, case construction, accuracy scoring, and latency protocols.
 
 ## Notes
 

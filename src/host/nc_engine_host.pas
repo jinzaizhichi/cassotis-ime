@@ -675,10 +675,7 @@ begin
     m_caret_line_height := 0;
     m_terminal_like_target := False;
     SetLength(m_candidates, 0);
-    m_one_key_completion.text := '';
-    m_one_key_completion.full_pinyin := '';
-    m_one_key_completion.weight := 0;
-    m_one_key_completion.source := okcs_none;
+    m_one_key_completion := Default(TncOneKeyCompletion);
     m_page_index := 0;
     m_page_count := 0;
     m_selected_index := 0;
@@ -865,10 +862,7 @@ end;
 procedure TncHostSession.clear_candidates;
 begin
     SetLength(m_candidates, 0);
-    m_one_key_completion.text := '';
-    m_one_key_completion.full_pinyin := '';
-    m_one_key_completion.weight := 0;
-    m_one_key_completion.source := okcs_none;
+    m_one_key_completion := Default(TncOneKeyCompletion);
     m_page_index := 0;
     m_page_count := 0;
     m_selected_index := 0;

@@ -187,6 +187,15 @@ See [BENCHMARK.md](BENCHMARK.md) for the shared corpus source, short-word case c
 
 Latency values are engine-only per-query times for the context-enabled track and do not include TSF or candidate-window rendering.
 
+## One-key Completion Context Benchmark-12831
+This benchmark reuses the frozen short-word context corpus and expands eligible targets into 12,831 incremental Pinyin-prefix opportunities. It evaluates the single completion actually shown when left context is enabled.
+
+Public results retain four columns only: `Completion Hit`, `Avg Keys Saved`, `Stability`, and `P95 (ms)`. Results are recorded from `v1.15.0`; see [BENCHMARK.md](BENCHMARK.md) for case construction, scoring, and latency details.
+
+| Version | Completion Hit | Avg Keys Saved | Stability | P95 (ms) |
+| --- | --- | --- | --- | --- |
+| `v1.15.0` | 7265/12831 (56.62%) | 2.542 | 1278/1323 (96.60%) | 0.777 |
+
 ## Configuration
 Default config file:
 - `%LOCALAPPDATA%\CassotisIme\cassotis_ime.ini`

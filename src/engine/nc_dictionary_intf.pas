@@ -18,6 +18,8 @@ type
             out results: TncCandidateList): Boolean; virtual;
         function lookup_one_key_completions(const pinyin_prefix: string;
             out results: TncOneKeyCompletionList): Boolean; virtual;
+        procedure record_one_key_completion_accept(const typed_prefix: string;
+            const full_pinyin: string; const text: string); virtual;
         function lookup_fuzzy_full_pinyin(const pinyin: string;
             out results: TncCandidateList): Boolean; virtual;
         function lookup_fuzzy_full_pinyin_bounded(const pinyin: string;
@@ -116,6 +118,11 @@ function TncDictionaryProvider.lookup_one_key_completions(
 begin
     SetLength(results, 0);
     Result := False;
+end;
+
+procedure TncDictionaryProvider.record_one_key_completion_accept(
+    const typed_prefix: string; const full_pinyin: string; const text: string);
+begin
 end;
 
 function TncDictionaryProvider.lookup_fuzzy_full_pinyin(const pinyin: string;

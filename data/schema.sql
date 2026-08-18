@@ -112,6 +112,18 @@ ON dict_user_context_query_choice(context_suffix, query_pinyin);
 CREATE INDEX IF NOT EXISTS idx_dict_user_context_query_choice_last_used
 ON dict_user_context_query_choice(last_used);
 
+CREATE TABLE IF NOT EXISTS dict_user_completion_feedback (
+    typed_prefix TEXT NOT NULL,
+    full_pinyin TEXT NOT NULL,
+    text TEXT NOT NULL,
+    accept_count INTEGER DEFAULT 0,
+    last_used INTEGER DEFAULT 0,
+    PRIMARY KEY(typed_prefix, full_pinyin, text)
+) WITHOUT ROWID;
+
+CREATE INDEX IF NOT EXISTS idx_dict_user_completion_feedback_prefix
+ON dict_user_completion_feedback(typed_prefix, accept_count DESC, last_used DESC);
+
 CREATE TABLE IF NOT EXISTS dict_user_penalty (
     pinyin TEXT NOT NULL,
     text TEXT NOT NULL,
@@ -183,12 +195,16 @@ CREATE INDEX IF NOT EXISTS idx_dict_base_lm_transition_query
     ON dict_base_lm_transition(query_pinyin);
 
 CREATE TABLE IF NOT EXISTS dict_base_transition_completion (
-    typed_prefix TEXT NOT NULL PRIMARY KEY,
+    typed_prefix TEXT NOT NULL,
     full_pinyin TEXT NOT NULL,
     text TEXT NOT NULL,
     path_text TEXT NOT NULL,
-    evidence INTEGER NOT NULL DEFAULT 0
+    evidence INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY(typed_prefix, full_pinyin, text)
 ) WITHOUT ROWID;
+
+CREATE INDEX IF NOT EXISTS idx_dict_base_transition_completion_prefix
+ON dict_base_transition_completion(typed_prefix, evidence DESC);
 
 CREATE TABLE IF NOT EXISTS dict_base_char_lm (
     ngram TEXT NOT NULL PRIMARY KEY,
