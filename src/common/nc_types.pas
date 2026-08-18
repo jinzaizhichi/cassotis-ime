@@ -66,6 +66,14 @@ type
         full_pinyin: string;
         path_text: string;
         weight: Integer;
+        popularity_prior: Integer;
+        corpus_score: Integer;
+        document_score: Integer;
+        source_count: Integer;
+        path_score: Integer;
+        vertical_penalty: Integer;
+        vertical_layer_kind: Integer;
+        has_popularity_prior: Boolean;
         feedback_count: Integer;
         prefix_anchored: Boolean;
         source: TncOneKeyCompletionSource;

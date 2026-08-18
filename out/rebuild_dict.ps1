@@ -224,6 +224,10 @@ $lexicon_lm_transition_sc = Join-Path $lexicon_root 'data\generated\dict_lm_tran
 $lexicon_lm_transition_tc = Join-Path $lexicon_root 'data\generated\dict_lm_transition_tc.txt'
 $lexicon_transition_completion_sc = Join-Path $lexicon_root 'data\generated\dict_transition_completion_sc.txt'
 $lexicon_transition_completion_tc = Join-Path $lexicon_root 'data\generated\dict_transition_completion_tc.txt'
+$lexicon_completion_prior_sc = Join-Path $lexicon_root 'data\generated\dict_completion_prior_sc.txt'
+$lexicon_completion_prior_tc = Join-Path $lexicon_root 'data\generated\dict_completion_prior_tc.txt'
+$lexicon_completion_lookup_sc = Join-Path $lexicon_root 'data\generated\dict_completion_lookup_sc.txt'
+$lexicon_completion_lookup_tc = Join-Path $lexicon_root 'data\generated\dict_completion_lookup_tc.txt'
 $lexicon_char_lm_sc = Join-Path $lexicon_root 'data\generated\dict_char_lm_sc.txt'
 $lexicon_char_lm_tc = Join-Path $lexicon_root 'data\generated\dict_char_lm_tc.txt'
 $lexicon_char_reverse_lm_sc = Join-Path $lexicon_root 'data\generated\dict_char_reverse_lm_sc.txt'
@@ -315,6 +319,34 @@ try {
         }
         else {
             Write-Warning "Transition completion files not found under lexicon data/generated; skipping transition completion import."
+        }
+
+        if ((Test-Path -LiteralPath $lexicon_completion_prior_sc) -and
+            (Test-Path -LiteralPath $lexicon_completion_prior_tc)) {
+            Write-Host ("Importing lexicon completion popularity priors from: " + $lexicon_completion_prior_sc)
+            invoke_tool 'cassotis_ime_dict_init (lexicon completion prior sc)' $dict_init @(
+                $base_db_sc_path, $schema_path, $lexicon_completion_prior_sc, 'completion_prior')
+
+            Write-Host ("Importing lexicon completion popularity priors from: " + $lexicon_completion_prior_tc)
+            invoke_tool 'cassotis_ime_dict_init (lexicon completion prior tc)' $dict_init @(
+                $base_db_tc_path, $schema_path, $lexicon_completion_prior_tc, 'completion_prior')
+        }
+        else {
+            Write-Warning "Completion popularity prior files not found under lexicon data/generated; skipping import."
+        }
+
+        if ((Test-Path -LiteralPath $lexicon_completion_lookup_sc) -and
+            (Test-Path -LiteralPath $lexicon_completion_lookup_tc)) {
+            Write-Host ("Importing lexicon exact completion lookup from: " + $lexicon_completion_lookup_sc)
+            invoke_tool 'cassotis_ime_dict_init (lexicon completion lookup sc)' $dict_init @(
+                $base_db_sc_path, $schema_path, $lexicon_completion_lookup_sc, 'completion_lookup')
+
+            Write-Host ("Importing lexicon exact completion lookup from: " + $lexicon_completion_lookup_tc)
+            invoke_tool 'cassotis_ime_dict_init (lexicon completion lookup tc)' $dict_init @(
+                $base_db_tc_path, $schema_path, $lexicon_completion_lookup_tc, 'completion_lookup')
+        }
+        else {
+            Write-Warning "Exact completion lookup files not found under lexicon data/generated; skipping import."
         }
 
         if (Test-Path -LiteralPath $lexicon_char_lm_sc) {

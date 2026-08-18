@@ -1,11 +1,11 @@
--- cassotis ime sqlite schema v16
+-- cassotis ime sqlite schema v18
 
 CREATE TABLE IF NOT EXISTS meta (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL
 );
 
-INSERT OR IGNORE INTO meta(key, value) VALUES('schema_version', '17');
+INSERT OR IGNORE INTO meta(key, value) VALUES('schema_version', '18');
 
 CREATE TABLE IF NOT EXISTS dict_base (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -18,6 +18,42 @@ CREATE TABLE IF NOT EXISTS dict_base (
 CREATE INDEX IF NOT EXISTS idx_dict_base_pinyin ON dict_base(pinyin);
 CREATE INDEX IF NOT EXISTS idx_dict_base_pinyin_weight ON dict_base(pinyin, weight);
 CREATE INDEX IF NOT EXISTS idx_dict_base_text_weight ON dict_base(text, weight);
+
+CREATE TABLE IF NOT EXISTS dict_base_completion_prior (
+    pinyin TEXT NOT NULL,
+    text TEXT NOT NULL,
+    popularity_prior INTEGER NOT NULL DEFAULT 0,
+    corpus_score INTEGER NOT NULL DEFAULT 0,
+    document_score INTEGER NOT NULL DEFAULT 0,
+    source_count INTEGER NOT NULL DEFAULT 0,
+    path_score INTEGER NOT NULL DEFAULT 0,
+    vertical_penalty INTEGER NOT NULL DEFAULT 0,
+    layer_kind INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY(pinyin, text)
+) WITHOUT ROWID;
+
+CREATE INDEX IF NOT EXISTS idx_dict_base_completion_prior_pinyin
+    ON dict_base_completion_prior(pinyin, popularity_prior DESC);
+
+CREATE TABLE IF NOT EXISTS dict_base_completion_lookup (
+    typed_prefix TEXT NOT NULL,
+    full_pinyin TEXT NOT NULL,
+    text TEXT NOT NULL,
+    weight INTEGER NOT NULL DEFAULT 0,
+    popularity_prior INTEGER NOT NULL DEFAULT 0,
+    corpus_score INTEGER NOT NULL DEFAULT 0,
+    document_score INTEGER NOT NULL DEFAULT 0,
+    source_count INTEGER NOT NULL DEFAULT 0,
+    path_score INTEGER NOT NULL DEFAULT 0,
+    vertical_penalty INTEGER NOT NULL DEFAULT 0,
+    layer_kind INTEGER NOT NULL DEFAULT 0,
+    prefix_anchored INTEGER NOT NULL DEFAULT 0,
+    rank_order INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY(typed_prefix, full_pinyin, text)
+) WITHOUT ROWID;
+
+CREATE INDEX IF NOT EXISTS idx_dict_base_completion_lookup_prefix
+    ON dict_base_completion_lookup(typed_prefix, rank_order);
 
 CREATE TABLE IF NOT EXISTS dict_base_pinyin_alias (
     id INTEGER PRIMARY KEY AUTOINCREMENT,

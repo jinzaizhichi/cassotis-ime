@@ -365,7 +365,7 @@ const
         '    value TEXT NOT NULL' + sLineBreak +
         ');' + sLineBreak +
         sLineBreak +
-        'INSERT OR IGNORE INTO meta(key, value) VALUES(''schema_version'', ''17'');' + sLineBreak +
+        'INSERT OR IGNORE INTO meta(key, value) VALUES(''schema_version'', ''18'');' + sLineBreak +
         sLineBreak +
         'CREATE TABLE IF NOT EXISTS dict_base (' + sLineBreak +
         '    id INTEGER PRIMARY KEY AUTOINCREMENT,' + sLineBreak +
@@ -378,6 +378,42 @@ const
         'CREATE INDEX IF NOT EXISTS idx_dict_base_pinyin ON dict_base(pinyin);' + sLineBreak +
         'CREATE INDEX IF NOT EXISTS idx_dict_base_pinyin_weight ON dict_base(pinyin, weight);' + sLineBreak +
         'CREATE INDEX IF NOT EXISTS idx_dict_base_text_weight ON dict_base(text, weight);' + sLineBreak +
+        sLineBreak +
+        'CREATE TABLE IF NOT EXISTS dict_base_completion_prior (' + sLineBreak +
+        '    pinyin TEXT NOT NULL,' + sLineBreak +
+        '    text TEXT NOT NULL,' + sLineBreak +
+        '    popularity_prior INTEGER NOT NULL DEFAULT 0,' + sLineBreak +
+        '    corpus_score INTEGER NOT NULL DEFAULT 0,' + sLineBreak +
+        '    document_score INTEGER NOT NULL DEFAULT 0,' + sLineBreak +
+        '    source_count INTEGER NOT NULL DEFAULT 0,' + sLineBreak +
+        '    path_score INTEGER NOT NULL DEFAULT 0,' + sLineBreak +
+        '    vertical_penalty INTEGER NOT NULL DEFAULT 0,' + sLineBreak +
+        '    layer_kind INTEGER NOT NULL DEFAULT 0,' + sLineBreak +
+        '    PRIMARY KEY(pinyin, text)' + sLineBreak +
+        ') WITHOUT ROWID;' + sLineBreak +
+        sLineBreak +
+        'CREATE INDEX IF NOT EXISTS idx_dict_base_completion_prior_pinyin ' +
+        'ON dict_base_completion_prior(pinyin, popularity_prior DESC);' + sLineBreak +
+        sLineBreak +
+        'CREATE TABLE IF NOT EXISTS dict_base_completion_lookup (' + sLineBreak +
+        '    typed_prefix TEXT NOT NULL,' + sLineBreak +
+        '    full_pinyin TEXT NOT NULL,' + sLineBreak +
+        '    text TEXT NOT NULL,' + sLineBreak +
+        '    weight INTEGER NOT NULL DEFAULT 0,' + sLineBreak +
+        '    popularity_prior INTEGER NOT NULL DEFAULT 0,' + sLineBreak +
+        '    corpus_score INTEGER NOT NULL DEFAULT 0,' + sLineBreak +
+        '    document_score INTEGER NOT NULL DEFAULT 0,' + sLineBreak +
+        '    source_count INTEGER NOT NULL DEFAULT 0,' + sLineBreak +
+        '    path_score INTEGER NOT NULL DEFAULT 0,' + sLineBreak +
+        '    vertical_penalty INTEGER NOT NULL DEFAULT 0,' + sLineBreak +
+        '    layer_kind INTEGER NOT NULL DEFAULT 0,' + sLineBreak +
+        '    prefix_anchored INTEGER NOT NULL DEFAULT 0,' + sLineBreak +
+        '    rank_order INTEGER NOT NULL DEFAULT 0,' + sLineBreak +
+        '    PRIMARY KEY(typed_prefix, full_pinyin, text)' + sLineBreak +
+        ') WITHOUT ROWID;' + sLineBreak +
+        sLineBreak +
+        'CREATE INDEX IF NOT EXISTS idx_dict_base_completion_lookup_prefix ' +
+        'ON dict_base_completion_lookup(typed_prefix, rank_order);' + sLineBreak +
         sLineBreak +
         'CREATE TABLE IF NOT EXISTS dict_base_pinyin_alias (' + sLineBreak +
         '    id INTEGER PRIMARY KEY AUTOINCREMENT,' + sLineBreak +
@@ -3230,12 +3266,36 @@ const
     c_result_cache_limit = 4096;
     c_query_limit = 256;
     c_source_result_limit = 8;
-    c_base_exact_prefix_anchor_bonus = 128;
-    base_completion_sql =
-        'SELECT pinyin, text, weight FROM dict_base ' +
-        'WHERE pinyin >= ?1 AND pinyin < ?2 ' +
-        'AND weight > 0 AND COALESCE(comment, '''') = '''' ' +
-        'ORDER BY weight DESC, length(text) ASC, text ASC LIMIT ?3';
+    c_base_exact_prefix_anchor_bonus = 80;
+    base_completion_popularity_sql =
+        'SELECT b.pinyin, b.text, b.weight, ' +
+        'COALESCE(p.popularity_prior, -1), COALESCE(p.corpus_score, 0), ' +
+        'COALESCE(p.document_score, 0), COALESCE(p.source_count, 0), ' +
+        'COALESCE(p.path_score, 0), COALESCE(p.vertical_penalty, 0), ' +
+        'COALESCE(p.layer_kind, 0) ' +
+        'FROM dict_base b LEFT JOIN dict_base_completion_prior p ' +
+        'ON p.pinyin = b.pinyin AND p.text = b.text ' +
+        'WHERE b.pinyin >= ?1 AND b.pinyin < ?2 ' +
+        'AND b.weight > 0 AND COALESCE(b.comment, '''') = '''' ' +
+        'ORDER BY COALESCE(p.popularity_prior, -1) DESC, b.weight DESC, ' +
+        'length(b.text) ASC, b.text ASC LIMIT ?3';
+    base_completion_weight_sql =
+        'SELECT b.pinyin, b.text, b.weight, ' +
+        'COALESCE(p.popularity_prior, -1), COALESCE(p.corpus_score, 0), ' +
+        'COALESCE(p.document_score, 0), COALESCE(p.source_count, 0), ' +
+        'COALESCE(p.path_score, 0), COALESCE(p.vertical_penalty, 0), ' +
+        'COALESCE(p.layer_kind, 0) ' +
+        'FROM dict_base b LEFT JOIN dict_base_completion_prior p ' +
+        'ON p.pinyin = b.pinyin AND p.text = b.text ' +
+        'WHERE b.pinyin >= ?1 AND b.pinyin < ?2 ' +
+        'AND b.weight > 0 AND COALESCE(b.comment, '''') = '''' ' +
+        'ORDER BY b.weight DESC, length(b.text) ASC, b.text ASC LIMIT ?3';
+    base_completion_lookup_sql =
+        'SELECT full_pinyin, text, weight, popularity_prior, ' +
+        'corpus_score, document_score, source_count, path_score, ' +
+        'vertical_penalty, layer_kind, prefix_anchored ' +
+        'FROM dict_base_completion_lookup WHERE typed_prefix = ?1 ' +
+        'ORDER BY rank_order ASC LIMIT 16';
     user_completion_sql =
         'SELECT pinyin, text, weight, last_used FROM dict_user ' +
         'WHERE pinyin >= ?1 AND pinyin < ?2 ' +
@@ -3262,6 +3322,7 @@ type
 var
     canonical_prefix: string;
     compact_prefix: string;
+    lookup_prefix: string;
     explicit_prefix: string;
     cache_key: string;
     prefix_syllables: TArray<string>;
@@ -3269,7 +3330,55 @@ var
     exact_prefix_texts: TDictionary<string, Boolean>;
     user_items: TncRankedCompletionList;
     base_items: TncRankedCompletionList;
+    base_weight_items: TncRankedCompletionList;
     transition_items: TncRankedCompletionList;
+
+    function resolve_lookup_prefix: Boolean;
+    var
+        trial_prefix: string;
+        trial_compact: string;
+        trial_syllables: TArray<string>;
+        trial_length: Integer;
+    begin
+        Result := False;
+        prefix_syllables := split_full_pinyin_syllables(canonical_prefix);
+        if Length(prefix_syllables) >= 2 then
+        begin
+            lookup_prefix := compact_prefix;
+            Exit(True);
+        end;
+
+        // The offline lookup is indexed at completed syllable boundaries.
+        // While the user types the next syllable, reuse the nearest completed
+        // prefix and filter every returned row by the full raw key below.
+        for trial_length := Length(canonical_prefix) - 1 downto 1 do
+        begin
+            trial_prefix := Copy(canonical_prefix, 1, trial_length);
+            while (trial_prefix <> '') and
+                (trial_prefix[Length(trial_prefix)] = '''') do
+            begin
+                Delete(trial_prefix, Length(trial_prefix), 1);
+            end;
+            if trial_prefix = '' then
+            begin
+                Continue;
+            end;
+            trial_syllables := split_full_pinyin_syllables(trial_prefix);
+            if Length(trial_syllables) < 2 then
+            begin
+                Continue;
+            end;
+            trial_compact := normalize_compact_pinyin_key(trial_prefix);
+            if (Length(trial_compact) >= Length(compact_prefix)) or
+                (not compact_prefix.StartsWith(trial_compact, True)) then
+            begin
+                Continue;
+            end;
+            prefix_syllables := trial_syllables;
+            lookup_prefix := trial_compact;
+            Exit(True);
+        end;
+    end;
 
     function ranked_better(const left_item: TncRankedCompletion;
         const right_item: TncRankedCompletion): Boolean;
@@ -3326,21 +3435,6 @@ var
         end;
     end;
 
-    function has_anchored_item(
-        const items: TncRankedCompletionList): Boolean;
-    var
-        item_idx: Integer;
-    begin
-        for item_idx := 0 to High(items) do
-        begin
-            if items[item_idx].item.prefix_anchored then
-            begin
-                Exit(True);
-            end;
-        end;
-        Result := False;
-    end;
-
     procedure load_exact_prefix_texts;
     const
         exact_prefix_sql =
@@ -3356,7 +3450,7 @@ var
         try
             if (not m_base_connection.prepare(exact_prefix_sql, stmt)) or
                 (not m_base_connection.bind_text(stmt, 1,
-                compact_prefix)) or
+                lookup_prefix)) or
                 (not m_base_connection.bind_text(stmt, 2,
                 explicit_prefix)) then
             begin
@@ -3368,7 +3462,7 @@ var
                 stored_pinyin := m_base_connection.column_text(stmt, 0);
                 stored_text := Trim(m_base_connection.column_text(stmt, 1));
                 if (stored_text <> '') and same_normalized_pinyin_key(
-                    stored_pinyin, canonical_prefix) then
+                    stored_pinyin, lookup_prefix) then
                 begin
                     exact_prefix_texts.AddOrSetValue(stored_text, True);
                 end;
@@ -3394,6 +3488,8 @@ var
             normalize_canonical_pinyin_key(candidate_pinyin));
         Result :=
             (Length(candidate_syllables) > Length(prefix_syllables)) and
+            (Length(candidate_compact_pinyin) > Length(compact_prefix)) and
+            candidate_compact_pinyin.StartsWith(compact_prefix, True) and
             (get_text_unit_count_local(candidate_text) =
             Length(candidate_syllables));
         if not Result then
@@ -3426,12 +3522,98 @@ var
             Length(prefix_syllables);
     end;
 
+    function query_precomputed_base: Boolean;
+    var
+        stmt: Psqlite3_stmt;
+        step_result: Integer;
+        item: TncOneKeyCompletion;
+        candidate_pinyin: string;
+        candidate_text: string;
+        candidate_compact_pinyin: string;
+        result_idx: Integer;
+        duplicate: Boolean;
+    begin
+        Result := False;
+        stmt := nil;
+        try
+            if (not m_base_connection.prepare(base_completion_lookup_sql,
+                stmt)) or
+                (not m_base_connection.bind_text(stmt, 1, lookup_prefix)) then
+            begin
+                Exit;
+            end;
+            step_result := m_base_connection.step(stmt);
+            while step_result = SQLITE_ROW do
+            begin
+                candidate_pinyin := m_base_connection.column_text(stmt, 0);
+                candidate_text := Trim(m_base_connection.column_text(stmt, 1));
+                if not candidate_matches_prefix(candidate_pinyin,
+                    candidate_text, candidate_compact_pinyin) then
+                begin
+                    step_result := m_base_connection.step(stmt);
+                    Continue;
+                end;
+                duplicate := False;
+                for result_idx := 0 to High(results) do
+                begin
+                    if SameText(results[result_idx].full_pinyin,
+                        candidate_compact_pinyin) and
+                        SameText(results[result_idx].text,
+                        candidate_text) then
+                    begin
+                        duplicate := True;
+                        Break;
+                    end;
+                end;
+                if duplicate then
+                begin
+                    step_result := m_base_connection.step(stmt);
+                    Continue;
+                end;
+                item := Default(TncOneKeyCompletion);
+                item.text := candidate_text;
+                item.full_pinyin := candidate_compact_pinyin;
+                item.path_text := '';
+                item.weight := m_base_connection.column_int(stmt, 2);
+                item.popularity_prior :=
+                    m_base_connection.column_int(stmt, 3);
+                item.corpus_score := m_base_connection.column_int(stmt, 4);
+                item.document_score := m_base_connection.column_int(stmt, 5);
+                item.source_count := m_base_connection.column_int(stmt, 6);
+                item.path_score := m_base_connection.column_int(stmt, 7);
+                item.vertical_penalty :=
+                    m_base_connection.column_int(stmt, 8);
+                item.vertical_layer_kind :=
+                    m_base_connection.column_int(stmt, 9);
+                item.has_popularity_prior := True;
+                item.feedback_count := 0;
+                item.prefix_anchored :=
+                    m_base_connection.column_int(stmt, 10) <> 0;
+                item.source := okcs_base_exact;
+                SetLength(results, Length(results) + 1);
+                results[High(results)] := item;
+                Result := True;
+                step_result := m_base_connection.step(stmt);
+            end;
+        finally
+            if stmt <> nil then
+            begin
+                m_base_connection.finalize(stmt);
+            end;
+        end;
+    end;
+
     procedure consider_candidate(var target: TncRankedCompletionList;
         const candidate_pinyin: string;
         const candidate_text: string; const candidate_weight: Integer;
         const candidate_source: TncOneKeyCompletionSource;
         const candidate_path: string; const candidate_anchored: Boolean;
-        const rank_primary: Integer; const rank_secondary: Int64);
+        const rank_primary: Integer; const rank_secondary: Int64;
+        const popularity_prior: Integer; const corpus_score: Integer;
+        const document_score: Integer; const source_count: Integer;
+        const path_score: Integer; const vertical_penalty: Integer;
+        const vertical_layer_kind: Integer;
+        const has_popularity_prior: Boolean);
     var
         candidate_compact_pinyin: string;
         ranked_item: TncRankedCompletion;
@@ -3450,6 +3632,14 @@ var
         ranked_item.item.full_pinyin := candidate_compact_pinyin;
         ranked_item.item.path_text := Trim(candidate_path);
         ranked_item.item.weight := candidate_weight;
+        ranked_item.item.popularity_prior := popularity_prior;
+        ranked_item.item.corpus_score := corpus_score;
+        ranked_item.item.document_score := document_score;
+        ranked_item.item.source_count := source_count;
+        ranked_item.item.path_score := path_score;
+        ranked_item.item.vertical_penalty := vertical_penalty;
+        ranked_item.item.vertical_layer_kind := vertical_layer_kind;
+        ranked_item.item.has_popularity_prior := has_popularity_prior;
         ranked_item.item.feedback_count := 0;
         ranked_item.item.prefix_anchored := candidate_anchored;
         ranked_item.item.source := candidate_source;
@@ -3492,17 +3682,28 @@ var
         end;
     end;
 
-    procedure query_base_stored_prefix(const stored_prefix: string);
+    procedure query_base_stored_prefix(const stored_prefix: string;
+        var target_items: TncRankedCompletionList;
+        const rank_by_popularity: Boolean);
     var
         upper_bound: string;
         candidate_pinyin: string;
         candidate_text: string;
         candidate_weight: Integer;
         candidate_rank: Integer;
+        candidate_popularity_prior: Integer;
+        candidate_corpus_score: Integer;
+        candidate_document_score: Integer;
+        candidate_source_count: Integer;
+        candidate_path_score: Integer;
+        candidate_vertical_penalty: Integer;
+        candidate_layer_kind: Integer;
+        candidate_has_prior: Boolean;
         candidate_prefix_text: string;
         candidate_anchored: Boolean;
         stmt: Psqlite3_stmt;
         step_result: Integer;
+        sql_text: string;
     begin
         upper_bound := build_prefix_upper_bound(stored_prefix);
         if (stored_prefix = '') or (upper_bound = '') then
@@ -3512,7 +3713,15 @@ var
 
         stmt := nil;
         try
-            if (not m_base_connection.prepare(base_completion_sql, stmt)) or
+            if rank_by_popularity then
+            begin
+                sql_text := base_completion_popularity_sql;
+            end
+            else
+            begin
+                sql_text := base_completion_weight_sql;
+            end;
+            if (not m_base_connection.prepare(sql_text, stmt)) or
                 (not m_base_connection.bind_text(stmt, 1, stored_prefix)) or
                 (not m_base_connection.bind_text(stmt, 2, upper_bound)) or
                 (not m_base_connection.bind_int(stmt, 3, c_query_limit)) then
@@ -3526,7 +3735,22 @@ var
                 candidate_pinyin := m_base_connection.column_text(stmt, 0);
                 candidate_text := Trim(m_base_connection.column_text(stmt, 1));
                 candidate_weight := m_base_connection.column_int(stmt, 2);
-                candidate_rank := candidate_weight;
+                candidate_popularity_prior := m_base_connection.column_int(stmt, 3);
+                candidate_corpus_score := m_base_connection.column_int(stmt, 4);
+                candidate_document_score := m_base_connection.column_int(stmt, 5);
+                candidate_source_count := m_base_connection.column_int(stmt, 6);
+                candidate_path_score := m_base_connection.column_int(stmt, 7);
+                candidate_vertical_penalty := m_base_connection.column_int(stmt, 8);
+                candidate_layer_kind := m_base_connection.column_int(stmt, 9);
+                candidate_has_prior := candidate_popularity_prior >= 0;
+                if rank_by_popularity and candidate_has_prior then
+                begin
+                    candidate_rank := candidate_popularity_prior;
+                end
+                else
+                begin
+                    candidate_rank := candidate_weight;
+                end;
                 candidate_prefix_text := copy_first_text_units(candidate_text,
                     Length(prefix_syllables));
                 candidate_anchored := (candidate_prefix_text <> '') and
@@ -3537,13 +3761,18 @@ var
                     // evidence than an accidental prefix through another word.
                     Inc(candidate_rank, c_base_exact_prefix_anchor_bonus);
                 end;
-                consider_candidate(base_items, candidate_pinyin,
+                consider_candidate(target_items, candidate_pinyin,
                     candidate_text, candidate_weight, okcs_base_exact, '',
                     candidate_anchored, candidate_rank,
-                    -get_text_unit_count_local(candidate_text));
-                if (Length(base_items) >= c_source_result_limit) and
-                    (candidate_weight + c_base_exact_prefix_anchor_bonus <
-                    minimum_primary(base_items)) then
+                    -get_text_unit_count_local(candidate_text),
+                    candidate_popularity_prior, candidate_corpus_score,
+                    candidate_document_score, candidate_source_count,
+                    candidate_path_score, candidate_vertical_penalty,
+                    candidate_layer_kind,
+                    candidate_has_prior);
+                if (Length(target_items) >= c_source_result_limit) and
+                    (candidate_rank + c_base_exact_prefix_anchor_bonus <
+                    minimum_primary(target_items)) then
                 begin
                     Break;
                 end;
@@ -3606,7 +3835,8 @@ var
                     candidate_last_used := m_user_connection.column_int(stmt, 2);
                     consider_candidate(user_items, candidate_pinyin,
                         candidate_text, candidate_weight, okcs_user_exact, '',
-                        True, MaxInt, candidate_last_used);
+                        True, MaxInt, candidate_last_used, 0, 0, 0, 0, 0, 0,
+                        0, False);
                 end
                 else
                 begin
@@ -3614,7 +3844,8 @@ var
                     candidate_last_used := m_user_connection.column_int(stmt, 3);
                     consider_candidate(user_items, candidate_pinyin,
                         candidate_text, candidate_weight, okcs_user_exact, '',
-                        True, candidate_weight, candidate_last_used);
+                        True, candidate_weight, candidate_last_used, 0, 0, 0,
+                        0, 0, 0, 0, False);
                 end;
                 step_result := m_user_connection.step(stmt);
             end;
@@ -3639,7 +3870,7 @@ var
         try
             if (not m_base_connection.prepare(transition_completion_sql,
                 stmt)) or
-                (not m_base_connection.bind_text(stmt, 1, compact_prefix)) or
+                (not m_base_connection.bind_text(stmt, 1, lookup_prefix)) or
                 (not m_base_connection.bind_int(stmt, 2,
                 c_source_result_limit)) then
             begin
@@ -3657,7 +3888,8 @@ var
                     candidate_path,
                     transition_prefix_is_exact_boundary(candidate_path),
                     evidence,
-                    -get_text_unit_count_local(candidate_text));
+                    -get_text_unit_count_local(candidate_text), 0, 0, 0, 0,
+                    0, 0, 0, False);
                 step_result := m_base_connection.step(stmt);
             end;
         finally
@@ -3770,8 +4002,8 @@ begin
         Exit;
     end;
 
-    prefix_syllables := split_full_pinyin_syllables(canonical_prefix);
-    if Length(prefix_syllables) < 2 then
+    lookup_prefix := '';
+    if not resolve_lookup_prefix then
     begin
         Exit;
     end;
@@ -3801,12 +4033,11 @@ begin
 
     exact_prefix_texts := TDictionary<string, Boolean>.Create;
     try
-        load_exact_prefix_texts;
-
         // User completions are a separate priority class. Literal words are
         // explicit user selections, so they win inside that class.
         SetLength(user_items, 0);
         SetLength(base_items, 0);
+        SetLength(base_weight_items, 0);
         SetLength(transition_items, 0);
         query_user_stored_prefix(compact_prefix, False);
         query_user_stored_prefix(compact_prefix, True);
@@ -3825,18 +4056,28 @@ begin
             Exit(True);
         end;
 
-        query_base_stored_prefix(compact_prefix);
-        if not SameText(explicit_prefix, compact_prefix) then
+        // New dictionaries provide a bounded offline Top-K exact lookup.
+        // Empty legacy tables fall back to the range scans below so upgrades
+        // remain usable while their replacement dictionary is installed.
+        if not query_precomputed_base then
         begin
-            query_base_stored_prefix(explicit_prefix);
+            load_exact_prefix_texts;
+            query_base_stored_prefix(compact_prefix, base_items, True);
+            query_base_stored_prefix(compact_prefix, base_weight_items,
+                False);
+            if not SameText(explicit_prefix, compact_prefix) then
+            begin
+                query_base_stored_prefix(explicit_prefix, base_items, True);
+                query_base_stored_prefix(explicit_prefix, base_weight_items,
+                    False);
+            end;
+            sort_ranked(base_items);
+            sort_ranked(base_weight_items);
+            append_ranked_items(base_weight_items);
+            append_ranked_items(base_items);
         end;
-        sort_ranked(base_items);
-        if not has_anchored_item(base_items) then
-        begin
-            query_transition_completion;
-            sort_ranked(transition_items);
-        end;
-        append_ranked_items(base_items);
+        query_transition_completion;
+        sort_ranked(transition_items);
         append_ranked_items(transition_items);
         load_feedback_counts;
         cache_results;
@@ -4289,6 +4530,62 @@ begin
     end;
 
     if not connection.exec(
+        'CREATE TABLE IF NOT EXISTS dict_base_completion_prior (' +
+        'pinyin TEXT NOT NULL,' +
+        'text TEXT NOT NULL,' +
+        'popularity_prior INTEGER NOT NULL DEFAULT 0,' +
+        'corpus_score INTEGER NOT NULL DEFAULT 0,' +
+        'document_score INTEGER NOT NULL DEFAULT 0,' +
+        'source_count INTEGER NOT NULL DEFAULT 0,' +
+        'path_score INTEGER NOT NULL DEFAULT 0,' +
+        'vertical_penalty INTEGER NOT NULL DEFAULT 0,' +
+        'layer_kind INTEGER NOT NULL DEFAULT 0,' +
+        'PRIMARY KEY(pinyin, text)' +
+        ') WITHOUT ROWID;') then
+    begin
+        Result := False;
+        Exit;
+    end;
+
+    if not connection.exec(
+        'CREATE INDEX IF NOT EXISTS idx_dict_base_completion_prior_pinyin ' +
+        'ON dict_base_completion_prior(pinyin, popularity_prior DESC);') then
+    begin
+        Result := False;
+        Exit;
+    end;
+
+    if not connection.exec(
+        'CREATE TABLE IF NOT EXISTS dict_base_completion_lookup (' +
+        'typed_prefix TEXT NOT NULL,' +
+        'full_pinyin TEXT NOT NULL,' +
+        'text TEXT NOT NULL,' +
+        'weight INTEGER NOT NULL DEFAULT 0,' +
+        'popularity_prior INTEGER NOT NULL DEFAULT 0,' +
+        'corpus_score INTEGER NOT NULL DEFAULT 0,' +
+        'document_score INTEGER NOT NULL DEFAULT 0,' +
+        'source_count INTEGER NOT NULL DEFAULT 0,' +
+        'path_score INTEGER NOT NULL DEFAULT 0,' +
+        'vertical_penalty INTEGER NOT NULL DEFAULT 0,' +
+        'layer_kind INTEGER NOT NULL DEFAULT 0,' +
+        'prefix_anchored INTEGER NOT NULL DEFAULT 0,' +
+        'rank_order INTEGER NOT NULL DEFAULT 0,' +
+        'PRIMARY KEY(typed_prefix, full_pinyin, text)' +
+        ') WITHOUT ROWID;') then
+    begin
+        Result := False;
+        Exit;
+    end;
+
+    if not connection.exec(
+        'CREATE INDEX IF NOT EXISTS idx_dict_base_completion_lookup_prefix ' +
+        'ON dict_base_completion_lookup(typed_prefix, rank_order);') then
+    begin
+        Result := False;
+        Exit;
+    end;
+
+    if not connection.exec(
         'CREATE INDEX IF NOT EXISTS idx_dict_jianpin_key_weight_word ' +
         'ON dict_jianpin(jianpin, weight DESC, word_id);') then
     begin
@@ -4709,6 +5006,11 @@ begin
     if schema_version < 17 then
     begin
         set_schema_version(connection, 17);
+    end;
+
+    if schema_version < 18 then
+    begin
+        set_schema_version(connection, 18);
     end;
 
     Result := True;

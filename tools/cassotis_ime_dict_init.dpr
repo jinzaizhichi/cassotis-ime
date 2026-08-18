@@ -13,14 +13,15 @@ uses
 
 type
     TncImportMode = (imBaseDict, imQueryPathPrior, imLmTransition, imCharLm,
-        imCharReverseLm, imTransitionCompletion);
+        imCharReverseLm, imTransitionCompletion, imCompletionPrior,
+        imCompletionLookup);
 
 const
     c_segment_path_separator = #3;
 
 procedure print_usage;
 begin
-    Writeln('Usage: cassotis_ime_dict_init <db_path> <schema_path> [import_path] [base|query_path|lm_transition|char_lm|char_reverse_lm|transition_completion]');
+    Writeln('Usage: cassotis_ime_dict_init <db_path> <schema_path> [import_path] [base|query_path|lm_transition|char_lm|char_reverse_lm|transition_completion|completion_prior|completion_lookup]');
     Writeln('       cassotis_ime_dict_init <db_path> <schema_path> --build-contains-index');
 end;
 
@@ -117,6 +118,103 @@ begin
     evidence := StrToIntDef(Trim(parts[4]), 0);
     Result := (typed_prefix <> '') and (full_pinyin <> '') and
         (text <> '') and (path_text <> '') and (evidence > 0);
+end;
+
+function split_completion_prior_line(const line: string;
+    out pinyin: string; out text: string; out popularity_prior: Integer;
+    out corpus_score: Integer; out document_score: Integer;
+    out source_count: Integer; out vertical_penalty: Integer;
+    out layer_kind: Integer; out path_score: Integer): Boolean;
+var
+    parts: TArray<string>;
+begin
+    Result := False;
+    pinyin := '';
+    text := '';
+    popularity_prior := 0;
+    corpus_score := 0;
+    document_score := 0;
+    source_count := 0;
+    vertical_penalty := 0;
+    layer_kind := 0;
+    path_score := 0;
+    parts := line.Split([#9]);
+    if Length(parts) <> 9 then
+    begin
+        Exit;
+    end;
+    pinyin := Trim(parts[0]);
+    text := Trim(parts[1]);
+    popularity_prior := StrToIntDef(Trim(parts[2]), -1);
+    corpus_score := StrToIntDef(Trim(parts[3]), -1);
+    document_score := StrToIntDef(Trim(parts[4]), -1);
+    source_count := StrToIntDef(Trim(parts[5]), -1);
+    vertical_penalty := StrToIntDef(Trim(parts[6]), -1);
+    layer_kind := StrToIntDef(Trim(parts[7]), -1);
+    path_score := StrToIntDef(Trim(parts[8]), -1);
+    Result := (pinyin <> '') and (text <> '') and
+        (popularity_prior >= 0) and (popularity_prior <= 1000) and
+        (corpus_score >= 0) and (corpus_score <= 1000) and
+        (document_score >= 0) and (document_score <= 1000) and
+        (source_count >= 0) and (source_count <= 8) and
+        (vertical_penalty >= 0) and (vertical_penalty <= 1000) and
+        (layer_kind >= 0) and (layer_kind <= 3) and
+        (path_score >= 0) and (path_score <= 1000);
+end;
+
+function split_completion_lookup_line(const line: string;
+    out typed_prefix: string; out full_pinyin: string; out text: string;
+    out weight: Integer; out popularity_prior: Integer;
+    out corpus_score: Integer; out document_score: Integer;
+    out source_count: Integer; out path_score: Integer;
+    out vertical_penalty: Integer; out layer_kind: Integer;
+    out prefix_anchored: Integer; out rank_order: Integer): Boolean;
+var
+    parts: TArray<string>;
+begin
+    Result := False;
+    typed_prefix := '';
+    full_pinyin := '';
+    text := '';
+    weight := 0;
+    popularity_prior := 0;
+    corpus_score := 0;
+    document_score := 0;
+    source_count := 0;
+    path_score := 0;
+    vertical_penalty := 0;
+    layer_kind := 0;
+    prefix_anchored := 0;
+    rank_order := 0;
+    parts := line.Split([#9]);
+    if Length(parts) <> 13 then
+    begin
+        Exit;
+    end;
+    typed_prefix := Trim(parts[0]);
+    full_pinyin := Trim(parts[1]);
+    text := Trim(parts[2]);
+    weight := StrToIntDef(Trim(parts[3]), -1);
+    popularity_prior := StrToIntDef(Trim(parts[4]), -1);
+    corpus_score := StrToIntDef(Trim(parts[5]), -1);
+    document_score := StrToIntDef(Trim(parts[6]), -1);
+    source_count := StrToIntDef(Trim(parts[7]), -1);
+    path_score := StrToIntDef(Trim(parts[8]), -1);
+    vertical_penalty := StrToIntDef(Trim(parts[9]), -1);
+    layer_kind := StrToIntDef(Trim(parts[10]), -1);
+    prefix_anchored := StrToIntDef(Trim(parts[11]), -1);
+    rank_order := StrToIntDef(Trim(parts[12]), -1);
+    Result := (typed_prefix <> '') and (full_pinyin <> '') and
+        (text <> '') and (weight > 0) and
+        (popularity_prior >= 0) and (popularity_prior <= 1000) and
+        (corpus_score >= 0) and (corpus_score <= 1000) and
+        (document_score >= 0) and (document_score <= 1000) and
+        (source_count >= 0) and (source_count <= 8) and
+        (path_score >= 0) and (path_score <= 1000) and
+        (vertical_penalty >= 0) and (vertical_penalty <= 1000) and
+        (layer_kind >= 0) and (layer_kind <= 3) and
+        (prefix_anchored in [0, 1]) and
+        (rank_order >= 0) and (rank_order < 32);
 end;
 
 function split_char_lm_line(const line: string; out ngram: string;
@@ -297,6 +395,14 @@ begin
         begin
             Exit(imTransitionCompletion);
         end;
+        if Pos('completion_prior', normalized) > 0 then
+        begin
+            Exit(imCompletionPrior);
+        end;
+        if Pos('completion_lookup', normalized) > 0 then
+        begin
+            Exit(imCompletionLookup);
+        end;
         if Pos('char_reverse_lm', normalized) > 0 then
         begin
             Exit(imCharReverseLm);
@@ -325,6 +431,19 @@ begin
         (normalized = 'completion') then
     begin
         Exit(imTransitionCompletion);
+    end;
+
+    if (normalized = 'completion_prior') or
+        (normalized = 'completion-prior') or
+        (normalized = 'popularity_prior') then
+    begin
+        Exit(imCompletionPrior);
+    end;
+
+    if (normalized = 'completion_lookup') or
+        (normalized = 'completion-lookup') then
+    begin
+        Exit(imCompletionLookup);
     end;
 
     if (normalized = 'char_lm') or (normalized = 'char-lm') or
@@ -521,6 +640,17 @@ const
         'INSERT OR REPLACE INTO dict_base_transition_completion' +
         '(typed_prefix, full_pinyin, text, path_text, evidence) ' +
         'VALUES (?1, ?2, ?3, ?4, ?5);';
+    insert_completion_prior_sql =
+        'INSERT OR REPLACE INTO dict_base_completion_prior' +
+        '(pinyin, text, popularity_prior, corpus_score, document_score, ' +
+        'source_count, vertical_penalty, layer_kind, path_score) ' +
+        'VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9);';
+    insert_completion_lookup_sql =
+        'INSERT OR REPLACE INTO dict_base_completion_lookup' +
+        '(typed_prefix, full_pinyin, text, weight, popularity_prior, ' +
+        'corpus_score, document_score, source_count, path_score, ' +
+        'vertical_penalty, layer_kind, prefix_anchored, rank_order) ' +
+        'VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13);';
     insert_char_lm_sql =
         'INSERT OR REPLACE INTO dict_base_char_lm(ngram, score, backoff) VALUES (?1, ?2, ?3);';
     insert_char_reverse_lm_sql =
@@ -539,6 +669,15 @@ var
     path_text: string;
     weight: Integer;
     backoff: Integer;
+    corpus_score: Integer;
+    document_score: Integer;
+    source_count: Integer;
+    vertical_penalty: Integer;
+    layer_kind: Integer;
+    path_score: Integer;
+    popularity_prior: Integer;
+    prefix_anchored: Integer;
+    rank_order: Integer;
     word_id: Integer;
     rc: Integer;
     has_error: Boolean;
@@ -549,6 +688,8 @@ var
     inserted_query_paths: Integer;
     inserted_char_lm: Integer;
     inserted_transition_completions: Integer;
+    inserted_completion_priors: Integer;
+    inserted_completion_lookups: Integer;
     completion_parser: TncPinyinParser;
     jianpin_variants: TArray<string>;
     jianpin_value: string;
@@ -581,6 +722,8 @@ begin
     inserted_query_paths := 0;
     inserted_char_lm := 0;
     inserted_transition_completions := 0;
+    inserted_completion_priors := 0;
+    inserted_completion_lookups := 0;
     try
         if import_mode = imQueryPathPrior then
         begin
@@ -634,6 +777,70 @@ begin
                 Exit;
             end;
             if not conn.prepare(insert_transition_completion_sql,
+                stmt_query_path) then
+            begin
+                Exit;
+            end;
+        end
+        else if import_mode = imCompletionPrior then
+        begin
+            if (not conn.exec(
+                'DROP TABLE IF EXISTS dict_base_completion_prior;')) or
+                (not conn.exec(
+                'CREATE TABLE dict_base_completion_prior (' +
+                'pinyin TEXT NOT NULL,' +
+                'text TEXT NOT NULL,' +
+                'popularity_prior INTEGER NOT NULL DEFAULT 0,' +
+                'corpus_score INTEGER NOT NULL DEFAULT 0,' +
+                'document_score INTEGER NOT NULL DEFAULT 0,' +
+                'source_count INTEGER NOT NULL DEFAULT 0,' +
+                'path_score INTEGER NOT NULL DEFAULT 0,' +
+                'vertical_penalty INTEGER NOT NULL DEFAULT 0,' +
+                'layer_kind INTEGER NOT NULL DEFAULT 0,' +
+                'PRIMARY KEY(pinyin, text)' +
+                ') WITHOUT ROWID;')) or
+                (not conn.exec(
+                'CREATE INDEX idx_dict_base_completion_prior_pinyin ' +
+                'ON dict_base_completion_prior' +
+                '(pinyin, popularity_prior DESC);')) then
+            begin
+                Exit;
+            end;
+            if not conn.prepare(insert_completion_prior_sql,
+                stmt_query_path) then
+            begin
+                Exit;
+            end;
+        end
+        else if import_mode = imCompletionLookup then
+        begin
+            if (not conn.exec(
+                'DROP TABLE IF EXISTS dict_base_completion_lookup;')) or
+                (not conn.exec(
+                'CREATE TABLE dict_base_completion_lookup (' +
+                'typed_prefix TEXT NOT NULL,' +
+                'full_pinyin TEXT NOT NULL,' +
+                'text TEXT NOT NULL,' +
+                'weight INTEGER NOT NULL DEFAULT 0,' +
+                'popularity_prior INTEGER NOT NULL DEFAULT 0,' +
+                'corpus_score INTEGER NOT NULL DEFAULT 0,' +
+                'document_score INTEGER NOT NULL DEFAULT 0,' +
+                'source_count INTEGER NOT NULL DEFAULT 0,' +
+                'path_score INTEGER NOT NULL DEFAULT 0,' +
+                'vertical_penalty INTEGER NOT NULL DEFAULT 0,' +
+                'layer_kind INTEGER NOT NULL DEFAULT 0,' +
+                'prefix_anchored INTEGER NOT NULL DEFAULT 0,' +
+                'rank_order INTEGER NOT NULL DEFAULT 0,' +
+                'PRIMARY KEY(typed_prefix, full_pinyin, text)' +
+                ') WITHOUT ROWID;')) or
+                (not conn.exec(
+                'CREATE INDEX idx_dict_base_completion_lookup_prefix ' +
+                'ON dict_base_completion_lookup' +
+                '(typed_prefix, rank_order);')) then
+            begin
+                Exit;
+            end;
+            if not conn.prepare(insert_completion_lookup_sql,
                 stmt_query_path) then
             begin
                 Exit;
@@ -735,6 +942,104 @@ begin
                     Break;
                 end;
                 Inc(inserted_transition_completions);
+                if (not conn.reset(stmt_query_path)) or
+                    (not conn.clear_bindings(stmt_query_path)) then
+                begin
+                    has_error := True;
+                    Break;
+                end;
+                Continue;
+            end;
+
+            if import_mode = imCompletionPrior then
+            begin
+                if not split_completion_prior_line(line, pinyin, text,
+                    weight, corpus_score, document_score, source_count,
+                    vertical_penalty, layer_kind, path_score) then
+                begin
+                    Continue;
+                end;
+                pinyin := normalize_pinyin_key(pinyin);
+                if (pinyin = '') or (text = '') then
+                begin
+                    Continue;
+                end;
+                if (not conn.bind_text(stmt_query_path, 1, pinyin)) or
+                    (not conn.bind_text(stmt_query_path, 2, text)) or
+                    (not conn.bind_int(stmt_query_path, 3, weight)) or
+                    (not conn.bind_int(stmt_query_path, 4, corpus_score)) or
+                    (not conn.bind_int(stmt_query_path, 5, document_score)) or
+                    (not conn.bind_int(stmt_query_path, 6, source_count)) or
+                    (not conn.bind_int(stmt_query_path, 7, vertical_penalty)) or
+                    (not conn.bind_int(stmt_query_path, 8, layer_kind)) or
+                    (not conn.bind_int(stmt_query_path, 9, path_score)) then
+                begin
+                    has_error := True;
+                    Break;
+                end;
+                rc := conn.step(stmt_query_path);
+                if rc <> SQLITE_DONE then
+                begin
+                    has_error := True;
+                    Break;
+                end;
+                Inc(inserted_completion_priors);
+                if (not conn.reset(stmt_query_path)) or
+                    (not conn.clear_bindings(stmt_query_path)) then
+                begin
+                    has_error := True;
+                    Break;
+                end;
+                Continue;
+            end;
+
+            if import_mode = imCompletionLookup then
+            begin
+                if not split_completion_lookup_line(line, pinyin,
+                    full_pinyin, text, weight, popularity_prior,
+                    corpus_score, document_score, source_count, path_score,
+                    vertical_penalty, layer_kind, prefix_anchored,
+                    rank_order) then
+                begin
+                    Continue;
+                end;
+                pinyin := normalize_compact_pinyin_key(pinyin);
+                full_pinyin := normalize_pinyin_key(full_pinyin);
+                compact_full_pinyin := normalize_compact_pinyin_key(
+                    full_pinyin);
+                if (pinyin = '') or (full_pinyin = '') or (text = '') or
+                    (Length(compact_full_pinyin) <= Length(pinyin)) or
+                    (not compact_full_pinyin.StartsWith(pinyin, True)) then
+                begin
+                    Continue;
+                end;
+                if (not conn.bind_text(stmt_query_path, 1, pinyin)) or
+                    (not conn.bind_text(stmt_query_path, 2, full_pinyin)) or
+                    (not conn.bind_text(stmt_query_path, 3, text)) or
+                    (not conn.bind_int(stmt_query_path, 4, weight)) or
+                    (not conn.bind_int(stmt_query_path, 5,
+                    popularity_prior)) or
+                    (not conn.bind_int(stmt_query_path, 6, corpus_score)) or
+                    (not conn.bind_int(stmt_query_path, 7, document_score)) or
+                    (not conn.bind_int(stmt_query_path, 8, source_count)) or
+                    (not conn.bind_int(stmt_query_path, 9, path_score)) or
+                    (not conn.bind_int(stmt_query_path, 10,
+                    vertical_penalty)) or
+                    (not conn.bind_int(stmt_query_path, 11, layer_kind)) or
+                    (not conn.bind_int(stmt_query_path, 12,
+                    prefix_anchored)) or
+                    (not conn.bind_int(stmt_query_path, 13, rank_order)) then
+                begin
+                    has_error := True;
+                    Break;
+                end;
+                rc := conn.step(stmt_query_path);
+                if rc <> SQLITE_DONE then
+                begin
+                    has_error := True;
+                    Break;
+                end;
+                Inc(inserted_completion_lookups);
                 if (not conn.reset(stmt_query_path)) or
                     (not conn.clear_bindings(stmt_query_path)) then
                 begin
@@ -962,6 +1267,18 @@ begin
             Writeln(Format(
                 'Imported %d transition completion rows from %d lines.',
                 [inserted_transition_completions, line_count]));
+        end
+        else if import_mode = imCompletionPrior then
+        begin
+            Writeln(Format(
+                'Imported %d completion popularity priors from %d lines.',
+                [inserted_completion_priors, line_count]));
+        end
+        else if import_mode = imCompletionLookup then
+        begin
+            Writeln(Format(
+                'Imported %d exact completion lookup rows from %d lines.',
+                [inserted_completion_lookups, line_count]));
         end
         else
         begin

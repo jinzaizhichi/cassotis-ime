@@ -892,6 +892,10 @@ type
         function debug_query_one_key_completion_candidates(
             const query_text: string;
             out completions: TncOneKeyCompletionList): Boolean;
+        function debug_score_one_key_completion_candidates(
+            const query_text: string; const left_context: string;
+            out completions: TncOneKeyCompletionList;
+            out char_lm_scores: TArray<Integer>): Boolean;
         procedure debug_set_target_recall_text(const text: string);
         procedure debug_enable_long_beam_state_capture(const enabled: Boolean);
         procedure debug_enable_long_ranking_stage_capture(
@@ -1010,7 +1014,8 @@ uses
     nc_short_context_difference_model,
     nc_short_context_top2_difference_model,
     nc_short_context_expanded_evidence,
-    nc_short_nocontext_residual_model;
+    nc_short_nocontext_residual_model,
+    nc_one_key_completion_ranker_model;
 
 const
     c_suppress_nonlexicon_complete_long_candidates = True;
@@ -1020,6 +1025,9 @@ const
     c_fast_repair_promote_margin = 6000;
     c_short_nocontext_protected_baseline_min_weight = 1000;
     c_short_residual_visibility_only_max_weight = 0;
+
+function trim_left_context_to_sentence(const value: string;
+    const max_length: Integer): string; forward;
 
 function nc_search_budget_should_stop(const mode: TncSearchBudgetMode;
     const elapsed_ms: UInt64; const work_count: Int64;
@@ -4244,6 +4252,40 @@ begin
         m_dictionary.lookup_one_key_completions(query_text, completions);
 end;
 
+function TncEngine.debug_score_one_key_completion_candidates(
+    const query_text: string; const left_context: string;
+    out completions: TncOneKeyCompletionList;
+    out char_lm_scores: TArray<Integer>): Boolean;
+const
+    c_completion_context_length = 12;
+var
+    completion_texts: TArray<string>;
+    context_value: string;
+    idx: Integer;
+begin
+    SetLength(completions, 0);
+    SetLength(char_lm_scores, 0);
+    Result := (m_dictionary <> nil) and
+        m_dictionary.lookup_one_key_completions(query_text, completions);
+    if not Result then
+    begin
+        Exit;
+    end;
+
+    SetLength(completion_texts, Length(completions));
+    for idx := 0 to High(completions) do
+    begin
+        completion_texts[idx] := completions[idx].text;
+    end;
+    context_value := trim_left_context_to_sentence(left_context,
+        c_completion_context_length);
+    if not get_cached_char_lm_scores(completion_texts, char_lm_scores,
+        clsm_context, context_value) then
+    begin
+        SetLength(char_lm_scores, Length(completions));
+    end;
+end;
+
 procedure TncEngine.update_config(const config: TncEngineConfig);
 var
     previous_config: TncEngineConfig;
@@ -4983,7 +5025,18 @@ const
     c_completion_transition_lm_divisor = 3;
     c_completion_transition_evidence_floor = 420;
     c_completion_transition_evidence_divisor = 4;
-    c_completion_transition_base_penalty = 320;
+    c_completion_popularity_hot_threshold = 700;
+    c_completion_popularity_warm_threshold = 480;
+    c_completion_popularity_score_multiplier = 4;
+    c_completion_path_score_divisor = 2;
+    c_completion_hot_anchor_bonus = 220;
+    c_completion_warm_anchor_bonus = 120;
+    c_completion_cold_anchor_bonus = 48;
+    c_completion_cold_unanchored_vertical_penalty = 220;
+    c_completion_hot_transition_penalty = 1200;
+    c_completion_warm_transition_penalty = 1100;
+    c_completion_cold_vertical_transition_penalty = 500;
+    c_completion_generic_transition_penalty = 1000;
     c_completion_char_lm_divisor = 4;
     c_completion_long_tail_penalty = 18;
     c_completion_no_context_transition_evidence_margin = 24;
@@ -4992,8 +5045,17 @@ const
     c_completion_hysteresis_margin = 96;
     c_completion_no_context_switch_margin = 144;
     c_completion_context_switch_margin = 88;
+    c_completion_hot_no_context_switch_margin = 180;
+    c_completion_hot_context_switch_margin = 140;
+    c_completion_warm_no_context_switch_margin = 112;
+    c_completion_warm_context_switch_margin = 80;
+    c_completion_cold_vertical_no_context_switch_margin = 40;
+    c_completion_cold_vertical_context_switch_margin = 24;
+    c_completion_generic_no_context_switch_margin = 80;
+    c_completion_generic_context_switch_margin = 56;
     c_completion_context_model_margin = 1.0;
     c_completion_context_residual_margin = 2.7;
+    c_completion_calibrated_margin = 1.5;
 var
     query_text: string;
     compact_query: string;
@@ -5011,6 +5073,7 @@ var
     has_base_completion: Boolean;
     has_anchored_base: Boolean;
     has_feedback: Boolean;
+    has_popularity_prior: Boolean;
     eligible_count: Integer;
     baseline_idx: Integer;
     best_idx: Integer;
@@ -5021,6 +5084,8 @@ var
     remaining_units: Integer;
     feedback_bonus: Integer;
     transition_bonus: Integer;
+    transition_penalty: Integer;
+    anchor_bonus: Integer;
     required_margin: Integer;
     top_margin: Integer;
     model_baseline_idx: Integer;
@@ -5037,8 +5102,43 @@ var
     residual_best_score: Double;
     residual_candidate_score: Double;
     residual_current_score: Double;
+    calibrated_best_idx: Integer;
+    calibrated_best_score: Double;
+    calibrated_candidate_score: Double;
+    calibrated_current_score: Double;
     previous_compatible: Boolean;
     previous_present: Boolean;
+    transition_challenge_allowed: Boolean;
+
+    function has_stronger_general_anchor(const cold_idx: Integer): Boolean;
+    var
+        candidate_idx: Integer;
+    begin
+        Result := False;
+        if (cold_idx < 0) or (cold_idx > High(completions)) then
+        begin
+            Exit;
+        end;
+        for candidate_idx := 0 to High(completions) do
+        begin
+            if (candidate_idx = cold_idx) or
+                (completions[candidate_idx].source <> okcs_base_exact) or
+                (not completions[candidate_idx].has_popularity_prior) or
+                (not completions[candidate_idx].prefix_anchored) or
+                (completions[candidate_idx].vertical_layer_kind <> 0) then
+            begin
+                Continue;
+            end;
+            if (completions[candidate_idx].popularity_prior >=
+                completions[cold_idx].popularity_prior + 24) and
+                (completions[candidate_idx].corpus_score >
+                completions[cold_idx].corpus_score) then
+            begin
+                Result := True;
+                Exit;
+            end;
+        end;
+    end;
 begin
     previous_completion := m_one_key_completion;
     previous_query_prefix := m_one_key_completion_query_prefix;
@@ -5061,10 +5161,9 @@ begin
             Exit;
         end;
     end;
-    if not is_full_pinyin_key(query_text) then
-    begin
-        Exit;
-    end;
+    // Completion lookup also accepts a partial final syllable after at least
+    // two parsed units. The dictionary reuses the nearest completed-syllable
+    // index and strictly filters every result by the complete typed key.
     syllables := get_effective_compact_pinyin_syllables(query_text, False);
     if Length(syllables) < 2 then
     begin
@@ -5130,6 +5229,7 @@ begin
     has_base_completion := completions[0].source = okcs_base_exact;
     has_anchored_base := False;
     has_feedback := False;
+    has_popularity_prior := False;
     for idx := 0 to High(completions) do
     begin
         if (completions[idx].source = okcs_base_exact) and
@@ -5141,11 +5241,17 @@ begin
         begin
             has_feedback := True;
         end;
+        if completions[idx].has_popularity_prior then
+        begin
+            has_popularity_prior := True;
+        end;
     end;
 
-    // With no left context, preserve the deterministic legacy result exactly.
-    // Dedicated feedback is the only signal allowed to override it.
-    if (context_value = '') and (not has_feedback) then
+    // Databases built before the completion-prior index retain their legacy
+    // deterministic behavior. New databases use the same unified scorer with
+    // or without left context.
+    if (not has_popularity_prior) and (context_value = '') and
+        (not has_feedback) then
     begin
         if (completions[0].source = okcs_transition) and
             (Length(completions) > 1) and
@@ -5170,12 +5276,19 @@ begin
         completion_texts[idx] := completions[idx].text;
         if context_value = '' then
         begin
-            eligible[idx] := (idx = 0) or
+            eligible[idx] := has_popularity_prior or (idx = 0) or
                 (completions[idx].feedback_count > 0);
         end
         else if has_base_completion then
         begin
-            if completions[idx].source = okcs_base_exact then
+            if has_popularity_prior then
+            begin
+                // Reliable base and transition Top-K candidates share one
+                // ranking pool. The offline transition index already enforces
+                // exact components and multi-source evidence.
+                eligible[idx] := True;
+            end
+            else if completions[idx].source = okcs_base_exact then
             begin
                 // Once an exact word boundary is available, keep all such
                 // base alternatives for context ranking and suppress weaker
@@ -5228,26 +5341,113 @@ begin
             baseline_idx := idx;
         end;
 
-        if (completions[idx].source = okcs_transition) and
+        if has_popularity_prior and
+            (completions[idx].source = okcs_base_exact) and
+            completions[idx].has_popularity_prior then
+        begin
+            scores[idx] := completions[idx].weight +
+                (completions[idx].popularity_prior *
+                c_completion_popularity_score_multiplier);
+        end
+        else if has_popularity_prior and
+            (completions[idx].source = okcs_transition) then
+        begin
+            if (baseline_idx >= 0) and
+                (completions[baseline_idx].source = okcs_base_exact) then
+            begin
+                if completions[baseline_idx].has_popularity_prior and
+                    (completions[baseline_idx].popularity_prior >=
+                    c_completion_popularity_hot_threshold) and
+                    (completions[baseline_idx].source_count >= 2) then
+                begin
+                    transition_penalty := c_completion_hot_transition_penalty;
+                end
+                else if completions[baseline_idx].has_popularity_prior and
+                    (completions[baseline_idx].popularity_prior >=
+                    c_completion_popularity_warm_threshold) then
+                begin
+                    transition_penalty := c_completion_warm_transition_penalty;
+                end
+                else if completions[baseline_idx].has_popularity_prior and
+                    (completions[baseline_idx].vertical_layer_kind > 0) and
+                    (completions[baseline_idx].popularity_prior < 300) then
+                begin
+                    transition_penalty :=
+                        c_completion_cold_vertical_transition_penalty;
+                end
+                else
+                begin
+                    transition_penalty :=
+                        c_completion_generic_transition_penalty;
+                end;
+                scores[idx] := completions[baseline_idx].weight -
+                    transition_penalty +
+                    (Max(0, completions[idx].weight -
+                    c_completion_transition_evidence_floor) div
+                    c_completion_transition_evidence_divisor);
+            end
+            else
+            begin
+                scores[idx] := completions[idx].weight;
+            end;
+        end
+        else if (completions[idx].source = okcs_transition) and
             (completions[0].source = okcs_base_exact) then
         begin
             // Transition evidence and lexicon weight have different scales.
             // Treat evidence as a bounded advantage relative to the legacy
             // base choice instead of comparing the raw integers directly.
-            scores[idx] := completions[0].weight -
-                c_completion_transition_base_penalty +
+            scores[idx] := completions[0].weight - 320 +
                 (Max(0, completions[idx].weight -
-                c_completion_transition_evidence_floor) div
-                c_completion_transition_evidence_divisor);
+                c_completion_transition_evidence_floor) div 4);
         end
         else
         begin
             scores[idx] := completions[idx].weight;
         end;
+        if (context_value = '') and
+            (completions[idx].source = okcs_base_exact) and
+            completions[idx].has_popularity_prior and
+            (not completions[idx].prefix_anchored) and
+            (completions[idx].vertical_layer_kind > 0) and
+            (completions[idx].popularity_prior < 300) and
+            (completions[idx].corpus_score = 0) and
+            (completions[idx].document_score = 0) and
+            (completions[idx].path_score = 0) and
+            has_stronger_general_anchor(idx) then
+        begin
+            // Without left context, a cold vertical phrase must not win only
+            // because its raw weight or character LM is high when a general
+            // exact-boundary completion has stronger corpus evidence.
+            Dec(scores[idx], c_completion_cold_unanchored_vertical_penalty);
+        end;
         if (completions[idx].source = okcs_base_exact) and
             completions[idx].prefix_anchored then
         begin
-            scores[idx] := completions[idx].weight * 2;
+            if has_popularity_prior and
+                completions[idx].has_popularity_prior then
+            begin
+                if (completions[idx].popularity_prior >=
+                    c_completion_popularity_hot_threshold) and
+                    (completions[idx].source_count >= 2) then
+                begin
+                    anchor_bonus := c_completion_hot_anchor_bonus;
+                end
+                else if completions[idx].popularity_prior >=
+                    c_completion_popularity_warm_threshold then
+                begin
+                    anchor_bonus := c_completion_warm_anchor_bonus;
+                end
+                else
+                begin
+                    anchor_bonus := c_completion_cold_anchor_bonus;
+                end;
+                Inc(scores[idx], anchor_bonus);
+            end
+            else
+            begin
+                scores[idx] := completions[idx].weight * 2;
+            end;
         end
         else if (completions[idx].source = okcs_transition) and
             (Trim(completions[idx].path_text) <> '') then
@@ -5264,6 +5464,16 @@ begin
 
         units := Max(1, get_candidate_text_unit_count(
             completions[idx].text));
+        remaining_units := units - Length(syllables);
+        if (completions[idx].source = okcs_base_exact) and
+            (completions[idx].path_score > 0) and
+            (remaining_units >= 1) and (remaining_units <= 2) then
+        begin
+            // Internal word-path cohesion is useful for local completion, but
+            // must not make a much longer phrase override a valid short word.
+            Inc(scores[idx], completions[idx].path_score div
+                c_completion_path_score_divisor);
+        end;
         if has_char_lm then
         begin
             Inc(scores[idx], (char_lm_scores[idx] div units) div
@@ -5280,7 +5490,6 @@ begin
             Inc(scores[idx], feedback_bonus);
         end;
 
-        remaining_units := units - Length(syllables);
         if remaining_units > 2 then
         begin
             Dec(scores[idx], (remaining_units - 2) *
@@ -5323,7 +5532,62 @@ begin
     if (baseline_idx >= 0) and (best_idx <> baseline_idx) and
         (completions[best_idx].feedback_count <= 0) then
     begin
-        if context_value = '' then
+        if has_popularity_prior and
+            (completions[baseline_idx].source = okcs_base_exact) and
+            completions[baseline_idx].has_popularity_prior then
+        begin
+            if (completions[baseline_idx].popularity_prior >=
+                c_completion_popularity_hot_threshold) and
+                (completions[baseline_idx].source_count >= 2) then
+            begin
+                if context_value = '' then
+                begin
+                    required_margin :=
+                        c_completion_hot_no_context_switch_margin;
+                end
+                else
+                begin
+                    required_margin := c_completion_hot_context_switch_margin;
+                end;
+            end
+            else if completions[baseline_idx].popularity_prior >=
+                c_completion_popularity_warm_threshold then
+            begin
+                if context_value = '' then
+                begin
+                    required_margin :=
+                        c_completion_warm_no_context_switch_margin;
+                end
+                else
+                begin
+                    required_margin := c_completion_warm_context_switch_margin;
+                end;
+            end
+            else if (completions[baseline_idx].vertical_layer_kind > 0) and
+                (completions[baseline_idx].popularity_prior < 300) then
+            begin
+                if context_value = '' then
+                begin
+                    required_margin :=
+                        c_completion_cold_vertical_no_context_switch_margin;
+                end
+                else
+                begin
+                    required_margin :=
+                        c_completion_cold_vertical_context_switch_margin;
+                end;
+            end
+            else if context_value = '' then
+            begin
+                required_margin :=
+                    c_completion_generic_no_context_switch_margin;
+            end
+            else
+            begin
+                required_margin := c_completion_generic_context_switch_margin;
+            end;
+        end
+        else if context_value = '' then
         begin
             required_margin := c_completion_no_context_switch_margin;
         end
@@ -5473,6 +5737,53 @@ begin
         end;
     end;
 
+    // A completion-specific pairwise calibration resolves only strong base
+    // exact disagreements. It runs before hysteresis, so small score changes
+    // cannot make a compatible prompt jump while the user keeps typing.
+    if (context_value <> '') and has_char_lm and (best_idx >= 0) and
+        (completions[best_idx].source = okcs_base_exact) then
+    begin
+        calibrated_best_idx := best_idx;
+        calibrated_current_score := one_key_completion_calibrated_score(
+            completions[best_idx].corpus_score,
+            completions[best_idx].path_score,
+            completions[best_idx].vertical_penalty,
+            completions[best_idx].vertical_layer_kind,
+            char_lm_scores[best_idx],
+            get_candidate_text_unit_count(completions[best_idx].text),
+            Length(syllables));
+        calibrated_best_score := calibrated_current_score;
+        for model_idx := 0 to High(completions) do
+        begin
+            if (not eligible[model_idx]) or
+                (completions[model_idx].source <> okcs_base_exact) or
+                (model_idx = best_idx) then
+            begin
+                Continue;
+            end;
+            calibrated_candidate_score :=
+                one_key_completion_calibrated_score(
+                completions[model_idx].corpus_score,
+                completions[model_idx].path_score,
+                completions[model_idx].vertical_penalty,
+                completions[model_idx].vertical_layer_kind,
+                char_lm_scores[model_idx],
+                get_candidate_text_unit_count(completions[model_idx].text),
+                Length(syllables));
+            if calibrated_candidate_score > calibrated_best_score then
+            begin
+                calibrated_best_idx := model_idx;
+                calibrated_best_score := calibrated_candidate_score;
+            end;
+        end;
+        if (calibrated_best_idx <> best_idx) and
+            (calibrated_best_score - calibrated_current_score >=
+            c_completion_calibrated_margin) then
+        begin
+            best_idx := calibrated_best_idx;
+        end;
+    end;
+
     // Keep a compatible suggestion stable while the user continues typing.
     // A challenger must win by a visible margin before replacing it.
     if (previous_idx >= 0) and (previous_query_prefix <> '') and
@@ -5483,6 +5794,26 @@ begin
         c_completion_hysteresis_margin) then
     begin
         best_idx := previous_idx;
+    end;
+
+    // Keep every reliable transition in the internal pool, but only let it
+    // replace an existing base completion when that base is demonstrably
+    // cold. Apply this after hysteresis so a previous transition cannot
+    // bypass the same evidence gate on the next keystroke.
+    if (best_idx >= 0) and (baseline_idx >= 0) and
+        (completions[best_idx].source = okcs_transition) and
+        (completions[baseline_idx].source = okcs_base_exact) and
+        (completions[best_idx].feedback_count <= 0) then
+    begin
+        transition_challenge_allowed :=
+            completions[baseline_idx].has_popularity_prior and
+            (((completions[baseline_idx].vertical_layer_kind > 0) and
+            (completions[baseline_idx].popularity_prior < 300)) or
+            (completions[baseline_idx].popularity_prior < 120));
+        if not transition_challenge_allowed then
+        begin
+            best_idx := baseline_idx;
+        end;
     end;
 
     // best_idx may have changed through the baseline guard or hysteresis.
@@ -5503,11 +5834,11 @@ begin
         end;
     end;
 
-    // Anchored lexicon completions remain available. For ordinary prefix and
-    // transition competition, abstain when the evidence cannot separate the
-    // two best alternatives reliably.
-    if (not has_anchored_base) and (second_idx >= 0) and
-        (completions[baseline_idx].source = okcs_transition) and
+    // Transition completions are deliberately conservative: when their lead
+    // is ambiguous, retain the best base completion or abstain if no base
+    // alternative exists. User feedback has already been handled above.
+    if (second_idx >= 0) and
+        (completions[best_idx].source = okcs_transition) and
         (best_idx <> previous_idx) then
     begin
         if context_value = '' then
@@ -5522,7 +5853,15 @@ begin
         if (top_margin < required_margin) and
             (completions[best_idx].feedback_count <= 0) then
         begin
-            Exit;
+            if (baseline_idx >= 0) and
+                (completions[baseline_idx].source = okcs_base_exact) then
+            begin
+                best_idx := baseline_idx;
+            end
+            else
+            begin
+                Exit;
+            end;
         end;
     end;
 
