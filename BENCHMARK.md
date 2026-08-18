@@ -15,7 +15,7 @@ The following rule applies to visible-candidate accuracy metrics in the long-sen
 - `他` and `她` are treated as equivalent only when they occur at the same character positions, because the benchmark Pinyin query cannot distinguish them.
 - `它`, all other homophones, missing or additional characters, and every other textual difference remain distinct.
 - The rule changes only offline pass/fail scoring. It does not rewrite candidate text or alter candidate generation, ranking, latency, or user-dictionary behavior.
-- Internal raw-pool and Oracle recall diagnostics retain strict character equality so that the target label cannot influence search behavior. They are therefore not directly comparable with equivalence-aware visible `TopN` metrics.
+- Raw-pool and Oracle recall scoring retains strict character equality so that the target label cannot influence search behavior. It is therefore not directly comparable with equivalence-aware visible `TopN` metrics.
 
 This equivalence rule applies to benchmark results starting with `v1.11.0`. Results for `v1.10.0` and earlier releases used strict character equality and should be rescored before direct comparison with `v1.11.0` or later results.
 
@@ -40,11 +40,11 @@ Benchmark-16300 contains 16,300 eligible sentences extracted from the novel in a
 
 - Accuracy runs use deterministic-work mode: normal search paths do not stop on wall-clock time and remain bounded by fixed beam, state, edge, candidate, and work limits. Changes in machine load therefore do not change normal candidate generation.
 - Latency runs use production mode: fixed work limits are the primary boundary, with wider emergency wall-clock ceilings retained to prevent unacceptable stalls on malformed long Pinyin or slower machines.
-- The two measurements are run separately. The eight-slice runner accelerates accuracy evaluation and is not used for published latency data.
+- The two measurements are run separately. The eight-slice runner accelerates accuracy evaluation and is not used for latency measurement.
 
 ### Latency Protocol
 
-Published long-sentence latency values measure engine-only full-query decoding:
+Long-sentence latency values measure engine-only full-query decoding:
 
 - Process the fixed 16,300 cases serially in one runner process and in corpus order.
 - Use a snapshot of the simplified base dictionary selected for the tested release and disable the user dictionary by default.
@@ -73,11 +73,11 @@ The frozen set contains 55,712 cases with usable left context and 9,288 sentence
 - A case is a `Top1` pass when the first exact candidate matches the target unit under the shared scoring rule above.
 - A case is a `Top2` pass when either of the first two exact candidates matches the target unit under the shared scoring rule above.
 - `Contested` is the 11,728-case subset in which the same Pinyin query maps to at least two target words in the corpus. `Contested Top1` and `Contested Top2` isolate the cases where left context is most useful for disambiguation.
-- Published short-word results use the context-enabled benchmark.
+- Short-word results use the context-enabled benchmark.
 
 ### Latency Protocol
 
-Published short-word latency values measure engine-only candidate retrieval for the context-enabled track:
+Short-word latency values measure engine-only candidate retrieval for the context-enabled track:
 
 - Process all 65,000 cases serially in one runner process and in fixed corpus order.
 - Reset the engine before each query while retaining the same dictionary connection and runtime caches.
@@ -94,17 +94,17 @@ The completion benchmark reuses the frozen Benchmark-65000 cases and their left 
 - Starting after two syllables, advance one syllable at a time and stop before the complete Pinyin. Each intermediate state is one completion opportunity.
 - For example, the target `往常一样` is queried at both `wangchang` and `wangchangyi`.
 - The complete 65,000-source corpus deterministically produces 12,831 opportunities, hence the name One-key Completion Context Benchmark-12831.
-- Use the simplified base-dictionary snapshot for the tested release and disable the user dictionary. Published results use only the context-enabled track.
+- Use the simplified base-dictionary snapshot for the tested release, disable the user dictionary, and enable left context.
 - Read only the single completion that the UI would display. It is a hit only when it strictly equals the corpus target; the `他`/`她` equivalence rule is not applied.
 
-Published results retain only four metrics that are straightforward to interpret across releases:
+The benchmark records four metrics that are straightforward to interpret across releases:
 
 - `Completion Hit`: correct completions divided by all 12,831 opportunities; this is the primary quality metric.
 - `Avg Keys Saved`: average net keystrokes saved by each correct completion, after charging one keystroke for accepting it.
 - `Stability`: when the previous completion remains compatible after another syllable is typed, the proportion for which the displayed completion remains unchanged.
 - `P95`: 95% of completion queries finish within this many milliseconds.
 
-Internal reports continue to retain the no-context track, prompt coverage, strict wrong-prompt rate, internal Top-K Oracle recall, source attribution, and per-opportunity rows for diagnosis. They are intentionally omitted from the public release table. Because each corpus position has only one reference target, a different but linguistically valid completion is still scored as a miss.
+Because each corpus position has only one reference target, a different but linguistically valid completion is still scored as a miss.
 
 ### Latency Protocol
 
