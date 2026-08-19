@@ -453,6 +453,7 @@ type
         m_one_key_completion: TncOneKeyCompletion;
         m_one_key_completion_query_prefix: string;
         m_one_key_completion_score: Integer;
+        m_completion_feedback_origin_prefix: string;
         m_allow_one_key_completion_lookup: Boolean;
         m_visible_candidates_cache: TncCandidateList;
         m_visible_candidate_source_indices_cache: TArray<Integer>;
@@ -815,6 +816,9 @@ type
         procedure build_candidates;
         procedure build_candidates_core;
         procedure clear_one_key_completion;
+        procedure clear_one_key_completion_feedback_target;
+        procedure record_one_key_completion_feedback_target(
+            const full_pinyin, text: string);
         procedure refresh_one_key_completion;
         function accept_one_key_completion: Boolean;
         procedure apply_long_complete_candidate_pool(
@@ -895,7 +899,10 @@ type
         function debug_score_one_key_completion_candidates(
             const query_text: string; const left_context: string;
             out completions: TncOneKeyCompletionList;
-            out char_lm_scores: TArray<Integer>): Boolean;
+            out char_lm_scores: TArray<Integer>;
+            out reverse_char_lm_scores: TArray<Integer>;
+            out prefix1_lm_scores: TArray<Integer>;
+            out prefix2_lm_scores: TArray<Integer>): Boolean;
         procedure debug_set_target_recall_text(const text: string);
         procedure debug_enable_long_beam_state_capture(const enabled: Boolean);
         procedure debug_enable_long_ranking_stage_capture(
@@ -1015,7 +1022,9 @@ uses
     nc_short_context_top2_difference_model,
     nc_short_context_expanded_evidence,
     nc_short_nocontext_residual_model,
-    nc_one_key_completion_ranker_model;
+    nc_one_key_completion_ranker_model,
+    nc_one_key_completion_difference_model,
+    nc_one_key_completion_topk_model;
 
 const
     c_suppress_nonlexicon_complete_long_candidates = True;
@@ -1328,6 +1337,7 @@ begin
     m_composition_text := '';
     m_composition_display_text := '';
     clear_one_key_completion;
+    clear_one_key_completion_feedback_target;
     m_pending_commit_text := '';
     m_pending_commit_remaining := '';
     m_pending_commit_remaining_input_code := '';
@@ -3891,6 +3901,7 @@ end;
 procedure TncEngine.reset;
 begin
     clear_one_key_completion;
+    clear_one_key_completion_feedback_target;
     m_composition_text := '';
     m_composition_display_text := '';
     m_pending_commit_text := '';
@@ -4255,16 +4266,23 @@ end;
 function TncEngine.debug_score_one_key_completion_candidates(
     const query_text: string; const left_context: string;
     out completions: TncOneKeyCompletionList;
-    out char_lm_scores: TArray<Integer>): Boolean;
+    out char_lm_scores: TArray<Integer>;
+    out reverse_char_lm_scores: TArray<Integer>;
+    out prefix1_lm_scores: TArray<Integer>;
+    out prefix2_lm_scores: TArray<Integer>): Boolean;
 const
     c_completion_context_length = 12;
 var
     completion_texts: TArray<string>;
+    prefix_texts: TArray<string>;
     context_value: string;
     idx: Integer;
 begin
     SetLength(completions, 0);
     SetLength(char_lm_scores, 0);
+    SetLength(reverse_char_lm_scores, 0);
+    SetLength(prefix1_lm_scores, 0);
+    SetLength(prefix2_lm_scores, 0);
     Result := (m_dictionary <> nil) and
         m_dictionary.lookup_one_key_completions(query_text, completions);
     if not Result then
@@ -4283,6 +4301,35 @@ begin
         clsm_context, context_value) then
     begin
         SetLength(char_lm_scores, Length(completions));
+    end;
+    if not m_dictionary.get_char_reverse_lm_suffix_scores(completion_texts,
+        reverse_char_lm_scores) then
+    begin
+        SetLength(reverse_char_lm_scores, Length(completions));
+    end;
+
+    SetLength(prefix_texts, Length(completions) * 2);
+    for idx := 0 to High(completions) do
+    begin
+        prefix_texts[idx * 2] := Copy(completions[idx].text, 1, 1);
+        prefix_texts[idx * 2 + 1] := Copy(completions[idx].text, 1, 2);
+    end;
+    if get_cached_char_lm_scores(prefix_texts, prefix1_lm_scores,
+        clsm_context, context_value) and
+        (Length(prefix1_lm_scores) = Length(prefix_texts)) then
+    begin
+        SetLength(prefix2_lm_scores, Length(completions));
+        for idx := 0 to High(completions) do
+        begin
+            prefix2_lm_scores[idx] := prefix1_lm_scores[idx * 2 + 1];
+            prefix1_lm_scores[idx] := prefix1_lm_scores[idx * 2];
+        end;
+        SetLength(prefix1_lm_scores, Length(completions));
+    end
+    else
+    begin
+        SetLength(prefix1_lm_scores, Length(completions));
+        SetLength(prefix2_lm_scores, Length(completions));
     end;
 end;
 
@@ -5016,12 +5063,41 @@ begin
     m_one_key_completion_score := Low(Integer);
 end;
 
+procedure TncEngine.clear_one_key_completion_feedback_target;
+begin
+    m_completion_feedback_origin_prefix := '';
+end;
+
+procedure TncEngine.record_one_key_completion_feedback_target(
+    const full_pinyin, text: string);
+var
+    target_pinyin: string;
+    target_text: string;
+begin
+    target_pinyin := normalize_pinyin_text(full_pinyin);
+    target_text := Trim(text);
+    if (m_dictionary <> nil) and
+        (m_completion_feedback_origin_prefix <> '') and
+        (target_pinyin <> '') and (target_text <> '') and
+        (Length(target_pinyin) >
+        Length(m_completion_feedback_origin_prefix)) and
+        target_pinyin.StartsWith(m_completion_feedback_origin_prefix, True) then
+    begin
+        m_dictionary.record_one_key_completion_accept(
+            m_completion_feedback_origin_prefix, target_pinyin, target_text);
+    end;
+    clear_one_key_completion_feedback_target;
+end;
+
 procedure TncEngine.refresh_one_key_completion;
 const
     c_completion_context_length = 12;
     c_completion_feedback_base = 96;
     c_completion_feedback_step = 48;
     c_completion_feedback_cap = 480;
+    c_completion_reject_base = 72;
+    c_completion_reject_step = 32;
+    c_completion_reject_cap = 320;
     c_completion_transition_lm_divisor = 3;
     c_completion_transition_evidence_floor = 420;
     c_completion_transition_evidence_divisor = 4;
@@ -5057,6 +5133,10 @@ const
     c_completion_context_model_margin = 1.0;
     c_completion_context_residual_margin = 2.7;
     c_completion_calibrated_margin = 1.5;
+    c_completion_difference_hysteresis_margin = 3.0;
+    c_completion_topk_hysteresis_margin = 0.0;
+    c_completion_competition_top_k = 5;
+    c_completion_competition_score_scale = 1000;
 var
     query_text: string;
     compact_query: string;
@@ -5084,6 +5164,7 @@ var
     units: Integer;
     remaining_units: Integer;
     feedback_bonus: Integer;
+    reject_penalty: Integer;
     transition_bonus: Integer;
     transition_penalty: Integer;
     anchor_bonus: Integer;
@@ -5113,6 +5194,77 @@ var
     stronger_general_idx: Integer;
     selected_lm_per_unit: Integer;
     general_lm_per_unit: Integer;
+    difference_best_idx: Integer;
+    difference_idx: Integer;
+    difference_score: Double;
+    difference_best_score: Double;
+    difference_threshold: Double;
+    difference_category: TncOneKeyCompletionDifferenceCategory;
+    topk_best_idx: Integer;
+    topk_idx: Integer;
+    topk_score: Double;
+    topk_best_score: Double;
+    topk_current_score: Double;
+    topk_threshold: Double;
+    topk_category: TncOneKeyCompletionDifferenceCategory;
+    competition_evidence: TncOneKeyCompletionCompetitionEvidenceList;
+    competition_width: Integer;
+    competition_candidate_idx: Integer;
+    competition_candidate_count: Integer;
+    competition_best_idx: Integer;
+    competition_best_score: Integer;
+    competition_current_score: Integer;
+    competition_candidate_score: Integer;
+    competition_margin: Integer;
+    competition_ratio_left: Integer;
+    competition_ratio_right: Integer;
+    competition_has_evidence: Boolean;
+    pair_audit: TncOneKeyCompletionPairAudit;
+    pair_candidate_idx: Integer;
+    pair_candidate_count: Integer;
+    pair_best_idx: Integer;
+    pair_best_width: Integer;
+    pair_best_confidence: Integer;
+    pair_best_observations: Integer;
+    pair_confidence: Integer;
+    pair_observations: Integer;
+
+    function competition_score_for_candidate(const candidate_idx: Integer;
+        const context_width: Integer; out evidence_score: Integer): Boolean;
+    var
+        evidence_idx: Integer;
+        candidate_pinyin: string;
+    begin
+        evidence_score := 0;
+        Result := False;
+        if (candidate_idx < 0) or (candidate_idx > High(completions)) then
+        begin
+            Exit;
+        end;
+        candidate_pinyin := normalize_pinyin_text(
+            completions[candidate_idx].full_pinyin);
+        for evidence_idx := 0 to High(competition_evidence) do
+        begin
+            if (competition_evidence[evidence_idx].context_width <>
+                context_width) or
+                (not SameText(competition_evidence[evidence_idx].text,
+                completions[candidate_idx].text)) or
+                (not SameText(normalize_pinyin_text(
+                competition_evidence[evidence_idx].full_pinyin),
+                candidate_pinyin)) then
+            begin
+                Continue;
+            end;
+            if (not Result) or
+                (competition_evidence[evidence_idx].evidence_score >
+                evidence_score) then
+            begin
+                evidence_score :=
+                    competition_evidence[evidence_idx].evidence_score;
+                Result := True;
+            end;
+        end;
+    end;
 
     function has_stronger_general_anchor(const cold_idx: Integer): Boolean;
     var
@@ -5208,13 +5360,34 @@ begin
     begin
         Exit;
     end;
+    compact_query := normalize_pinyin_text(query_text);
+    if (m_completion_feedback_origin_prefix <> '') and
+        (not compact_query.StartsWith(
+        m_completion_feedback_origin_prefix, True)) then
+    begin
+        clear_one_key_completion_feedback_target;
+    end;
+    // Continuing beyond the previously suggested full spelling is an
+    // unambiguous local rejection of that prefix-to-completion relation. It is
+    // learned separately from ordinary user words and recorded only once,
+    // because the rejected completion is no longer current on the next key.
+    if (previous_completion.source in [okcs_base_exact, okcs_transition]) and
+        (previous_query_prefix <> '') and
+        compact_query.StartsWith(previous_query_prefix, True) and
+        (Length(compact_query) > Length(previous_query_prefix)) and
+        (not previous_completion.full_pinyin.StartsWith(compact_query, True)) then
+    begin
+        m_dictionary.record_one_key_completion_reject(
+            previous_query_prefix, previous_completion.full_pinyin,
+            previous_completion.text);
+        m_completion_feedback_origin_prefix := previous_query_prefix;
+    end;
+
     if (not m_dictionary.lookup_one_key_completions(query_text,
         completions)) or (Length(completions) = 0) then
     begin
         Exit;
     end;
-
-    compact_query := normalize_pinyin_text(query_text);
 
     // User completions are already reduced to their best relation by the
     // dictionary and remain an absolute priority class.
@@ -5529,6 +5702,14 @@ begin
             feedback_bonus := Min(feedback_bonus,
                 c_completion_feedback_cap);
             Inc(scores[idx], feedback_bonus);
+        end;
+        if completions[idx].feedback_reject_count > 0 then
+        begin
+            reject_penalty := c_completion_reject_base +
+                ((Min(completions[idx].feedback_reject_count, 9) - 1) *
+                c_completion_reject_step);
+            reject_penalty := Min(reject_penalty, c_completion_reject_cap);
+            Dec(scores[idx], reject_penalty);
         end;
 
         if remaining_units > 2 then
@@ -5886,6 +6067,110 @@ begin
         end;
     end;
 
+    // Resolve the settled Top-K in one completion-specific comparison stage.
+    // The model was trained on benchmark-excluded novel/chat candidate dumps
+    // and can abstain independently for hot exact words, cold vertical words,
+    // and transition candidates. It never changes the candidate pool.
+    if (context_value <> '') and has_char_lm and (best_idx >= 0) and
+        (eligible_count > 1) then
+    begin
+        difference_best_idx := -1;
+        difference_best_score := -MaxDouble;
+        for difference_idx := 0 to High(completions) do
+        begin
+            if (difference_idx = best_idx) or
+                (not eligible[difference_idx]) then
+            begin
+                Continue;
+            end;
+            // An explicitly accepted relation is only challenged by an equal
+            // or stronger relation-local preference.
+            if completions[best_idx].feedback_count >
+                completions[difference_idx].feedback_count then
+            begin
+                Continue;
+            end;
+            difference_score := one_key_completion_difference_score(
+                context_value, compact_query, completions[difference_idx],
+                completions[best_idx], char_lm_scores[difference_idx],
+                char_lm_scores[best_idx], Length(syllables));
+            if (difference_best_idx < 0) or
+                (difference_score > difference_best_score) then
+            begin
+                difference_best_idx := difference_idx;
+                difference_best_score := difference_score;
+            end;
+        end;
+        if difference_best_idx >= 0 then
+        begin
+            difference_category := one_key_completion_difference_category(
+                completions[best_idx], completions[difference_best_idx]);
+            difference_threshold := one_key_completion_difference_threshold(
+                difference_category);
+            if difference_best_score >= difference_threshold then
+            begin
+                // The previous prompt already survived the ordinary
+                // hysteresis stage. A learned challenger needs a little extra
+                // confidence to replace it on the next key.
+                if (best_idx <> previous_idx) or
+                    (difference_best_score >= difference_threshold +
+                    c_completion_difference_hysteresis_margin) then
+                begin
+                    best_idx := difference_best_idx;
+                end;
+            end;
+        end;
+    end;
+
+    // The final completion-only listwise model sees the settled internal
+    // Top-K as one ranking group. It was trained on independent novel, chat,
+    // and general Chinese corpora and uses conservative ambiguity-specific
+    // abstention thresholds. No candidates are generated at this stage.
+    if (context_value <> '') and has_char_lm and (best_idx >= 0) and
+        (eligible_count > 1) then
+    begin
+        topk_best_idx := best_idx;
+        topk_current_score := one_key_completion_topk_score(
+            context_value, compact_query, completions[best_idx],
+            char_lm_scores[best_idx], Length(syllables), best_idx + 1);
+        topk_best_score := topk_current_score;
+        for topk_idx := 0 to High(completions) do
+        begin
+            if (topk_idx = best_idx) or (not eligible[topk_idx]) then
+            begin
+                Continue;
+            end;
+            if completions[best_idx].feedback_count >
+                completions[topk_idx].feedback_count then
+            begin
+                Continue;
+            end;
+            topk_score := one_key_completion_topk_score(
+                context_value, compact_query, completions[topk_idx],
+                char_lm_scores[topk_idx], Length(syllables), topk_idx + 1);
+            if topk_score > topk_best_score then
+            begin
+                topk_best_idx := topk_idx;
+                topk_best_score := topk_score;
+            end;
+        end;
+        if topk_best_idx <> best_idx then
+        begin
+            topk_category := one_key_completion_difference_category(
+                completions[best_idx], completions[topk_best_idx]);
+            topk_threshold := one_key_completion_topk_threshold(topk_category);
+            if (best_idx = previous_idx) and (previous_idx >= 0) then
+            begin
+                topk_threshold := topk_threshold +
+                    c_completion_topk_hysteresis_margin;
+            end;
+            if topk_best_score - topk_current_score >= topk_threshold then
+            begin
+                best_idx := topk_best_idx;
+            end;
+        end;
+    end;
+
     // best_idx may have changed through the baseline guard or hysteresis.
     // Recompute its actual runner-up before applying ambiguity abstention.
     second_idx := -1;
@@ -5935,6 +6220,159 @@ begin
         end;
     end;
 
+    // Audit the final choice against corpus evidence keyed by the actual
+    // context suffix, typed prefix, completion spelling, and completion text.
+    // The most specific available context is decisive: weak evidence abstains
+    // instead of falling through to a broader prior. Only the settled internal
+    // Top-5 is considered, so this stage cannot generate or expose candidates.
+    if (context_value <> '') and (best_idx >= 0) and (eligible_count > 1) and
+        m_dictionary.lookup_one_key_completion_competition(compact_query,
+        context_value, competition_evidence) then
+    begin
+        for competition_width := 4 downto 0 do
+        begin
+            competition_has_evidence := False;
+            competition_best_idx := -1;
+            competition_best_score := 0;
+            competition_candidate_count := 0;
+            for competition_candidate_idx := 0 to High(completions) do
+            begin
+                if not eligible[competition_candidate_idx] then
+                begin
+                    Continue;
+                end;
+                Inc(competition_candidate_count);
+                if competition_candidate_count >
+                    c_completion_competition_top_k then
+                begin
+                    Break;
+                end;
+                if not competition_score_for_candidate(
+                    competition_candidate_idx, competition_width,
+                    competition_candidate_score) then
+                begin
+                    Continue;
+                end;
+                competition_has_evidence := True;
+                if (competition_best_idx < 0) or
+                    (competition_candidate_score > competition_best_score) or
+                    ((competition_candidate_score = competition_best_score) and
+                    (competition_candidate_idx < competition_best_idx)) then
+                begin
+                    competition_best_idx := competition_candidate_idx;
+                    competition_best_score := competition_candidate_score;
+                end;
+            end;
+            if not competition_has_evidence then
+            begin
+                Continue;
+            end;
+
+            competition_current_score := 0;
+            competition_score_for_candidate(best_idx, competition_width,
+                competition_current_score);
+            if (competition_best_idx = best_idx) or
+                (competition_best_idx < 0) or
+                (completions[best_idx].feedback_count >
+                completions[competition_best_idx].feedback_count) then
+            begin
+                Break;
+            end;
+
+            case competition_width of
+                2, 3, 4:
+                begin
+                    competition_margin :=
+                        c_completion_competition_score_scale div 2;
+                    competition_ratio_left := 4;
+                    competition_ratio_right := 5;
+                end;
+                1:
+                begin
+                    competition_margin :=
+                        c_completion_competition_score_scale;
+                    competition_ratio_left := 2;
+                    competition_ratio_right := 3;
+                end;
+            else
+                competition_margin :=
+                    c_completion_competition_score_scale * 2;
+                competition_ratio_left := 4;
+                competition_ratio_right := 5;
+            end;
+            if (competition_best_score - competition_current_score >=
+                competition_margin) and
+                ((competition_best_score +
+                c_completion_competition_score_scale div 4) *
+                competition_ratio_left >=
+                (competition_current_score +
+                c_completion_competition_score_scale div 4) *
+                competition_ratio_right) then
+            begin
+                best_idx := competition_best_idx;
+            end;
+            Break;
+        end;
+    end;
+
+    // The final pair audit compares the settled choice with the existing
+    // internal Top-5. It can switch only when independently trained evidence
+    // strongly prefers that exact ordered pair in the matching context. It
+    // never generates a candidate and never overrides a stronger user choice.
+    if (best_idx >= 0) and (eligible_count > 1) then
+    begin
+        pair_best_idx := -1;
+        pair_best_width := -1;
+        pair_best_confidence := -1;
+        pair_best_observations := -1;
+        pair_candidate_count := 0;
+        for pair_candidate_idx := 0 to High(completions) do
+        begin
+            if not eligible[pair_candidate_idx] then
+            begin
+                Continue;
+            end;
+            Inc(pair_candidate_count);
+            if pair_candidate_count > c_completion_competition_top_k then
+            begin
+                Break;
+            end;
+            if (pair_candidate_idx = best_idx) or
+                (completions[best_idx].feedback_count >
+                completions[pair_candidate_idx].feedback_count) or
+                (not m_dictionary.lookup_one_key_completion_pair_audit(
+                compact_query, context_value,
+                completions[best_idx].full_pinyin,
+                completions[best_idx].text,
+                completions[pair_candidate_idx].full_pinyin,
+                completions[pair_candidate_idx].text, pair_audit)) or
+                (pair_audit.decision <> -1) then
+            begin
+                Continue;
+            end;
+            pair_confidence := 1000 - pair_audit.confidence_milli;
+            pair_observations := pair_audit.keep_count +
+                pair_audit.switch_count;
+            if (pair_best_idx < 0) or
+                (pair_audit.context_width > pair_best_width) or
+                ((pair_audit.context_width = pair_best_width) and
+                (pair_confidence > pair_best_confidence)) or
+                ((pair_audit.context_width = pair_best_width) and
+                (pair_confidence = pair_best_confidence) and
+                (pair_observations > pair_best_observations)) then
+            begin
+                pair_best_idx := pair_candidate_idx;
+                pair_best_width := pair_audit.context_width;
+                pair_best_confidence := pair_confidence;
+                pair_best_observations := pair_observations;
+            end;
+        end;
+        if pair_best_idx >= 0 then
+        begin
+            best_idx := pair_best_idx;
+        end;
+    end;
+
     m_one_key_completion := completions[best_idx];
     m_one_key_completion_query_prefix := compact_query;
     m_one_key_completion_score := scores[best_idx];
@@ -5960,6 +6398,16 @@ begin
     begin
         m_dictionary.record_one_key_completion_accept(
             m_one_key_completion_query_prefix, completion_pinyin,
+            completion_text);
+    end;
+    if SameText(m_completion_feedback_origin_prefix,
+        m_one_key_completion_query_prefix) then
+    begin
+        clear_one_key_completion_feedback_target;
+    end
+    else
+    begin
+        record_one_key_completion_feedback_target(completion_pinyin,
             completion_text);
     end;
 
@@ -184114,6 +184562,14 @@ begin
     else if commit_segment_text <> '' then
     begin
         append_path_segment(commit_segment_text);
+    end;
+    if fuzzy_commit_choice then
+    begin
+        clear_one_key_completion_feedback_target;
+    end
+    else
+    begin
+        record_one_key_completion_feedback_target(full_pinyin, commit_text);
     end;
     if m_dictionary <> nil then
     begin

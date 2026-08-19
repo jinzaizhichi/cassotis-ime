@@ -14,14 +14,14 @@ uses
 type
     TncImportMode = (imBaseDict, imQueryPathPrior, imLmTransition, imCharLm,
         imCharReverseLm, imTransitionCompletion, imCompletionPrior,
-        imCompletionLookup);
+        imCompletionLookup, imCompletionCompetition, imCompletionPairAudit);
 
 const
     c_segment_path_separator = #3;
 
 procedure print_usage;
 begin
-    Writeln('Usage: cassotis_ime_dict_init <db_path> <schema_path> [import_path] [base|query_path|lm_transition|char_lm|char_reverse_lm|transition_completion|completion_prior|completion_lookup]');
+    Writeln('Usage: cassotis_ime_dict_init <db_path> <schema_path> [import_path] [base|query_path|lm_transition|char_lm|char_reverse_lm|transition_completion|completion_prior|completion_lookup|completion_competition|completion_pair_audit]');
     Writeln('       cassotis_ime_dict_init <db_path> <schema_path> --build-contains-index');
 end;
 
@@ -217,6 +217,101 @@ begin
         (rank_order >= 0) and (rank_order < 32);
 end;
 
+function split_completion_competition_line(const line: string;
+    out context_width: Integer; out context_suffix: string;
+    out typed_prefix: string; out full_pinyin: string; out text: string;
+    out evidence_score: Integer; out occurrence_count: Integer;
+    out source_count: Integer): Boolean;
+var
+    parts: TArray<string>;
+begin
+    Result := False;
+    context_width := -1;
+    context_suffix := '';
+    typed_prefix := '';
+    full_pinyin := '';
+    text := '';
+    evidence_score := 0;
+    occurrence_count := 0;
+    source_count := 0;
+    parts := line.Split([#9]);
+    if Length(parts) <> 8 then
+    begin
+        Exit;
+    end;
+    context_width := StrToIntDef(Trim(parts[0]), -1);
+    context_suffix := Trim(parts[1]);
+    typed_prefix := Trim(parts[2]);
+    full_pinyin := Trim(parts[3]);
+    text := Trim(parts[4]);
+    evidence_score := StrToIntDef(Trim(parts[5]), 0);
+    occurrence_count := StrToIntDef(Trim(parts[6]), 0);
+    source_count := StrToIntDef(Trim(parts[7]), 0);
+    Result := (context_width >= 0) and (context_width <= 4) and
+        (((context_width = 0) and (context_suffix = '')) or
+        ((context_width > 0) and (context_suffix <> ''))) and
+        (typed_prefix <> '') and (full_pinyin <> '') and (text <> '') and
+        (evidence_score > 0) and (occurrence_count > 0) and
+        (source_count > 0) and (source_count <= 16);
+end;
+
+function split_completion_pair_audit_line(const line: string;
+    out context_width: Integer; out context_suffix: string;
+    out typed_prefix: string; out baseline_full_pinyin: string;
+    out baseline_text: string; out challenger_full_pinyin: string;
+    out challenger_text: string; out pair_decision: Integer;
+    out keep_count: Integer; out switch_count: Integer;
+    out keep_source_count: Integer; out switch_source_count: Integer;
+    out confidence_milli: Integer): Boolean;
+var
+    parts: TArray<string>;
+begin
+    Result := False;
+    context_width := -1;
+    context_suffix := '';
+    typed_prefix := '';
+    baseline_full_pinyin := '';
+    baseline_text := '';
+    challenger_full_pinyin := '';
+    challenger_text := '';
+    pair_decision := -2;
+    keep_count := -1;
+    switch_count := -1;
+    keep_source_count := -1;
+    switch_source_count := -1;
+    confidence_milli := -1;
+    parts := line.Split([#9]);
+    if Length(parts) <> 13 then
+    begin
+        Exit;
+    end;
+    context_width := StrToIntDef(Trim(parts[0]), -1);
+    context_suffix := Trim(parts[1]);
+    typed_prefix := Trim(parts[2]);
+    baseline_full_pinyin := Trim(parts[3]);
+    baseline_text := Trim(parts[4]);
+    challenger_full_pinyin := Trim(parts[5]);
+    challenger_text := Trim(parts[6]);
+    pair_decision := StrToIntDef(Trim(parts[7]), -2);
+    keep_count := StrToIntDef(Trim(parts[8]), -1);
+    switch_count := StrToIntDef(Trim(parts[9]), -1);
+    keep_source_count := StrToIntDef(Trim(parts[10]), -1);
+    switch_source_count := StrToIntDef(Trim(parts[11]), -1);
+    confidence_milli := StrToIntDef(Trim(parts[12]), -1);
+    Result := (context_width >= 0) and (context_width <= 4) and
+        (((context_width = 0) and (context_suffix = '')) or
+        ((context_width > 0) and (context_suffix <> ''))) and
+        (typed_prefix <> '') and (baseline_full_pinyin <> '') and
+        (baseline_text <> '') and (challenger_full_pinyin <> '') and
+        (challenger_text <> '') and (pair_decision >= -1) and
+        (pair_decision <= 1) and
+        (keep_count >= 0) and (switch_count >= 0) and
+        (keep_count + switch_count > 0) and
+        (keep_source_count >= 0) and (keep_source_count <= 16) and
+        (switch_source_count >= 0) and (switch_source_count <= 16) and
+        (confidence_milli >= 0) and (confidence_milli <= 1000);
+end;
+
 function split_char_lm_line(const line: string; out ngram: string;
     out score: Integer; out backoff: Integer): Boolean;
 var
@@ -403,6 +498,14 @@ begin
         begin
             Exit(imCompletionLookup);
         end;
+        if Pos('completion_competition', normalized) > 0 then
+        begin
+            Exit(imCompletionCompetition);
+        end;
+        if Pos('completion_pair_audit', normalized) > 0 then
+        begin
+            Exit(imCompletionPairAudit);
+        end;
         if Pos('char_reverse_lm', normalized) > 0 then
         begin
             Exit(imCharReverseLm);
@@ -444,6 +547,18 @@ begin
         (normalized = 'completion-lookup') then
     begin
         Exit(imCompletionLookup);
+    end;
+
+    if (normalized = 'completion_competition') or
+        (normalized = 'completion-competition') then
+    begin
+        Exit(imCompletionCompetition);
+    end;
+
+    if (normalized = 'completion_pair_audit') or
+        (normalized = 'completion-pair-audit') then
+    begin
+        Exit(imCompletionPairAudit);
     end;
 
     if (normalized = 'char_lm') or (normalized = 'char-lm') or
@@ -651,6 +766,18 @@ const
         'corpus_score, document_score, source_count, path_score, ' +
         'vertical_penalty, layer_kind, prefix_anchored, rank_order) ' +
         'VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13);';
+    insert_completion_competition_sql =
+        'INSERT OR REPLACE INTO dict_base_completion_competition' +
+        '(context_width, context_suffix, typed_prefix, full_pinyin, text, ' +
+        'evidence_score, occurrence_count, source_count) ' +
+        'VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8);';
+    insert_completion_pair_audit_sql =
+        'INSERT OR REPLACE INTO dict_base_completion_pair_audit' +
+        '(context_width, context_suffix, typed_prefix, ' +
+        'baseline_full_pinyin, baseline_text, challenger_full_pinyin, ' +
+        'challenger_text, decision, keep_count, switch_count, ' +
+        'keep_source_count, switch_source_count, confidence_milli) ' +
+        'VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13);';
     insert_char_lm_sql =
         'INSERT OR REPLACE INTO dict_base_char_lm(ngram, score, backoff) VALUES (?1, ?2, ?3);';
     insert_char_reverse_lm_sql =
@@ -665,8 +792,13 @@ var
     line: string;
     pinyin: string;
     full_pinyin: string;
+    baseline_full_pinyin: string;
+    baseline_text: string;
+    challenger_full_pinyin: string;
+    challenger_text: string;
     text: string;
     path_text: string;
+    context_suffix: string;
     weight: Integer;
     backoff: Integer;
     corpus_score: Integer;
@@ -678,6 +810,14 @@ var
     popularity_prior: Integer;
     prefix_anchored: Integer;
     rank_order: Integer;
+    context_width: Integer;
+    occurrence_count: Integer;
+    pair_decision: Integer;
+    keep_count: Integer;
+    switch_count: Integer;
+    keep_source_count: Integer;
+    switch_source_count: Integer;
+    confidence_milli: Integer;
     word_id: Integer;
     rc: Integer;
     has_error: Boolean;
@@ -690,6 +830,8 @@ var
     inserted_transition_completions: Integer;
     inserted_completion_priors: Integer;
     inserted_completion_lookups: Integer;
+    inserted_completion_competitions: Integer;
+    inserted_completion_pair_audits: Integer;
     completion_parser: TncPinyinParser;
     jianpin_variants: TArray<string>;
     jianpin_value: string;
@@ -724,6 +866,8 @@ begin
     inserted_transition_completions := 0;
     inserted_completion_priors := 0;
     inserted_completion_lookups := 0;
+    inserted_completion_competitions := 0;
+    inserted_completion_pair_audits := 0;
     try
         if import_mode = imQueryPathPrior then
         begin
@@ -841,6 +985,74 @@ begin
                 Exit;
             end;
             if not conn.prepare(insert_completion_lookup_sql,
+                stmt_query_path) then
+            begin
+                Exit;
+            end;
+        end
+        else if import_mode = imCompletionCompetition then
+        begin
+            if (not conn.exec(
+                'DROP TABLE IF EXISTS dict_base_completion_competition;')) or
+                (not conn.exec(
+                'CREATE TABLE dict_base_completion_competition (' +
+                'context_width INTEGER NOT NULL,' +
+                'context_suffix TEXT NOT NULL,' +
+                'typed_prefix TEXT NOT NULL,' +
+                'full_pinyin TEXT NOT NULL,' +
+                'text TEXT NOT NULL,' +
+                'evidence_score INTEGER NOT NULL DEFAULT 0,' +
+                'occurrence_count INTEGER NOT NULL DEFAULT 0,' +
+                'source_count INTEGER NOT NULL DEFAULT 0,' +
+                'PRIMARY KEY(context_width, context_suffix, typed_prefix, ' +
+                'full_pinyin, text)' +
+                ') WITHOUT ROWID;')) or
+                (not conn.exec(
+                'CREATE INDEX idx_dict_base_completion_competition_query ' +
+                'ON dict_base_completion_competition(typed_prefix, ' +
+                'context_width, context_suffix, evidence_score DESC);')) then
+            begin
+                Exit;
+            end;
+            if not conn.prepare(insert_completion_competition_sql,
+                stmt_query_path) then
+            begin
+                Exit;
+            end;
+        end
+        else if import_mode = imCompletionPairAudit then
+        begin
+            if (not conn.exec(
+                'DROP TABLE IF EXISTS dict_base_completion_pair_audit;')) or
+                (not conn.exec(
+                'CREATE TABLE dict_base_completion_pair_audit (' +
+                'context_width INTEGER NOT NULL,' +
+                'context_suffix TEXT NOT NULL,' +
+                'typed_prefix TEXT NOT NULL,' +
+                'baseline_full_pinyin TEXT NOT NULL,' +
+                'baseline_text TEXT NOT NULL,' +
+                'challenger_full_pinyin TEXT NOT NULL,' +
+                'challenger_text TEXT NOT NULL,' +
+                'decision INTEGER NOT NULL DEFAULT 0,' +
+                'keep_count INTEGER NOT NULL DEFAULT 0,' +
+                'switch_count INTEGER NOT NULL DEFAULT 0,' +
+                'keep_source_count INTEGER NOT NULL DEFAULT 0,' +
+                'switch_source_count INTEGER NOT NULL DEFAULT 0,' +
+                'confidence_milli INTEGER NOT NULL DEFAULT 0,' +
+                'PRIMARY KEY(context_width, context_suffix, typed_prefix, ' +
+                'baseline_full_pinyin, baseline_text, ' +
+                'challenger_full_pinyin, challenger_text)' +
+                ') WITHOUT ROWID;')) or
+                (not conn.exec(
+                'CREATE INDEX idx_dict_base_completion_pair_audit_query ' +
+                'ON dict_base_completion_pair_audit(typed_prefix, ' +
+                'baseline_full_pinyin, baseline_text, ' +
+                'challenger_full_pinyin, challenger_text, ' +
+                'context_width DESC, context_suffix);')) then
+            begin
+                Exit;
+            end;
+            if not conn.prepare(insert_completion_pair_audit_sql,
                 stmt_query_path) then
             begin
                 Exit;
@@ -1040,6 +1252,124 @@ begin
                     Break;
                 end;
                 Inc(inserted_completion_lookups);
+                if (not conn.reset(stmt_query_path)) or
+                    (not conn.clear_bindings(stmt_query_path)) then
+                begin
+                    has_error := True;
+                    Break;
+                end;
+                Continue;
+            end;
+
+            if import_mode = imCompletionCompetition then
+            begin
+                if not split_completion_competition_line(line, context_width,
+                    context_suffix, pinyin, full_pinyin, text, weight,
+                    occurrence_count, source_count) then
+                begin
+                    Continue;
+                end;
+                pinyin := normalize_compact_pinyin_key(pinyin);
+                full_pinyin := normalize_pinyin_key(full_pinyin);
+                compact_full_pinyin := normalize_compact_pinyin_key(
+                    full_pinyin);
+                if (pinyin = '') or (full_pinyin = '') or (text = '') or
+                    (Length(compact_full_pinyin) <= Length(pinyin)) or
+                    (not compact_full_pinyin.StartsWith(pinyin, True)) then
+                begin
+                    Continue;
+                end;
+                if (not conn.bind_int(stmt_query_path, 1, context_width)) or
+                    (not conn.bind_text(stmt_query_path, 2,
+                    context_suffix)) or
+                    (not conn.bind_text(stmt_query_path, 3, pinyin)) or
+                    (not conn.bind_text(stmt_query_path, 4, full_pinyin)) or
+                    (not conn.bind_text(stmt_query_path, 5, text)) or
+                    (not conn.bind_int(stmt_query_path, 6, weight)) or
+                    (not conn.bind_int(stmt_query_path, 7,
+                    occurrence_count)) or
+                    (not conn.bind_int(stmt_query_path, 8,
+                    source_count)) then
+                begin
+                    has_error := True;
+                    Break;
+                end;
+                rc := conn.step(stmt_query_path);
+                if rc <> SQLITE_DONE then
+                begin
+                    has_error := True;
+                    Break;
+                end;
+                Inc(inserted_completion_competitions);
+                if (not conn.reset(stmt_query_path)) or
+                    (not conn.clear_bindings(stmt_query_path)) then
+                begin
+                    has_error := True;
+                    Break;
+                end;
+                Continue;
+            end;
+
+            if import_mode = imCompletionPairAudit then
+            begin
+                if not split_completion_pair_audit_line(line, context_width,
+                    context_suffix, pinyin, baseline_full_pinyin,
+                    baseline_text, challenger_full_pinyin, challenger_text,
+                    pair_decision, keep_count, switch_count,
+                    keep_source_count, switch_source_count,
+                    confidence_milli) then
+                begin
+                    Continue;
+                end;
+                pinyin := normalize_compact_pinyin_key(pinyin);
+                baseline_full_pinyin := normalize_compact_pinyin_key(
+                    baseline_full_pinyin);
+                challenger_full_pinyin := normalize_compact_pinyin_key(
+                    challenger_full_pinyin);
+                if (pinyin = '') or (baseline_full_pinyin = '') or
+                    (challenger_full_pinyin = '') or
+                    (not baseline_full_pinyin.StartsWith(pinyin, True)) or
+                    (not challenger_full_pinyin.StartsWith(pinyin, True)) or
+                    (Length(baseline_full_pinyin) <= Length(pinyin)) or
+                    (Length(challenger_full_pinyin) <= Length(pinyin)) then
+                begin
+                    Continue;
+                end;
+                if (not conn.bind_int(stmt_query_path, 1,
+                    context_width)) or
+                    (not conn.bind_text(stmt_query_path, 2,
+                    context_suffix)) or
+                    (not conn.bind_text(stmt_query_path, 3, pinyin)) or
+                    (not conn.bind_text(stmt_query_path, 4,
+                    baseline_full_pinyin)) or
+                    (not conn.bind_text(stmt_query_path, 5,
+                    baseline_text)) or
+                    (not conn.bind_text(stmt_query_path, 6,
+                    challenger_full_pinyin)) or
+                    (not conn.bind_text(stmt_query_path, 7,
+                    challenger_text)) or
+                    (not conn.bind_int(stmt_query_path, 8,
+                    pair_decision)) or
+                    (not conn.bind_int(stmt_query_path, 9, keep_count)) or
+                    (not conn.bind_int(stmt_query_path, 10,
+                    switch_count)) or
+                    (not conn.bind_int(stmt_query_path, 11,
+                    keep_source_count)) or
+                    (not conn.bind_int(stmt_query_path, 12,
+                    switch_source_count)) or
+                    (not conn.bind_int(stmt_query_path, 13,
+                    confidence_milli)) then
+                begin
+                    has_error := True;
+                    Break;
+                end;
+                rc := conn.step(stmt_query_path);
+                if rc <> SQLITE_DONE then
+                begin
+                    has_error := True;
+                    Break;
+                end;
+                Inc(inserted_completion_pair_audits);
                 if (not conn.reset(stmt_query_path)) or
                     (not conn.clear_bindings(stmt_query_path)) then
                 begin
@@ -1279,6 +1609,18 @@ begin
             Writeln(Format(
                 'Imported %d exact completion lookup rows from %d lines.',
                 [inserted_completion_lookups, line_count]));
+        end
+        else if import_mode = imCompletionCompetition then
+        begin
+            Writeln(Format(
+                'Imported %d completion competition rows from %d lines.',
+                [inserted_completion_competitions, line_count]));
+        end
+        else if import_mode = imCompletionPairAudit then
+        begin
+            Writeln(Format(
+                'Imported %d completion pair audit rows from %d lines.',
+                [inserted_completion_pair_audits, line_count]));
         end
         else
         begin

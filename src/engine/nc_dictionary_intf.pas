@@ -18,7 +18,17 @@ type
             out results: TncCandidateList): Boolean; virtual;
         function lookup_one_key_completions(const pinyin_prefix: string;
             out results: TncOneKeyCompletionList): Boolean; virtual;
+        function lookup_one_key_completion_competition(
+            const pinyin_prefix: string; const left_context: string;
+            out results: TncOneKeyCompletionCompetitionEvidenceList): Boolean; virtual;
+        function lookup_one_key_completion_pair_audit(
+            const pinyin_prefix, left_context: string;
+            const baseline_full_pinyin, baseline_text: string;
+            const challenger_full_pinyin, challenger_text: string;
+            out audit: TncOneKeyCompletionPairAudit): Boolean; virtual;
         procedure record_one_key_completion_accept(const typed_prefix: string;
+            const full_pinyin: string; const text: string); virtual;
+        procedure record_one_key_completion_reject(const typed_prefix: string;
             const full_pinyin: string; const text: string); virtual;
         function lookup_fuzzy_full_pinyin(const pinyin: string;
             out results: TncCandidateList): Boolean; virtual;
@@ -120,7 +130,30 @@ begin
     Result := False;
 end;
 
+function TncDictionaryProvider.lookup_one_key_completion_competition(
+    const pinyin_prefix: string; const left_context: string;
+    out results: TncOneKeyCompletionCompetitionEvidenceList): Boolean;
+begin
+    SetLength(results, 0);
+    Result := False;
+end;
+
+function TncDictionaryProvider.lookup_one_key_completion_pair_audit(
+    const pinyin_prefix, left_context: string;
+    const baseline_full_pinyin, baseline_text: string;
+    const challenger_full_pinyin, challenger_text: string;
+    out audit: TncOneKeyCompletionPairAudit): Boolean;
+begin
+    audit := Default(TncOneKeyCompletionPairAudit);
+    Result := False;
+end;
+
 procedure TncDictionaryProvider.record_one_key_completion_accept(
+    const typed_prefix: string; const full_pinyin: string; const text: string);
+begin
+end;
+
+procedure TncDictionaryProvider.record_one_key_completion_reject(
     const typed_prefix: string; const full_pinyin: string; const text: string);
 begin
 end;

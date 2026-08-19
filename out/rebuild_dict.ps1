@@ -228,6 +228,10 @@ $lexicon_completion_prior_sc = Join-Path $lexicon_root 'data\generated\dict_comp
 $lexicon_completion_prior_tc = Join-Path $lexicon_root 'data\generated\dict_completion_prior_tc.txt'
 $lexicon_completion_lookup_sc = Join-Path $lexicon_root 'data\generated\dict_completion_lookup_sc.txt'
 $lexicon_completion_lookup_tc = Join-Path $lexicon_root 'data\generated\dict_completion_lookup_tc.txt'
+$lexicon_completion_competition_sc = Join-Path $lexicon_root 'data\generated\dict_completion_competition_sc.txt'
+$lexicon_completion_competition_tc = Join-Path $lexicon_root 'data\generated\dict_completion_competition_tc.txt'
+$lexicon_completion_pair_audit_sc = Join-Path $lexicon_root 'data\generated\dict_completion_pair_audit_sc.txt'
+$lexicon_completion_pair_audit_tc = Join-Path $lexicon_root 'data\generated\dict_completion_pair_audit_tc.txt'
 $lexicon_char_lm_sc = Join-Path $lexicon_root 'data\generated\dict_char_lm_sc.txt'
 $lexicon_char_lm_tc = Join-Path $lexicon_root 'data\generated\dict_char_lm_tc.txt'
 $lexicon_char_reverse_lm_sc = Join-Path $lexicon_root 'data\generated\dict_char_reverse_lm_sc.txt'
@@ -347,6 +351,34 @@ try {
         }
         else {
             Write-Warning "Exact completion lookup files not found under lexicon data/generated; skipping import."
+        }
+
+        if ((Test-Path -LiteralPath $lexicon_completion_competition_sc) -and
+            (Test-Path -LiteralPath $lexicon_completion_competition_tc)) {
+            Write-Host ("Importing lexicon completion competition evidence from: " + $lexicon_completion_competition_sc)
+            invoke_tool 'cassotis_ime_dict_init (lexicon completion competition sc)' $dict_init @(
+                $base_db_sc_path, $schema_path, $lexicon_completion_competition_sc, 'completion_competition')
+
+            Write-Host ("Importing lexicon completion competition evidence from: " + $lexicon_completion_competition_tc)
+            invoke_tool 'cassotis_ime_dict_init (lexicon completion competition tc)' $dict_init @(
+                $base_db_tc_path, $schema_path, $lexicon_completion_competition_tc, 'completion_competition')
+        }
+        else {
+            Write-Warning "Completion competition evidence files not found under lexicon data/generated; skipping import."
+        }
+
+        if ((Test-Path -LiteralPath $lexicon_completion_pair_audit_sc) -and
+            (Test-Path -LiteralPath $lexicon_completion_pair_audit_tc)) {
+            Write-Host ("Importing completion pair audit evidence from: " + $lexicon_completion_pair_audit_sc)
+            invoke_tool 'cassotis_ime_dict_init (completion pair audit sc)' $dict_init @(
+                $base_db_sc_path, $schema_path, $lexicon_completion_pair_audit_sc, 'completion_pair_audit')
+
+            Write-Host ("Importing completion pair audit evidence from: " + $lexicon_completion_pair_audit_tc)
+            invoke_tool 'cassotis_ime_dict_init (completion pair audit tc)' $dict_init @(
+                $base_db_tc_path, $schema_path, $lexicon_completion_pair_audit_tc, 'completion_pair_audit')
+        }
+        else {
+            Write-Warning "Completion pair audit evidence files not found under lexicon data/generated; skipping import."
         }
 
         if (Test-Path -LiteralPath $lexicon_char_lm_sc) {

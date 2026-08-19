@@ -75,11 +75,33 @@ type
         vertical_layer_kind: Integer;
         has_popularity_prior: Boolean;
         feedback_count: Integer;
+        feedback_reject_count: Integer;
         prefix_anchored: Boolean;
         source: TncOneKeyCompletionSource;
     end;
 
     TncOneKeyCompletionList = array of TncOneKeyCompletion;
+
+    TncOneKeyCompletionCompetitionEvidence = record
+        context_width: Integer;
+        text: string;
+        full_pinyin: string;
+        evidence_score: Integer;
+        occurrence_count: Integer;
+        source_count: Integer;
+    end;
+
+    TncOneKeyCompletionCompetitionEvidenceList =
+        array of TncOneKeyCompletionCompetitionEvidence;
+
+    TncOneKeyCompletionPairAudit = record
+        available: Boolean;
+        context_width: Integer;
+        decision: Integer;
+        keep_count: Integer;
+        switch_count: Integer;
+        confidence_milli: Integer;
+    end;
 
     TncPairPathEvidence = record
         encoded_path: string;

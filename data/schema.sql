@@ -1,11 +1,11 @@
--- cassotis ime sqlite schema v18
+-- cassotis ime sqlite schema v21
 
 CREATE TABLE IF NOT EXISTS meta (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL
 );
 
-INSERT OR IGNORE INTO meta(key, value) VALUES('schema_version', '18');
+INSERT OR IGNORE INTO meta(key, value) VALUES('schema_version', '21');
 
 CREATE TABLE IF NOT EXISTS dict_base (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -54,6 +54,47 @@ CREATE TABLE IF NOT EXISTS dict_base_completion_lookup (
 
 CREATE INDEX IF NOT EXISTS idx_dict_base_completion_lookup_prefix
     ON dict_base_completion_lookup(typed_prefix, rank_order);
+
+CREATE TABLE IF NOT EXISTS dict_base_completion_competition (
+    context_width INTEGER NOT NULL,
+    context_suffix TEXT NOT NULL,
+    typed_prefix TEXT NOT NULL,
+    full_pinyin TEXT NOT NULL,
+    text TEXT NOT NULL,
+    evidence_score INTEGER NOT NULL DEFAULT 0,
+    occurrence_count INTEGER NOT NULL DEFAULT 0,
+    source_count INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY(context_width, context_suffix, typed_prefix, full_pinyin, text)
+) WITHOUT ROWID;
+
+CREATE INDEX IF NOT EXISTS idx_dict_base_completion_competition_query
+    ON dict_base_completion_competition(
+        typed_prefix, context_width, context_suffix, evidence_score DESC);
+
+CREATE TABLE IF NOT EXISTS dict_base_completion_pair_audit (
+    context_width INTEGER NOT NULL,
+    context_suffix TEXT NOT NULL,
+    typed_prefix TEXT NOT NULL,
+    baseline_full_pinyin TEXT NOT NULL,
+    baseline_text TEXT NOT NULL,
+    challenger_full_pinyin TEXT NOT NULL,
+    challenger_text TEXT NOT NULL,
+    decision INTEGER NOT NULL DEFAULT 0,
+    keep_count INTEGER NOT NULL DEFAULT 0,
+    switch_count INTEGER NOT NULL DEFAULT 0,
+    keep_source_count INTEGER NOT NULL DEFAULT 0,
+    switch_source_count INTEGER NOT NULL DEFAULT 0,
+    confidence_milli INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY(context_width, context_suffix, typed_prefix,
+        baseline_full_pinyin, baseline_text,
+        challenger_full_pinyin, challenger_text)
+) WITHOUT ROWID;
+
+CREATE INDEX IF NOT EXISTS idx_dict_base_completion_pair_audit_query
+    ON dict_base_completion_pair_audit(
+        typed_prefix, baseline_full_pinyin, baseline_text,
+        challenger_full_pinyin, challenger_text,
+        context_width DESC, context_suffix);
 
 CREATE TABLE IF NOT EXISTS dict_base_pinyin_alias (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -153,6 +194,7 @@ CREATE TABLE IF NOT EXISTS dict_user_completion_feedback (
     full_pinyin TEXT NOT NULL,
     text TEXT NOT NULL,
     accept_count INTEGER DEFAULT 0,
+    reject_count INTEGER DEFAULT 0,
     last_used INTEGER DEFAULT 0,
     PRIMARY KEY(typed_prefix, full_pinyin, text)
 ) WITHOUT ROWID;
