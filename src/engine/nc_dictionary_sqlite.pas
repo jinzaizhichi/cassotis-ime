@@ -133,6 +133,8 @@ type
         m_prefix_lookup_result_cache: TDictionary<string, TncCandidateList>;
         m_one_key_completion_cache:
             TDictionary<string, TncOneKeyCompletionList>;
+        m_long_one_key_completion_cache:
+            TDictionary<string, TncLongOneKeyCompletionList>;
         m_one_key_completion_competition_cache:
             TDictionary<string, TncOneKeyCompletionCompetitionEvidenceList>;
         m_one_key_completion_pair_audit_cache:
@@ -276,6 +278,8 @@ type
             out results: TncCandidateList): Boolean; override;
         function lookup_one_key_completions(const pinyin_prefix: string;
             out results: TncOneKeyCompletionList): Boolean; override;
+        function lookup_long_one_key_completions(const anchor_path: string;
+            out results: TncLongOneKeyCompletionList): Boolean; override;
         function lookup_one_key_completion_competition(
             const pinyin_prefix: string; const left_context: string;
             out results: TncOneKeyCompletionCompetitionEvidenceList): Boolean; override;
@@ -288,6 +292,10 @@ type
             const full_pinyin: string; const text: string); override;
         procedure record_one_key_completion_reject(const typed_prefix: string;
             const full_pinyin: string; const text: string); override;
+        procedure record_long_one_key_completion_accept(
+            const anchor_path, suffix_text: string); override;
+        procedure record_long_one_key_completion_reject(
+            const anchor_path, suffix_text: string); override;
         function lookup_fuzzy_full_pinyin(const pinyin: string;
             out results: TncCandidateList): Boolean; override;
         function lookup_fuzzy_full_pinyin_bounded(const pinyin: string;
@@ -379,7 +387,7 @@ const
         '    value TEXT NOT NULL' + sLineBreak +
         ');' + sLineBreak +
         sLineBreak +
-        'INSERT OR IGNORE INTO meta(key, value) VALUES(''schema_version'', ''21'');' + sLineBreak +
+        'INSERT OR IGNORE INTO meta(key, value) VALUES(''schema_version'', ''22'');' + sLineBreak +
         sLineBreak +
         'CREATE TABLE IF NOT EXISTS dict_base (' + sLineBreak +
         '    id INTEGER PRIMARY KEY AUTOINCREMENT,' + sLineBreak +
@@ -577,6 +585,19 @@ const
         'ON dict_user_completion_feedback(typed_prefix, accept_count DESC, last_used DESC);' +
         sLineBreak +
         sLineBreak +
+        'CREATE TABLE IF NOT EXISTS dict_user_long_completion_feedback (' + sLineBreak +
+        '    anchor_path TEXT NOT NULL,' + sLineBreak +
+        '    suffix_text TEXT NOT NULL,' + sLineBreak +
+        '    accept_count INTEGER DEFAULT 0,' + sLineBreak +
+        '    reject_count INTEGER DEFAULT 0,' + sLineBreak +
+        '    last_used INTEGER DEFAULT 0,' + sLineBreak +
+        '    PRIMARY KEY(anchor_path, suffix_text)' + sLineBreak +
+        ') WITHOUT ROWID;' + sLineBreak +
+        sLineBreak +
+        'CREATE INDEX IF NOT EXISTS idx_dict_user_long_completion_feedback_anchor ' +
+        'ON dict_user_long_completion_feedback(anchor_path, accept_count DESC, last_used DESC);' +
+        sLineBreak +
+        sLineBreak +
         'CREATE TABLE IF NOT EXISTS dict_user_penalty (' + sLineBreak +
         '    pinyin TEXT NOT NULL,' + sLineBreak +
         '    text TEXT NOT NULL,' + sLineBreak +
@@ -664,6 +685,20 @@ const
         sLineBreak +
         'CREATE INDEX IF NOT EXISTS idx_dict_base_transition_completion_prefix ' +
         'ON dict_base_transition_completion(typed_prefix, evidence DESC);' +
+        sLineBreak +
+        sLineBreak +
+        'CREATE TABLE IF NOT EXISTS dict_base_long_completion (' + sLineBreak +
+        '    anchor_path TEXT NOT NULL,' + sLineBreak +
+        '    suffix_pinyin TEXT NOT NULL,' + sLineBreak +
+        '    suffix_text TEXT NOT NULL,' + sLineBreak +
+        '    suffix_path TEXT NOT NULL,' + sLineBreak +
+        '    evidence INTEGER NOT NULL DEFAULT 0,' + sLineBreak +
+        '    source_count INTEGER NOT NULL DEFAULT 0,' + sLineBreak +
+        '    PRIMARY KEY(anchor_path, suffix_pinyin, suffix_text)' + sLineBreak +
+        ') WITHOUT ROWID;' + sLineBreak +
+        sLineBreak +
+        'CREATE INDEX IF NOT EXISTS idx_dict_base_long_completion_anchor ' +
+        'ON dict_base_long_completion(anchor_path, evidence DESC, source_count DESC);' +
         sLineBreak +
         sLineBreak +
         'CREATE TABLE IF NOT EXISTS dict_base_char_lm (' + sLineBreak +
@@ -2483,6 +2518,8 @@ begin
     m_prefix_lookup_result_cache := TDictionary<string, TncCandidateList>.Create;
     m_one_key_completion_cache :=
         TDictionary<string, TncOneKeyCompletionList>.Create;
+    m_long_one_key_completion_cache :=
+        TDictionary<string, TncLongOneKeyCompletionList>.Create;
     m_one_key_completion_competition_cache :=
         TDictionary<string, TncOneKeyCompletionCompetitionEvidenceList>.Create;
     m_one_key_completion_pair_audit_cache :=
@@ -2712,6 +2749,11 @@ begin
     begin
         m_one_key_completion_cache.Free;
         m_one_key_completion_cache := nil;
+    end;
+    if m_long_one_key_completion_cache <> nil then
+    begin
+        m_long_one_key_completion_cache.Free;
+        m_long_one_key_completion_cache := nil;
     end;
     if m_one_key_completion_competition_cache <> nil then
     begin
@@ -3379,6 +3421,11 @@ const
         'FROM dict_base_transition_completion ' +
         'WHERE typed_prefix = ?1 AND evidence > 0 ' +
         'ORDER BY evidence DESC, length(text) ASC, text ASC LIMIT ?2';
+    transition_completion_partial_sql =
+        'SELECT full_pinyin, text, path_text, evidence ' +
+        'FROM dict_base_transition_completion ' +
+        'WHERE typed_prefix >= ?1 AND typed_prefix < ?2 AND evidence > 0 ' +
+        'ORDER BY evidence DESC, length(text) ASC, text ASC LIMIT ?3';
     feedback_sql =
         'SELECT full_pinyin, text, accept_count, reject_count ' +
         'FROM dict_user_completion_feedback WHERE typed_prefix = ?1';
@@ -3551,13 +3598,15 @@ var
     var
         candidate_syllables: TArray<string>;
         syllable_idx: Integer;
+        tail_idx: Integer;
+        tail_fragment: string;
     begin
         candidate_compact_pinyin := normalize_compact_pinyin_key(
             candidate_pinyin);
         candidate_syllables := split_full_pinyin_syllables(
             normalize_canonical_pinyin_key(candidate_pinyin));
         Result :=
-            (Length(candidate_syllables) > Length(prefix_syllables)) and
+            (Length(candidate_syllables) > 0) and
             (Length(candidate_compact_pinyin) > Length(compact_prefix)) and
             candidate_compact_pinyin.StartsWith(compact_prefix, True) and
             (get_text_unit_count_local(candidate_text) =
@@ -3568,12 +3617,32 @@ var
         end;
         for syllable_idx := 0 to High(prefix_syllables) do
         begin
-            if not SameText(prefix_syllables[syllable_idx],
+            if (syllable_idx <= High(candidate_syllables)) and
+                SameText(prefix_syllables[syllable_idx],
                 candidate_syllables[syllable_idx]) then
             begin
-                Exit(False);
+                Continue;
             end;
+
+            // The parser may interpret an unfinished tail as another valid
+            // syllable (li) or as two short syllables (li/a), although the
+            // user is still typing liao. Rejoin only a short final fragment;
+            // longer complete syllables such as xian remain strict boundaries.
+            tail_fragment := '';
+            for tail_idx := syllable_idx to High(prefix_syllables) do
+            begin
+                tail_fragment := tail_fragment + prefix_syllables[tail_idx];
+            end;
+            Result := (syllable_idx <= High(candidate_syllables)) and
+                (Length(tail_fragment) >= 1) and
+                (Length(tail_fragment) <= 3) and
+                (Length(tail_fragment) <
+                Length(candidate_syllables[syllable_idx])) and
+                candidate_syllables[syllable_idx].StartsWith(tail_fragment,
+                True);
+            Exit;
         end;
+        Result := Length(candidate_syllables) > Length(prefix_syllables);
     end;
 
     function transition_prefix_is_exact_boundary(
@@ -3935,38 +4004,97 @@ var
         candidate_text: string;
         candidate_path: string;
         evidence: Integer;
-    begin
-        stmt := nil;
-        try
-            if (not m_base_connection.prepare(transition_completion_sql,
-                stmt)) or
-                (not m_base_connection.bind_text(stmt, 1, lookup_prefix)) or
-                (not m_base_connection.bind_int(stmt, 2,
-                c_source_result_limit)) then
-            begin
-                Exit;
-            end;
-            step_result := m_base_connection.step(stmt);
-            while step_result = SQLITE_ROW do
-            begin
-                candidate_pinyin := m_base_connection.column_text(stmt, 0);
-                candidate_text := Trim(m_base_connection.column_text(stmt, 1));
-                candidate_path := m_base_connection.column_text(stmt, 2);
-                evidence := m_base_connection.column_int(stmt, 3);
-                consider_candidate(transition_items, candidate_pinyin,
-                    candidate_text, evidence, okcs_transition,
-                    candidate_path,
-                    transition_prefix_is_exact_boundary(candidate_path),
-                    evidence,
-                    -get_text_unit_count_local(candidate_text), 0, 0, 0, 0,
-                    0, 0, 0, False);
+        partial_upper_bound: string;
+        previous_boundary_prefix: string;
+        prefix_idx: Integer;
+        current_boundary_found: Boolean;
+
+        procedure append_query_results(const sql_text: string;
+            const prefix_value, upper_bound_value: string;
+            const range_query: Boolean);
+        begin
+            stmt := nil;
+            try
+                if not m_base_connection.prepare(sql_text, stmt) or
+                    (not m_base_connection.bind_text(stmt, 1,
+                    prefix_value)) then
+                begin
+                    Exit;
+                end;
+                if range_query then
+                begin
+                    if (upper_bound_value = '') or
+                        (not m_base_connection.bind_text(stmt, 2,
+                        upper_bound_value)) or
+                        (not m_base_connection.bind_int(stmt, 3,
+                        c_source_result_limit)) then
+                    begin
+                        Exit;
+                    end;
+                end
+                else if not m_base_connection.bind_int(stmt, 2,
+                    c_source_result_limit) then
+                begin
+                    Exit;
+                end;
+
                 step_result := m_base_connection.step(stmt);
+                while step_result = SQLITE_ROW do
+                begin
+                    candidate_pinyin := m_base_connection.column_text(stmt, 0);
+                    candidate_text := Trim(
+                        m_base_connection.column_text(stmt, 1));
+                    candidate_path := m_base_connection.column_text(stmt, 2);
+                    evidence := m_base_connection.column_int(stmt, 3);
+                    consider_candidate(transition_items, candidate_pinyin,
+                        candidate_text, evidence, okcs_transition,
+                        candidate_path,
+                        transition_prefix_is_exact_boundary(candidate_path),
+                        evidence,
+                        -get_text_unit_count_local(candidate_text), 0, 0, 0,
+                        0, 0, 0, 0, False);
+                    step_result := m_base_connection.step(stmt);
+                end;
+            finally
+                if stmt <> nil then
+                begin
+                    m_base_connection.finalize(stmt);
+                end;
             end;
-        finally
-            if stmt <> nil then
+        end;
+    begin
+        append_query_results(transition_completion_sql, lookup_prefix, '',
+            False);
+        current_boundary_found := Length(transition_items) > 0;
+        // Transition rows are indexed at completed syllable boundaries. If
+        // a short tail can itself be parsed as a complete syllable (ji), the
+        // intended completion may still be anchored at the preceding boundary
+        // (liao + jie). Query that one boundary before looking forward.
+        if (not current_boundary_found) and
+            SameText(lookup_prefix, compact_prefix) and
+            (Length(prefix_syllables) > 1) then
+        begin
+            previous_boundary_prefix := '';
+            for prefix_idx := 0 to High(prefix_syllables) - 1 do
             begin
-                m_base_connection.finalize(stmt);
+                previous_boundary_prefix := previous_boundary_prefix +
+                    prefix_syllables[prefix_idx];
             end;
+            if (previous_boundary_prefix <> '') and
+                (not SameText(previous_boundary_prefix, lookup_prefix)) then
+            begin
+                append_query_results(transition_completion_sql,
+                    previous_boundary_prefix, '', False);
+            end;
+        end;
+        // Also inspect the next indexed boundary for an unfinished tail such
+        // as l, li, or lia. Every returned row is still filtered against the
+        // complete raw key and exact syllable alignment above.
+        if Length(transition_items) = 0 then
+        begin
+            partial_upper_bound := build_prefix_upper_bound(compact_prefix);
+            append_query_results(transition_completion_partial_sql,
+                compact_prefix, partial_upper_bound, True);
         end;
     end;
 
@@ -4159,6 +4287,132 @@ begin
     finally
         exact_prefix_texts.Free;
     end;
+end;
+
+function TncSqliteDictionary.lookup_long_one_key_completions(
+    const anchor_path: string;
+    out results: TncLongOneKeyCompletionList): Boolean;
+const
+    c_result_cache_limit = 2048;
+    c_query_limit = 8;
+    completion_sql =
+        'SELECT suffix_pinyin, suffix_text, suffix_path, evidence, ' +
+        'source_count FROM dict_base_long_completion ' +
+        'WHERE anchor_path = ?1 AND evidence > 0 ' +
+        'ORDER BY evidence DESC, source_count DESC, length(suffix_text), ' +
+        'suffix_text LIMIT ?2';
+    feedback_sql =
+        'SELECT suffix_text, accept_count, reject_count ' +
+        'FROM dict_user_long_completion_feedback WHERE anchor_path = ?1';
+var
+    anchor_key: string;
+    item: TncLongOneKeyCompletion;
+    stmt: Psqlite3_stmt;
+    step_result: Integer;
+    feedback_text: string;
+    feedback_accept_count: Integer;
+    feedback_reject_count: Integer;
+    result_idx: Integer;
+begin
+    SetLength(results, 0);
+    Result := False;
+    anchor_key := Trim(anchor_path);
+    if (anchor_key = '') or (not ensure_open) or (not m_base_ready) or
+        (m_base_connection = nil) then
+    begin
+        Exit;
+    end;
+    refresh_user_data_version_if_changed(False);
+    if (m_long_one_key_completion_cache <> nil) and
+        m_long_one_key_completion_cache.TryGetValue(anchor_key, results) then
+    begin
+        results := Copy(results, 0, Length(results));
+        Exit(Length(results) > 0);
+    end;
+
+    stmt := nil;
+    try
+        if (not m_base_connection.prepare(completion_sql, stmt)) or
+            (not m_base_connection.bind_text(stmt, 1, anchor_key)) or
+            (not m_base_connection.bind_int(stmt, 2, c_query_limit)) then
+        begin
+            Exit;
+        end;
+        step_result := m_base_connection.step(stmt);
+        while step_result = SQLITE_ROW do
+        begin
+            item := Default(TncLongOneKeyCompletion);
+            item.anchor_path := anchor_key;
+            item.suffix_pinyin := m_base_connection.column_text(stmt, 0);
+            item.suffix_text := Trim(m_base_connection.column_text(stmt, 1));
+            item.suffix_path := m_base_connection.column_text(stmt, 2);
+            item.evidence := m_base_connection.column_int(stmt, 3);
+            item.source_count := m_base_connection.column_int(stmt, 4);
+            if (item.suffix_pinyin <> '') and (item.suffix_text <> '') and
+                (item.suffix_path <> '') then
+            begin
+                SetLength(results, Length(results) + 1);
+                results[High(results)] := item;
+            end;
+            step_result := m_base_connection.step(stmt);
+        end;
+    finally
+        if stmt <> nil then
+        begin
+            m_base_connection.finalize(stmt);
+        end;
+    end;
+
+    if (Length(results) > 0) and m_user_ready and
+        (m_user_connection <> nil) then
+    begin
+        stmt := nil;
+        try
+            if m_user_connection.prepare(feedback_sql, stmt) and
+                m_user_connection.bind_text(stmt, 1, anchor_key) then
+            begin
+                step_result := m_user_connection.step(stmt);
+                while step_result = SQLITE_ROW do
+                begin
+                    feedback_text := Trim(
+                        m_user_connection.column_text(stmt, 0));
+                    feedback_accept_count :=
+                        m_user_connection.column_int(stmt, 1);
+                    feedback_reject_count :=
+                        m_user_connection.column_int(stmt, 2);
+                    for result_idx := 0 to High(results) do
+                    begin
+                        if SameText(results[result_idx].suffix_text,
+                            feedback_text) then
+                        begin
+                            results[result_idx].feedback_count :=
+                                feedback_accept_count;
+                            results[result_idx].feedback_reject_count :=
+                                feedback_reject_count;
+                            Break;
+                        end;
+                    end;
+                    step_result := m_user_connection.step(stmt);
+                end;
+            end;
+        finally
+            if stmt <> nil then
+            begin
+                m_user_connection.finalize(stmt);
+            end;
+        end;
+    end;
+
+    if m_long_one_key_completion_cache <> nil then
+    begin
+        if m_long_one_key_completion_cache.Count >= c_result_cache_limit then
+        begin
+            m_long_one_key_completion_cache.Clear;
+        end;
+        m_long_one_key_completion_cache.AddOrSetValue(anchor_key,
+            Copy(results, 0, Length(results)));
+    end;
+    Result := Length(results) > 0;
 end;
 
 function TncSqliteDictionary.lookup_one_key_completion_competition(
@@ -4541,6 +4795,101 @@ begin
         Exit;
     end;
 
+    execute_feedback_sql(update_sql);
+    execute_feedback_sql(insert_sql);
+    note_user_data_changed;
+end;
+
+procedure TncSqliteDictionary.record_long_one_key_completion_accept(
+    const anchor_path, suffix_text: string);
+const
+    update_sql =
+        'UPDATE dict_user_long_completion_feedback SET ' +
+        'accept_count = MIN(accept_count + 1, 1000000), ' +
+        'reject_count = MAX(reject_count - 1, 0), ' +
+        'last_used = strftime(''%s'',''now'') ' +
+        'WHERE anchor_path = ?1 AND suffix_text = ?2';
+    insert_sql =
+        'INSERT OR IGNORE INTO dict_user_long_completion_feedback' +
+        '(anchor_path, suffix_text, accept_count, reject_count, last_used) ' +
+        'VALUES (?1, ?2, 1, 0, strftime(''%s'',''now''))';
+var
+    anchor_key: string;
+    suffix_key: string;
+    stmt: Psqlite3_stmt;
+
+    procedure execute_feedback_sql(const sql_text: string);
+    begin
+        stmt := nil;
+        try
+            if m_user_connection.prepare(sql_text, stmt) and
+                m_user_connection.bind_text(stmt, 1, anchor_key) and
+                m_user_connection.bind_text(stmt, 2, suffix_key) then
+            begin
+                m_user_connection.step(stmt);
+            end;
+        finally
+            if stmt <> nil then
+            begin
+                m_user_connection.finalize(stmt);
+            end;
+        end;
+    end;
+begin
+    anchor_key := Trim(anchor_path);
+    suffix_key := Trim(suffix_text);
+    if (anchor_key = '') or (suffix_key = '') or (not ensure_open) or
+        (not m_user_ready) or (m_user_connection = nil) then
+    begin
+        Exit;
+    end;
+    execute_feedback_sql(update_sql);
+    execute_feedback_sql(insert_sql);
+    note_user_data_changed;
+end;
+
+procedure TncSqliteDictionary.record_long_one_key_completion_reject(
+    const anchor_path, suffix_text: string);
+const
+    update_sql =
+        'UPDATE dict_user_long_completion_feedback SET ' +
+        'reject_count = MIN(reject_count + 1, 1000000), ' +
+        'last_used = strftime(''%s'',''now'') ' +
+        'WHERE anchor_path = ?1 AND suffix_text = ?2';
+    insert_sql =
+        'INSERT OR IGNORE INTO dict_user_long_completion_feedback' +
+        '(anchor_path, suffix_text, accept_count, reject_count, last_used) ' +
+        'VALUES (?1, ?2, 0, 1, strftime(''%s'',''now''))';
+var
+    anchor_key: string;
+    suffix_key: string;
+    stmt: Psqlite3_stmt;
+
+    procedure execute_feedback_sql(const sql_text: string);
+    begin
+        stmt := nil;
+        try
+            if m_user_connection.prepare(sql_text, stmt) and
+                m_user_connection.bind_text(stmt, 1, anchor_key) and
+                m_user_connection.bind_text(stmt, 2, suffix_key) then
+            begin
+                m_user_connection.step(stmt);
+            end;
+        finally
+            if stmt <> nil then
+            begin
+                m_user_connection.finalize(stmt);
+            end;
+        end;
+    end;
+begin
+    anchor_key := Trim(anchor_path);
+    suffix_key := Trim(suffix_text);
+    if (anchor_key = '') or (suffix_key = '') or (not ensure_open) or
+        (not m_user_ready) or (m_user_connection = nil) then
+    begin
+        Exit;
+    end;
     execute_feedback_sql(update_sql);
     execute_feedback_sql(insert_sql);
     note_user_data_changed;
@@ -5230,6 +5579,28 @@ begin
     end;
 
     if not connection.exec(
+        'CREATE TABLE IF NOT EXISTS dict_user_long_completion_feedback (' +
+        'anchor_path TEXT NOT NULL,' +
+        'suffix_text TEXT NOT NULL,' +
+        'accept_count INTEGER DEFAULT 0,' +
+        'reject_count INTEGER DEFAULT 0,' +
+        'last_used INTEGER DEFAULT 0,' +
+        'PRIMARY KEY(anchor_path, suffix_text)' +
+        ') WITHOUT ROWID;') then
+    begin
+        Result := False;
+        Exit;
+    end;
+
+    if not connection.exec(
+        'CREATE INDEX IF NOT EXISTS idx_dict_user_long_completion_feedback_anchor ' +
+        'ON dict_user_long_completion_feedback(anchor_path, accept_count DESC, last_used DESC);') then
+    begin
+        Result := False;
+        Exit;
+    end;
+
+    if not connection.exec(
         'CREATE TABLE IF NOT EXISTS dict_user_penalty (' +
         'pinyin TEXT NOT NULL,' +
         'text TEXT NOT NULL,' +
@@ -5392,6 +5763,29 @@ begin
     end;
 
     if not connection.exec(
+        'CREATE TABLE IF NOT EXISTS dict_base_long_completion (' +
+        'anchor_path TEXT NOT NULL,' +
+        'suffix_pinyin TEXT NOT NULL,' +
+        'suffix_text TEXT NOT NULL,' +
+        'suffix_path TEXT NOT NULL,' +
+        'evidence INTEGER NOT NULL DEFAULT 0,' +
+        'source_count INTEGER NOT NULL DEFAULT 0,' +
+        'PRIMARY KEY(anchor_path, suffix_pinyin, suffix_text)' +
+        ') WITHOUT ROWID;') then
+    begin
+        Result := False;
+        Exit;
+    end;
+
+    if not connection.exec(
+        'CREATE INDEX IF NOT EXISTS idx_dict_base_long_completion_anchor ' +
+        'ON dict_base_long_completion(anchor_path, evidence DESC, source_count DESC);') then
+    begin
+        Result := False;
+        Exit;
+    end;
+
+    if not connection.exec(
         'CREATE TABLE IF NOT EXISTS dict_base_char_lm (' +
         'ngram TEXT NOT NULL PRIMARY KEY,' +
         'score INTEGER NOT NULL DEFAULT 0,' +
@@ -5531,6 +5925,11 @@ begin
     if schema_version < 21 then
     begin
         set_schema_version(connection, 21);
+    end;
+
+    if schema_version < 22 then
+    begin
+        set_schema_version(connection, 22);
     end;
 
     Result := True;
@@ -9566,6 +9965,10 @@ begin
     if m_one_key_completion_cache <> nil then
     begin
         m_one_key_completion_cache.Clear;
+    end;
+    if m_long_one_key_completion_cache <> nil then
+    begin
+        m_long_one_key_completion_cache.Clear;
     end;
     if m_one_key_completion_competition_cache <> nil then
     begin

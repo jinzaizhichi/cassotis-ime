@@ -224,6 +224,8 @@ $lexicon_lm_transition_sc = Join-Path $lexicon_root 'data\generated\dict_lm_tran
 $lexicon_lm_transition_tc = Join-Path $lexicon_root 'data\generated\dict_lm_transition_tc.txt'
 $lexicon_transition_completion_sc = Join-Path $lexicon_root 'data\generated\dict_transition_completion_sc.txt'
 $lexicon_transition_completion_tc = Join-Path $lexicon_root 'data\generated\dict_transition_completion_tc.txt'
+$lexicon_long_completion_sc = Join-Path $lexicon_root 'data\generated\dict_long_completion_sc.txt'
+$lexicon_long_completion_tc = Join-Path $lexicon_root 'data\generated\dict_long_completion_tc.txt'
 $lexicon_completion_prior_sc = Join-Path $lexicon_root 'data\generated\dict_completion_prior_sc.txt'
 $lexicon_completion_prior_tc = Join-Path $lexicon_root 'data\generated\dict_completion_prior_tc.txt'
 $lexicon_completion_lookup_sc = Join-Path $lexicon_root 'data\generated\dict_completion_lookup_sc.txt'
@@ -323,6 +325,20 @@ try {
         }
         else {
             Write-Warning "Transition completion files not found under lexicon data/generated; skipping transition completion import."
+        }
+
+        if ((Test-Path -LiteralPath $lexicon_long_completion_sc) -and
+            (Test-Path -LiteralPath $lexicon_long_completion_tc)) {
+            Write-Host ("Importing lexicon long-sentence completions from: " + $lexicon_long_completion_sc)
+            invoke_tool 'cassotis_ime_dict_init (lexicon long completion sc)' $dict_init @(
+                $base_db_sc_path, $schema_path, $lexicon_long_completion_sc, 'long_completion')
+
+            Write-Host ("Importing lexicon long-sentence completions from: " + $lexicon_long_completion_tc)
+            invoke_tool 'cassotis_ime_dict_init (lexicon long completion tc)' $dict_init @(
+                $base_db_tc_path, $schema_path, $lexicon_long_completion_tc, 'long_completion')
+        }
+        else {
+            Write-Warning "Long-sentence completion files not found under lexicon data/generated; skipping import."
         }
 
         if ((Test-Path -LiteralPath $lexicon_completion_prior_sc) -and

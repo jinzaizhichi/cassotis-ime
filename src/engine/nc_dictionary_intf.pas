@@ -18,6 +18,8 @@ type
             out results: TncCandidateList): Boolean; virtual;
         function lookup_one_key_completions(const pinyin_prefix: string;
             out results: TncOneKeyCompletionList): Boolean; virtual;
+        function lookup_long_one_key_completions(const anchor_path: string;
+            out results: TncLongOneKeyCompletionList): Boolean; virtual;
         function lookup_one_key_completion_competition(
             const pinyin_prefix: string; const left_context: string;
             out results: TncOneKeyCompletionCompetitionEvidenceList): Boolean; virtual;
@@ -30,6 +32,10 @@ type
             const full_pinyin: string; const text: string); virtual;
         procedure record_one_key_completion_reject(const typed_prefix: string;
             const full_pinyin: string; const text: string); virtual;
+        procedure record_long_one_key_completion_accept(
+            const anchor_path, suffix_text: string); virtual;
+        procedure record_long_one_key_completion_reject(
+            const anchor_path, suffix_text: string); virtual;
         function lookup_fuzzy_full_pinyin(const pinyin: string;
             out results: TncCandidateList): Boolean; virtual;
         function lookup_fuzzy_full_pinyin_bounded(const pinyin: string;
@@ -130,6 +136,14 @@ begin
     Result := False;
 end;
 
+function TncDictionaryProvider.lookup_long_one_key_completions(
+    const anchor_path: string;
+    out results: TncLongOneKeyCompletionList): Boolean;
+begin
+    SetLength(results, 0);
+    Result := False;
+end;
+
 function TncDictionaryProvider.lookup_one_key_completion_competition(
     const pinyin_prefix: string; const left_context: string;
     out results: TncOneKeyCompletionCompetitionEvidenceList): Boolean;
@@ -155,6 +169,16 @@ end;
 
 procedure TncDictionaryProvider.record_one_key_completion_reject(
     const typed_prefix: string; const full_pinyin: string; const text: string);
+begin
+end;
+
+procedure TncDictionaryProvider.record_long_one_key_completion_accept(
+    const anchor_path, suffix_text: string);
+begin
+end;
+
+procedure TncDictionaryProvider.record_long_one_key_completion_reject(
+    const anchor_path, suffix_text: string);
 begin
 end;
 

@@ -5,7 +5,7 @@ CREATE TABLE IF NOT EXISTS meta (
     value TEXT NOT NULL
 );
 
-INSERT OR IGNORE INTO meta(key, value) VALUES('schema_version', '21');
+INSERT OR IGNORE INTO meta(key, value) VALUES('schema_version', '22');
 
 CREATE TABLE IF NOT EXISTS dict_base (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -202,6 +202,19 @@ CREATE TABLE IF NOT EXISTS dict_user_completion_feedback (
 CREATE INDEX IF NOT EXISTS idx_dict_user_completion_feedback_prefix
 ON dict_user_completion_feedback(typed_prefix, accept_count DESC, last_used DESC);
 
+CREATE TABLE IF NOT EXISTS dict_user_long_completion_feedback (
+    anchor_path TEXT NOT NULL,
+    suffix_text TEXT NOT NULL,
+    accept_count INTEGER DEFAULT 0,
+    reject_count INTEGER DEFAULT 0,
+    last_used INTEGER DEFAULT 0,
+    PRIMARY KEY(anchor_path, suffix_text)
+) WITHOUT ROWID;
+
+CREATE INDEX IF NOT EXISTS idx_dict_user_long_completion_feedback_anchor
+ON dict_user_long_completion_feedback(
+    anchor_path, accept_count DESC, last_used DESC);
+
 CREATE TABLE IF NOT EXISTS dict_user_penalty (
     pinyin TEXT NOT NULL,
     text TEXT NOT NULL,
@@ -283,6 +296,19 @@ CREATE TABLE IF NOT EXISTS dict_base_transition_completion (
 
 CREATE INDEX IF NOT EXISTS idx_dict_base_transition_completion_prefix
 ON dict_base_transition_completion(typed_prefix, evidence DESC);
+
+CREATE TABLE IF NOT EXISTS dict_base_long_completion (
+    anchor_path TEXT NOT NULL,
+    suffix_pinyin TEXT NOT NULL,
+    suffix_text TEXT NOT NULL,
+    suffix_path TEXT NOT NULL,
+    evidence INTEGER NOT NULL DEFAULT 0,
+    source_count INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY(anchor_path, suffix_pinyin, suffix_text)
+) WITHOUT ROWID;
+
+CREATE INDEX IF NOT EXISTS idx_dict_base_long_completion_anchor
+ON dict_base_long_completion(anchor_path, evidence DESC, source_count DESC);
 
 CREATE TABLE IF NOT EXISTS dict_base_char_lm (
     ngram TEXT NOT NULL PRIMARY KEY,

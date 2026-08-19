@@ -541,6 +541,9 @@ function one_key_completions_equal(const left_value: TncOneKeyCompletion;
 begin
     Result := (left_value.text = right_value.text) and
         (left_value.full_pinyin = right_value.full_pinyin) and
+        (left_value.anchor_text = right_value.anchor_text) and
+        (left_value.suffix_text = right_value.suffix_text) and
+        (left_value.anchor_path = right_value.anchor_path) and
         (left_value.weight = right_value.weight) and
         (left_value.source = right_value.source);
 end;

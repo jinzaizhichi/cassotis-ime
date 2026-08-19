@@ -14,14 +14,15 @@ uses
 type
     TncImportMode = (imBaseDict, imQueryPathPrior, imLmTransition, imCharLm,
         imCharReverseLm, imTransitionCompletion, imCompletionPrior,
-        imCompletionLookup, imCompletionCompetition, imCompletionPairAudit);
+        imCompletionLookup, imCompletionCompetition, imCompletionPairAudit,
+        imLongCompletion);
 
 const
     c_segment_path_separator = #3;
 
 procedure print_usage;
 begin
-    Writeln('Usage: cassotis_ime_dict_init <db_path> <schema_path> [import_path] [base|query_path|lm_transition|char_lm|char_reverse_lm|transition_completion|completion_prior|completion_lookup|completion_competition|completion_pair_audit]');
+    Writeln('Usage: cassotis_ime_dict_init <db_path> <schema_path> [import_path] [base|query_path|lm_transition|char_lm|char_reverse_lm|transition_completion|completion_prior|completion_lookup|completion_competition|completion_pair_audit|long_completion]');
     Writeln('       cassotis_ime_dict_init <db_path> <schema_path> --build-contains-index');
 end;
 
@@ -118,6 +119,36 @@ begin
     evidence := StrToIntDef(Trim(parts[4]), 0);
     Result := (typed_prefix <> '') and (full_pinyin <> '') and
         (text <> '') and (path_text <> '') and (evidence > 0);
+end;
+
+function split_long_completion_line(const line: string;
+    out anchor_path: string; out suffix_pinyin: string;
+    out suffix_text: string; out suffix_path: string;
+    out evidence: Integer; out source_count: Integer): Boolean;
+var
+    parts: TArray<string>;
+begin
+    Result := False;
+    anchor_path := '';
+    suffix_pinyin := '';
+    suffix_text := '';
+    suffix_path := '';
+    evidence := 0;
+    source_count := 0;
+    parts := line.Split([#9]);
+    if Length(parts) <> 6 then
+    begin
+        Exit;
+    end;
+    anchor_path := Trim(parts[0]);
+    suffix_pinyin := Trim(parts[1]);
+    suffix_text := Trim(parts[2]);
+    suffix_path := Trim(parts[3]);
+    evidence := StrToIntDef(Trim(parts[4]), 0);
+    source_count := StrToIntDef(Trim(parts[5]), 0);
+    Result := (anchor_path <> '') and (suffix_pinyin <> '') and
+        (suffix_text <> '') and (suffix_path <> '') and (evidence > 0) and
+        (source_count >= 5);
 end;
 
 function split_completion_prior_line(const line: string;
@@ -490,6 +521,10 @@ begin
         begin
             Exit(imTransitionCompletion);
         end;
+        if Pos('long_completion', normalized) > 0 then
+        begin
+            Exit(imLongCompletion);
+        end;
         if Pos('completion_prior', normalized) > 0 then
         begin
             Exit(imCompletionPrior);
@@ -534,6 +569,12 @@ begin
         (normalized = 'completion') then
     begin
         Exit(imTransitionCompletion);
+    end;
+
+    if (normalized = 'long_completion') or
+        (normalized = 'long-completion') then
+    begin
+        Exit(imLongCompletion);
     end;
 
     if (normalized = 'completion_prior') or
@@ -755,6 +796,10 @@ const
         'INSERT OR REPLACE INTO dict_base_transition_completion' +
         '(typed_prefix, full_pinyin, text, path_text, evidence) ' +
         'VALUES (?1, ?2, ?3, ?4, ?5);';
+    insert_long_completion_sql =
+        'INSERT OR REPLACE INTO dict_base_long_completion' +
+        '(anchor_path, suffix_pinyin, suffix_text, suffix_path, evidence, ' +
+        'source_count) VALUES (?1, ?2, ?3, ?4, ?5, ?6);';
     insert_completion_prior_sql =
         'INSERT OR REPLACE INTO dict_base_completion_prior' +
         '(pinyin, text, popularity_prior, corpus_score, document_score, ' +
@@ -799,6 +844,10 @@ var
     text: string;
     path_text: string;
     context_suffix: string;
+    anchor_path: string;
+    suffix_pinyin: string;
+    suffix_text: string;
+    suffix_path: string;
     weight: Integer;
     backoff: Integer;
     corpus_score: Integer;
@@ -828,6 +877,7 @@ var
     inserted_query_paths: Integer;
     inserted_char_lm: Integer;
     inserted_transition_completions: Integer;
+    inserted_long_completions: Integer;
     inserted_completion_priors: Integer;
     inserted_completion_lookups: Integer;
     inserted_completion_competitions: Integer;
@@ -864,6 +914,7 @@ begin
     inserted_query_paths := 0;
     inserted_char_lm := 0;
     inserted_transition_completions := 0;
+    inserted_long_completions := 0;
     inserted_completion_priors := 0;
     inserted_completion_lookups := 0;
     inserted_completion_competitions := 0;
@@ -921,6 +972,33 @@ begin
                 Exit;
             end;
             if not conn.prepare(insert_transition_completion_sql,
+                stmt_query_path) then
+            begin
+                Exit;
+            end;
+        end
+        else if import_mode = imLongCompletion then
+        begin
+            completion_parser := TncPinyinParser.Create;
+            if (not conn.exec('DROP TABLE IF EXISTS dict_base_long_completion;')) or
+                (not conn.exec(
+                'CREATE TABLE dict_base_long_completion (' +
+                'anchor_path TEXT NOT NULL,' +
+                'suffix_pinyin TEXT NOT NULL,' +
+                'suffix_text TEXT NOT NULL,' +
+                'suffix_path TEXT NOT NULL,' +
+                'evidence INTEGER NOT NULL DEFAULT 0,' +
+                'source_count INTEGER NOT NULL DEFAULT 0,' +
+                'PRIMARY KEY(anchor_path, suffix_pinyin, suffix_text)' +
+                ') WITHOUT ROWID;')) or
+                (not conn.exec(
+                'CREATE INDEX idx_dict_base_long_completion_anchor ' +
+                'ON dict_base_long_completion(anchor_path, evidence DESC, ' +
+                'source_count DESC);')) then
+            begin
+                Exit;
+            end;
+            if not conn.prepare(insert_long_completion_sql,
                 stmt_query_path) then
             begin
                 Exit;
@@ -1154,6 +1232,59 @@ begin
                     Break;
                 end;
                 Inc(inserted_transition_completions);
+                if (not conn.reset(stmt_query_path)) or
+                    (not conn.clear_bindings(stmt_query_path)) then
+                begin
+                    has_error := True;
+                    Break;
+                end;
+                Continue;
+            end;
+
+            if import_mode = imLongCompletion then
+            begin
+                if not split_long_completion_line(line, anchor_path,
+                    suffix_pinyin, suffix_text, suffix_path, weight,
+                    source_count) then
+                begin
+                    Continue;
+                end;
+                anchor_path := normalize_query_path_text(anchor_path);
+                suffix_path := normalize_query_path_text(suffix_path);
+                suffix_pinyin := normalize_pinyin_key(suffix_pinyin);
+                if (get_query_path_segment_count(anchor_path) < 1) or
+                    (get_query_path_segment_count(anchor_path) > 3) or
+                    (get_query_path_segment_count(suffix_path) < 1) or
+                    (get_query_path_segment_count(suffix_path) > 3) or
+                    (get_query_path_plain_text(suffix_path) <> suffix_text) or
+                    (Length(completion_parser.parse(suffix_pinyin)) > 6) or
+                    (Length(completion_parser.parse(suffix_pinyin)) < 1) or
+                    (Length(completion_parser.parse(suffix_pinyin)) <>
+                    Length(suffix_text)) then
+                begin
+                    Continue;
+                end;
+                if (not conn.bind_text(stmt_query_path, 1, anchor_path)) or
+                    (not conn.bind_text(stmt_query_path, 2,
+                    suffix_pinyin)) or
+                    (not conn.bind_text(stmt_query_path, 3,
+                    suffix_text)) or
+                    (not conn.bind_text(stmt_query_path, 4,
+                    suffix_path)) or
+                    (not conn.bind_int(stmt_query_path, 5, weight)) or
+                    (not conn.bind_int(stmt_query_path, 6,
+                    source_count)) then
+                begin
+                    has_error := True;
+                    Break;
+                end;
+                rc := conn.step(stmt_query_path);
+                if rc <> SQLITE_DONE then
+                begin
+                    has_error := True;
+                    Break;
+                end;
+                Inc(inserted_long_completions);
                 if (not conn.reset(stmt_query_path)) or
                     (not conn.clear_bindings(stmt_query_path)) then
                 begin
@@ -1597,6 +1728,12 @@ begin
             Writeln(Format(
                 'Imported %d transition completion rows from %d lines.',
                 [inserted_transition_completions, line_count]));
+        end
+        else if import_mode = imLongCompletion then
+        begin
+            Writeln(Format(
+                'Imported %d long completion rows from %d lines.',
+                [inserted_long_completions, line_count]));
         end
         else if import_mode = imCompletionPrior then
         begin

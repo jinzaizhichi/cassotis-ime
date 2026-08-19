@@ -144,7 +144,7 @@ type
         procedure save_engine_state_to_config(const input_mode: TncInputMode; const full_width_mode: Boolean;
             const punctuation_full_width: Boolean);
         procedure update_active_state(const active: Boolean);
-        function commit_pending_selection_before_mode_switch: Boolean;
+        function commit_pending_raw_text_before_mode_switch: Boolean;
         procedure execute_shortcut_action(const action: TncShortcutAction);
         procedure toggle_input_mode_by_shortcut;
         procedure toggle_full_width_mode_by_shortcut;
@@ -2034,7 +2034,7 @@ begin
     end;
 end;
 
-function TncTextService.commit_pending_selection_before_mode_switch: Boolean;
+function TncTextService.commit_pending_raw_text_before_mode_switch: Boolean;
 var
     handled: Boolean;
     commit_text: string;
@@ -2060,7 +2060,9 @@ begin
     punctuation_full_width := m_last_punctuation_full_width;
     lookup_perf_info := '';
     FillChar(key_state, SizeOf(key_state), 0);
-    if not m_ipc_client.process_key(m_session_id, VK_SPACE, key_state, handled, commit_text, display_text,
+    // Switching to English follows Enter semantics: preserve what the user
+    // typed instead of implicitly choosing the current Chinese candidate.
+    if not m_ipc_client.process_key(m_session_id, VK_RETURN, key_state, handled, commit_text, display_text,
         input_mode, full_width_mode, punctuation_full_width, lookup_perf_info) then
     begin
         Exit;
@@ -2092,7 +2094,7 @@ begin
     Result := request_commit(context, commit_text);
     if Result and (m_logger <> nil) and (m_logger.level <= ll_debug) then
     begin
-        m_logger.debug(Format('Commit-before-switch text=%s', [commit_text]));
+        m_logger.debug(Format('Raw-commit-before-switch text=%s', [commit_text]));
     end;
 end;
 
@@ -2148,7 +2150,7 @@ begin
 
     if next_input_mode = im_english then
     begin
-        commit_pending_selection_before_mode_switch;
+        commit_pending_raw_text_before_mode_switch;
     end;
 
     if (m_ipc_client <> nil) and (m_session_id <> '') then

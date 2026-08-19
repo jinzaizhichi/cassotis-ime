@@ -58,7 +58,8 @@ type
         okcs_none,
         okcs_user_exact,
         okcs_base_exact,
-        okcs_transition
+        okcs_transition,
+        okcs_long_transition
     );
 
     TncOneKeyCompletion = record
@@ -77,10 +78,26 @@ type
         feedback_count: Integer;
         feedback_reject_count: Integer;
         prefix_anchored: Boolean;
+        anchor_text: string;
+        suffix_text: string;
+        anchor_path: string;
         source: TncOneKeyCompletionSource;
     end;
 
     TncOneKeyCompletionList = array of TncOneKeyCompletion;
+
+    TncLongOneKeyCompletion = record
+        anchor_path: string;
+        suffix_pinyin: string;
+        suffix_text: string;
+        suffix_path: string;
+        evidence: Integer;
+        source_count: Integer;
+        feedback_count: Integer;
+        feedback_reject_count: Integer;
+    end;
+
+    TncLongOneKeyCompletionList = array of TncLongOneKeyCompletion;
 
     TncOneKeyCompletionCompetitionEvidence = record
         context_width: Integer;
