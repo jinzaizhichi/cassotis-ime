@@ -5898,6 +5898,7 @@ begin
         (Trim(previous_completion.text) <> '') and
         (previous_query_prefix <> '') and
         compact_query.StartsWith(previous_query_prefix, True) and
+        (Length(previous_completion.full_pinyin) > Length(compact_query)) and
         previous_completion.full_pinyin.StartsWith(compact_query, True);
     if previous_compatible then
     begin

@@ -18,6 +18,7 @@ uses
     nc_types,
     nc_shortcut,
     nc_dpi_scale,
+    nc_version_info,
     nc_candidate_theme;
 
 type
@@ -38,6 +39,7 @@ type
         m_list_font: TFont;
         m_weight_font: TFont;
         m_brand_font: TFont;
+        m_brand_text: string;
         m_page_label: TLabel;
         m_preedit_label: TLabel;
         m_border_color: TColor;
@@ -151,7 +153,7 @@ var
 
 const
     c_candidate_text_height_sample = 'Hg' + WideChar($56FD);
-    c_candidate_brand_text = 'Cassotis IME' + WideChar($FF0D) +
+    c_candidate_brand_base_text = 'Cassotis IME - ' +
         WideChar($8A00) + WideChar($6CC9) + WideChar($8F93) +
         WideChar($5165) + WideChar($6CD5);
     c_candidate_brand_font_name = 'Microsoft YaHei UI';
@@ -379,6 +381,8 @@ begin
 end;
 
 constructor TncCandidateWindow.create;
+var
+    product_version: string;
 begin
     ensure_vcl_initialized;
     inherited CreateNew(nil);
@@ -387,6 +391,12 @@ begin
     m_list_font := TFont.Create;
     m_weight_font := TFont.Create;
     m_brand_font := TFont.Create;
+    m_brand_text := c_candidate_brand_base_text;
+    product_version := Trim(nc_get_current_exe_display_version);
+    if product_version <> '' then
+    begin
+        m_brand_text := m_brand_text + ' (v' + product_version + ')';
+    end;
     m_color_scheme := c_default_candidate_color_scheme;
     m_color_theme := nc_candidate_color_theme(m_color_scheme);
     m_border_color := m_color_theme.border_color;
@@ -1398,7 +1408,7 @@ begin
     completion_height := Max(m_list_item_height,
         main_text_height + list_vertical_padding) + 1;
     Canvas.Font.Assign(m_brand_font);
-    brand_width := Canvas.TextWidth(c_candidate_brand_text) + 2;
+    brand_width := Canvas.TextWidth(m_brand_text) + 2;
     brand_gap := nc_scale_for_dpi(12, m_current_dpi);
     completion_width := (m_list_padding * 2) + brand_width;
     if m_one_key_completion_text <> '' then
@@ -1610,7 +1620,7 @@ begin
     begin
         completion_rect := m_one_key_completion_rect;
         Canvas.Font.Assign(m_brand_font);
-        brand_text_width := Canvas.TextWidth(c_candidate_brand_text);
+        brand_text_width := Canvas.TextWidth(m_brand_text);
         brand_rect := completion_rect;
         brand_rect.Right := completion_rect.Right - m_list_padding - 1;
         brand_rect.Left := brand_rect.Right - brand_text_width;
@@ -1693,7 +1703,7 @@ begin
         end;
 
         Canvas.Font.Assign(m_brand_font);
-        draw_outlined_canvas_text(Canvas, c_candidate_brand_text, brand_rect,
+        draw_outlined_canvas_text(Canvas, m_brand_text, brand_rect,
             DT_RIGHT or DT_VCENTER or DT_SINGLELINE or DT_NOPREFIX,
             candidate_brand_outline_color(Color), m_brand_font.Color);
     end;
