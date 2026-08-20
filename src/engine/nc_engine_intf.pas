@@ -130516,7 +130516,11 @@ const
     c_ranking_stage_post_static_bidirectional = 11;
     c_ranking_stage_settled_top2_residual = 12;
     c_ranking_stage_unified_top2_arbiter = 13;
-    c_ranking_stage_count = 14;
+    c_ranking_stage_deep_local_repair = 14;
+    c_ranking_stage_count = 15;
+    c_deep_local_repair_max_rank = 32;
+    c_deep_local_repair_min_char_lm_gain = 500;
+    c_deep_local_repair_min_suffix_lm_gain = 300;
 var
     profile: Integer;
     candidate_count: Integer;
@@ -132994,6 +132998,118 @@ var
         apply_ranker := True;
     end;
 
+    procedure apply_deep_local_repair_fallback;
+    var
+        top_index_local: Integer;
+        candidate_index_local: Integer;
+        candidate_position_local: Integer;
+        best_position_local: Integer;
+        best_gain_local: Integer;
+        gain_local: Integer;
+        different_units_local: Integer;
+        top_text_local: string;
+        candidate_text_local: string;
+        char_index_local: Integer;
+    begin
+        if (not unified_pool_final) or (candidate_count < 2) then
+        begin
+            Exit;
+        end;
+
+        top_index_local := ordered_indices[0];
+        top_text_local := Trim(legacy_candidates[top_index_local].text);
+        if (not rank_features[top_index_local].complete_match) or
+            (Trim(legacy_candidates[top_index_local].comment) <> '') or
+            rank_features[top_index_local].source_user or
+            rank_features[top_index_local].complete_user or
+            rank_features[top_index_local].latest_query_choice or
+            (rank_features[top_index_local].query_choice_bonus > 0) or
+            (get_candidate_text_unit_count(top_text_local) <>
+            m_last_lookup_syllable_count) then
+        begin
+            Exit;
+        end;
+
+        best_position_local := -1;
+        best_gain_local := Low(Integer);
+        for candidate_position_local := 1 to Min(candidate_count - 1,
+            c_deep_local_repair_max_rank - 1) do
+        begin
+            candidate_index_local :=
+                ordered_indices[candidate_position_local];
+            if (rank_features[candidate_index_local].
+                complete_pool_source_kind <> Ord(lcps_local_repair)) or
+                (not rank_features[candidate_index_local].complete_match) or
+                rank_features[candidate_index_local].source_user or
+                rank_features[candidate_index_local].complete_user or
+                rank_features[candidate_index_local].latest_query_choice or
+                (rank_features[candidate_index_local].query_choice_bonus > 0) or
+                (rank_features[candidate_index_local].path_segments -
+                rank_features[top_index_local].path_segments > 1) or
+                (rank_features[candidate_index_local].word_lm_bonus <
+                rank_features[top_index_local].word_lm_bonus) or
+                (rank_features[candidate_index_local].char_lm_score -
+                rank_features[top_index_local].char_lm_score <
+                c_deep_local_repair_min_char_lm_gain) or
+                (rank_features[candidate_index_local].char_lm_suffix_score -
+                rank_features[top_index_local].char_lm_suffix_score <
+                c_deep_local_repair_min_suffix_lm_gain) then
+            begin
+                Continue;
+            end;
+
+            candidate_text_local := Trim(
+                legacy_candidates[candidate_index_local].text);
+            if (Trim(legacy_candidates[candidate_index_local].comment) <> '') or
+                (Length(candidate_text_local) <> Length(top_text_local)) then
+            begin
+                Continue;
+            end;
+
+            different_units_local := 0;
+            for char_index_local := 1 to Length(top_text_local) do
+            begin
+                if top_text_local[char_index_local] <>
+                    candidate_text_local[char_index_local] then
+                begin
+                    Inc(different_units_local);
+                    if different_units_local > 1 then
+                    begin
+                        Break;
+                    end;
+                end;
+            end;
+            if different_units_local <> 1 then
+            begin
+                Continue;
+            end;
+
+            gain_local :=
+                rank_features[candidate_index_local].char_lm_score -
+                rank_features[top_index_local].char_lm_score +
+                rank_features[candidate_index_local].char_lm_suffix_score -
+                rank_features[top_index_local].char_lm_suffix_score;
+            if gain_local > best_gain_local then
+            begin
+                best_gain_local := gain_local;
+                best_position_local := candidate_position_local;
+            end;
+        end;
+        if best_position_local <= 0 then
+        begin
+            Exit;
+        end;
+
+        candidate_index_local := ordered_indices[best_position_local];
+        for candidate_position_local := best_position_local downto 1 do
+        begin
+            ordered_indices[candidate_position_local] :=
+                ordered_indices[candidate_position_local - 1];
+        end;
+        ordered_indices[0] := candidate_index_local;
+        apply_ranker := True;
+    end;
+
     function ranking_stage_name(const stage_id: Integer): string;
     begin
         case stage_id of
@@ -133025,6 +133141,8 @@ var
                 Result := 'settled_top2_residual';
             c_ranking_stage_unified_top2_arbiter:
                 Result := 'unified_top2_arbiter';
+            c_ranking_stage_deep_local_repair:
+                Result := 'deep_local_repair';
         else
             Result := 'unknown';
         end;
@@ -134408,6 +134526,8 @@ begin
     restore_pre_settled_top2_order;
     apply_long_unified_top2_arbiter;
     capture_ranking_stage(c_ranking_stage_unified_top2_arbiter);
+    apply_deep_local_repair_fallback;
+    capture_ranking_stage(c_ranking_stage_deep_local_repair);
 
     if apply_ranker then
     begin
