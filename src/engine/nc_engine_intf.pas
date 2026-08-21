@@ -128251,10 +128251,10 @@ const
     c_exact_lattice_single_option_limit = 8;
     c_exact_lattice_max_segment_units = 5;
     c_exact_lattice_signature_limit = 3;
-    c_exact_edge_model_lattice_beam_width = 16;
+    c_exact_edge_model_lattice_beam_width = 12;
     c_exact_edge_model_lattice_candidate_limit = 16;
-    c_exact_edge_model_lattice_option_limit = 16;
-    c_exact_edge_model_lattice_single_option_limit = 16;
+    c_exact_edge_model_lattice_option_limit = 10;
+    c_exact_edge_model_lattice_single_option_limit = 4;
     c_exact_edge_model_min_anchor_units = 3;
     c_exact_edge_model_min_anchor_score = 2.5;
     c_retained_exact_lattice_probe_limit = 16;
@@ -128362,6 +128362,7 @@ var
     signature_totals: TDictionary<string, Integer>;
     exact_cache: TDictionary<string, TncCandidateList>;
     word_lm_cache: TDictionary<string, Integer>;
+    exact_edge_model_score_cache: TDictionary<string, Double>;
     span_key_cache: TArray<TArray<string>>;
     original_candidates: TncCandidateList;
     original_source_indices: TArray<Integer>;
@@ -128895,6 +128896,15 @@ var
         word_lm_cache.Add(cache_key, Result);
     end;
 
+    function exact_edge_model_cache_key(const position_value,
+        span_units_value, exact_rank_value: Integer;
+        const text_value: string): string;
+    begin
+        Result := IntToStr(position_value) + #1 +
+            IntToStr(span_units_value) + #1 +
+            IntToStr(exact_rank_value) + #1 + Trim(text_value);
+    end;
+
     procedure collect_model_retained_exact_edges;
     const
         c_edge_limit = 4;
@@ -128929,6 +128939,7 @@ var
         model_score: Double;
         proposal_idx: Integer;
         insert_idx: Integer;
+        model_cache_key: string;
     begin
         SetLength(proposals, 0);
         for position := 0 to expected_units - 2 do
@@ -128985,6 +128996,10 @@ var
                         features);
                     model_score := long_exact_edge_lattice_ranker_score(
                         features);
+                    model_cache_key := exact_edge_model_cache_key(position,
+                        span_units, option_count, candidate_text_local);
+                    exact_edge_model_score_cache.AddOrSetValue(
+                        model_cache_key, model_score);
                     if model_score > best.model_score then
                     begin
                         second_score := best.model_score;
@@ -129049,7 +129064,6 @@ var
         states_by_position: TArray<TncCompletePoolLatticeStateArray>;
         source_states: TncCompletePoolLatticeStateArray;
         destination_states: TncCompletePoolLatticeStateArray;
-        sorted_states: TncCompletePoolLatticeStateArray;
         retained_states: TncCompletePoolLatticeStateArray;
         exact_candidates: TncCandidateList;
         state_value: TncCompletePoolLatticeState;
@@ -129088,6 +129102,7 @@ var
         edge_model_raw_weight: Integer;
         edge_model_top_weight: Integer;
         edge_model_retention_score: Int64;
+        edge_model_cache_key: string;
 
         function find_retained_edge(const position_value: Integer;
             const span_value: Integer; const query_value: string;
@@ -129148,8 +129163,8 @@ var
 
         procedure prune_position(const position_value: Integer);
         var
-            sort_idx: Integer;
-            sort_value: TncCompletePoolLatticeState;
+            state_idx_local: Integer;
+            best_idx: Integer;
             pass: Integer;
             retained_idx: Integer;
             signature_count: Integer;
@@ -129160,61 +129175,58 @@ var
             begin
                 Exit;
             end;
-            sorted_states := Copy(destination_states, 0,
-                Length(destination_states));
-            for sort_idx := 1 to High(sorted_states) do
-            begin
-                sort_value := sorted_states[sort_idx];
-                insert_idx := sort_idx - 1;
-                while (insert_idx >= 0) and state_is_better(sort_value,
-                    sorted_states[insert_idx]) do
-                begin
-                    sorted_states[insert_idx + 1] :=
-                        sorted_states[insert_idx];
-                    Dec(insert_idx);
-                end;
-                sorted_states[insert_idx + 1] := sort_value;
-            end;
-
             SetLength(retained_states, 0);
             for pass := 0 to 1 do
             begin
-                for sort_idx := 0 to High(sorted_states) do
+                while Length(retained_states) < lattice_beam_width do
                 begin
-                    candidate_key := LowerCase(Trim(
-                        sorted_states[sort_idx].text));
-                    if candidate_key = '' then
+                    best_idx := -1;
+                    for state_idx_local := 0 to High(destination_states) do
                     begin
-                        Continue;
-                    end;
-                    duplicate_text := False;
-                    signature_count := 0;
-                    for retained_idx := 0 to High(retained_states) do
-                    begin
-                        if SameText(Trim(retained_states[retained_idx].text),
-                            candidate_key) then
+                        candidate_key := LowerCase(Trim(
+                            destination_states[state_idx_local].text));
+                        if candidate_key = '' then
                         begin
-                            duplicate_text := True;
-                            Break;
+                            Continue;
                         end;
-                        if SameText(retained_states[retained_idx].signature,
-                            sorted_states[sort_idx].signature) then
+                        duplicate_text := False;
+                        signature_count := 0;
+                        for retained_idx := 0 to High(retained_states) do
                         begin
-                            Inc(signature_count);
+                            if SameText(Trim(
+                                retained_states[retained_idx].text),
+                                candidate_key) then
+                            begin
+                                duplicate_text := True;
+                                Break;
+                            end;
+                            if SameText(
+                                retained_states[retained_idx].signature,
+                                destination_states[
+                                state_idx_local].signature) then
+                            begin
+                                Inc(signature_count);
+                            end;
+                        end;
+                        if duplicate_text or ((pass = 0) and
+                            (signature_count >=
+                            c_exact_lattice_signature_limit)) then
+                        begin
+                            Continue;
+                        end;
+                        if (best_idx < 0) or state_is_better(
+                            destination_states[state_idx_local],
+                            destination_states[best_idx]) then
+                        begin
+                            best_idx := state_idx_local;
                         end;
                     end;
-                    if duplicate_text or ((pass = 0) and
-                        (signature_count >=
-                        c_exact_lattice_signature_limit)) then
-                    begin
-                        Continue;
-                    end;
-                    append_state(retained_states,
-                        sorted_states[sort_idx]);
-                    if Length(retained_states) >= lattice_beam_width then
+                    if best_idx < 0 then
                     begin
                         Break;
                     end;
+                    append_state(retained_states,
+                        destination_states[best_idx]);
                 end;
                 if Length(retained_states) >= lattice_beam_width then
                 begin
@@ -129246,6 +129258,10 @@ var
         states_by_position[0][0] := Default(TncCompletePoolLatticeState);
         for position := 0 to expected_units - 1 do
         begin
+            { All predecessor positions have contributed by this point.  Prune
+              once here instead of repeatedly sorting the same destination
+              after every incoming span. }
+            prune_position(position);
             source_states := states_by_position[position];
             if Length(source_states) <= 0 then
             begin
@@ -129359,18 +129375,27 @@ var
                             candidate_value_local.score, span_units,
                             position, expected_units,
                             candidate_value_local.source = cs_user);
-                        build_long_exact_edge_lattice_features(query_key,
-                            candidate_text_local, span_units, option_count,
-                            edge_model_raw_weight, edge_model_top_weight,
-                            candidate_value_local.score,
-                            clamp_int64_to_integer(
-                            edge_model_retention_score), position,
-                            expected_units,
-                            option_count <= baseline_option_limit,
-                            edge_model_features);
-                        edge_model_score :=
-                            long_exact_edge_lattice_ranker_score(
-                            edge_model_features);
+                        edge_model_cache_key := exact_edge_model_cache_key(
+                            position, span_units, option_count,
+                            candidate_text_local);
+                        if not exact_edge_model_score_cache.TryGetValue(
+                            edge_model_cache_key, edge_model_score) then
+                        begin
+                            build_long_exact_edge_lattice_features(query_key,
+                                candidate_text_local, span_units, option_count,
+                                edge_model_raw_weight, edge_model_top_weight,
+                                candidate_value_local.score,
+                                clamp_int64_to_integer(
+                                edge_model_retention_score), position,
+                                expected_units,
+                                option_count <= baseline_option_limit,
+                                edge_model_features);
+                            edge_model_score :=
+                                long_exact_edge_lattice_ranker_score(
+                                edge_model_features);
+                            exact_edge_model_score_cache.AddOrSetValue(
+                                edge_model_cache_key, edge_model_score);
+                        end;
                         edge_model_score := Max(-8.0,
                             Min(8.0, edge_model_score));
                         edge_model_adjustment := Round(
@@ -129508,10 +129533,10 @@ var
                     end;
                 end;
                 SetLength(states_by_position[destination], destination_count);
-                prune_position(destination);
             end;
         end;
 
+        prune_position(expected_units);
         source_states := states_by_position[expected_units];
         retained_count := Min(lattice_candidate_limit,
             Length(source_states));
@@ -132942,6 +132967,7 @@ begin
     signature_totals := TDictionary<string, Integer>.Create;
     exact_cache := TDictionary<string, TncCandidateList>.Create;
     word_lm_cache := TDictionary<string, Integer>.Create;
+    exact_edge_model_score_cache := TDictionary<string, Double>.Create;
     emitted_candidate_identities := TDictionary<string, Boolean>.Create;
     try
         for idx := 0 to High(original_candidates) do
@@ -133268,6 +133294,7 @@ begin
         note_pool_phase('merge');
     finally
         emitted_candidate_identities.Free;
+        exact_edge_model_score_cache.Free;
         word_lm_cache.Free;
         exact_cache.Free;
         signature_totals.Free;
