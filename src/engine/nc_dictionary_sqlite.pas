@@ -64,6 +64,9 @@ type
         m_char_lm_cache_order: TQueue<string>;
         m_char_lm_text_score_cache: TDictionary<string, Integer>;
         m_char_lm_text_score_cache_order: TQueue<string>;
+        m_char_lm_short_context_text_score_cache:
+            TDictionary<string, Integer>;
+        m_char_lm_short_context_text_score_cache_order: TQueue<string>;
         m_char_lm_available: Integer;
         m_stmt_char_lm_entries_1: Psqlite3_stmt;
         m_stmt_char_lm_entries_8: Psqlite3_stmt;
@@ -223,7 +226,8 @@ type
             const entry: TncCharLmCacheEntry;
             const reverse_model: Boolean = False);
         procedure cache_char_lm_text_score(const cache_key: string;
-            const score: Integer; const reverse_model: Boolean = False);
+            const score: Integer; const reverse_model: Boolean = False;
+            const short_context_cache: Boolean = False);
         function load_char_lm_entries(const ngrams: TArray<string>;
             const entries: TDictionary<string, TncCharLmCacheEntry>;
             const reverse_model: Boolean = False): Boolean;
@@ -231,7 +235,8 @@ type
             out scores: TArray<Integer>; const include_begin_marker: Boolean;
             const left_context: string; const include_end_marker: Boolean;
             const cache_only: Boolean = False;
-            const reverse_model: Boolean = False): Boolean;
+            const reverse_model: Boolean = False;
+            const short_context_cache: Boolean = False): Boolean;
         procedure purge_user_entry_internal(const pinyin: string; const text: string;
             const apply_penalty: Boolean; const purge_all_by_text: Boolean);
         procedure prune_user_entries_existing_in_base;
@@ -353,6 +358,8 @@ type
         function get_char_lm_cached_span_scores(const texts: TArray<string>;
             out scores: TArray<Integer>): Boolean; override;
         function get_char_lm_continuation_scores(const left_context: string;
+            const texts: TArray<string>; out scores: TArray<Integer>): Boolean; override;
+        function get_char_lm_short_context_scores(const left_context: string;
             const texts: TArray<string>; out scores: TArray<Integer>): Boolean; override;
         function get_query_segment_path_penalty(const query_key: string; const encoded_path: string): Integer; override;
         function get_compound_tail_support(const tail_text: string): Integer; override;
@@ -2479,6 +2486,9 @@ begin
     m_char_lm_cache_order := TQueue<string>.Create;
     m_char_lm_text_score_cache := TDictionary<string, Integer>.Create;
     m_char_lm_text_score_cache_order := TQueue<string>.Create;
+    m_char_lm_short_context_text_score_cache :=
+        TDictionary<string, Integer>.Create;
+    m_char_lm_short_context_text_score_cache_order := TQueue<string>.Create;
     m_char_lm_available := -1;
     m_stmt_char_lm_entries_1 := nil;
     m_stmt_char_lm_entries_8 := nil;
@@ -2669,6 +2679,16 @@ begin
     begin
         m_char_lm_text_score_cache_order.Free;
         m_char_lm_text_score_cache_order := nil;
+    end;
+    if m_char_lm_short_context_text_score_cache <> nil then
+    begin
+        m_char_lm_short_context_text_score_cache.Free;
+        m_char_lm_short_context_text_score_cache := nil;
+    end;
+    if m_char_lm_short_context_text_score_cache_order <> nil then
+    begin
+        m_char_lm_short_context_text_score_cache_order.Free;
+        m_char_lm_short_context_text_score_cache_order := nil;
     end;
     if m_char_reverse_lm_entry_cache <> nil then
     begin
@@ -9755,6 +9775,14 @@ begin
     begin
         m_char_lm_text_score_cache_order.Clear;
     end;
+    if m_char_lm_short_context_text_score_cache <> nil then
+    begin
+        m_char_lm_short_context_text_score_cache.Clear;
+    end;
+    if m_char_lm_short_context_text_score_cache_order <> nil then
+    begin
+        m_char_lm_short_context_text_score_cache_order.Clear;
+    end;
     m_char_lm_available := -1;
     if m_char_reverse_lm_entry_cache <> nil then
     begin
@@ -15418,15 +15446,28 @@ begin
 end;
 
 procedure TncSqliteDictionary.cache_char_lm_text_score(const cache_key: string;
-    const score: Integer; const reverse_model: Boolean);
+    const score: Integer; const reverse_model: Boolean;
+    const short_context_cache: Boolean);
 const
     c_cache_max_entries = 16384;
+    // Short contextual candidates have a larger bounded working set than
+    // general sentence scoring. Keep it separate so it cannot evict or alter
+    // the established long-sentence cache behavior.
+    c_short_context_cache_max_entries = 65536;
 var
     evicted_key: string;
     score_cache: TDictionary<string, Integer>;
     cache_order: TQueue<string>;
+    cache_max_entries: Integer;
 begin
-    if reverse_model then
+    cache_max_entries := c_cache_max_entries;
+    if short_context_cache and (not reverse_model) then
+    begin
+        score_cache := m_char_lm_short_context_text_score_cache;
+        cache_order := m_char_lm_short_context_text_score_cache_order;
+        cache_max_entries := c_short_context_cache_max_entries;
+    end
+    else if reverse_model then
     begin
         score_cache := m_char_reverse_lm_text_score_cache;
         cache_order := m_char_reverse_lm_text_score_cache_order;
@@ -15445,7 +15486,7 @@ begin
         score_cache.AddOrSetValue(cache_key, score);
         Exit;
     end;
-    while score_cache.Count >= c_cache_max_entries do
+    while score_cache.Count >= cache_max_entries do
     begin
         if cache_order.Count <= 0 then
         begin
@@ -15727,7 +15768,7 @@ function TncSqliteDictionary.get_char_lm_text_scores_internal(
     const texts: TArray<string>; out scores: TArray<Integer>;
     const include_begin_marker: Boolean; const left_context: string;
     const include_end_marker: Boolean; const cache_only: Boolean;
-    const reverse_model: Boolean): Boolean;
+    const reverse_model: Boolean; const short_context_cache: Boolean): Boolean;
 const
     c_begin_marker = #2;
     c_end_marker = #3;
@@ -15771,6 +15812,7 @@ var
     cached_entry: TncCharLmCacheEntry;
     entry_cache: TDictionary<string, TncCharLmCacheEntry>;
     score_cache: TDictionary<string, Integer>;
+    use_short_context_score_cache: Boolean;
 
     function try_get_loaded_entry(const ngram: string;
         out score: Integer; out backoff: Integer): Boolean;
@@ -15795,7 +15837,28 @@ begin
     begin
         Exit;
     end;
-    if reverse_model then
+    use_short_context_score_cache := short_context_cache and
+        (not reverse_model) and
+        (not include_begin_marker) and (not include_end_marker) and
+        (Trim(left_context) <> '');
+    if use_short_context_score_cache then
+    begin
+        for text_idx := 0 to High(texts) do
+        begin
+            if (get_text_unit_count_local(Trim(texts[text_idx])) <= 0) or
+                (get_text_unit_count_local(Trim(texts[text_idx])) > 4) then
+            begin
+                use_short_context_score_cache := False;
+                Break;
+            end;
+        end;
+    end;
+    if use_short_context_score_cache then
+    begin
+        entry_cache := m_char_lm_entry_cache;
+        score_cache := m_char_lm_short_context_text_score_cache;
+    end
+    else if reverse_model then
     begin
         entry_cache := m_char_reverse_lm_entry_cache;
         score_cache := m_char_reverse_lm_text_score_cache;
@@ -16110,7 +16173,8 @@ begin
         if not cache_only then
         begin
             cache_char_lm_text_score(cache_prefix + normalized_text,
-                scores[text_idx], reverse_model);
+                scores[text_idx], reverse_model,
+                use_short_context_score_cache);
         end;
         end;
         Result := True;
@@ -16144,6 +16208,14 @@ function TncSqliteDictionary.get_char_lm_continuation_scores(
 begin
     Result := get_char_lm_text_scores_internal(texts, scores, False,
         left_context, False);
+end;
+
+function TncSqliteDictionary.get_char_lm_short_context_scores(
+    const left_context: string; const texts: TArray<string>;
+    out scores: TArray<Integer>): Boolean;
+begin
+    Result := get_char_lm_text_scores_internal(texts, scores, False,
+        left_context, False, False, False, True);
 end;
 
 function TncSqliteDictionary.get_char_reverse_lm_suffix_scores(

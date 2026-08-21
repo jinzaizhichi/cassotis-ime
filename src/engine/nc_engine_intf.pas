@@ -45,7 +45,8 @@ type
         segment_count: Integer;
     end;
 
-    TncCharLmScoreMode = (clsm_full, clsm_suffix, clsm_context);
+    TncCharLmScoreMode = (clsm_full, clsm_suffix, clsm_context,
+        clsm_short_context);
 
     TncSearchBudgetMode = (
         sbm_production,
@@ -107,6 +108,7 @@ type
     TncLongBeamStateDebug = record
         position: Integer;
         input_syllable_count: Integer;
+        first_chunk_query_key: string;
         original_rank: Integer;
         base_score: Integer;
         char_lm_score: Integer;
@@ -140,6 +142,34 @@ type
         target: Boolean;
         text: string;
         segment_path: string;
+    end;
+
+    TncLongExactEdgeStageDebug = record
+        position: Integer;
+        input_syllable_count: Integer;
+        chunk_units: Integer;
+        exact_rank: Integer;
+        raw_weight: Integer;
+        top_weight: Integer;
+        effective_score: Integer;
+        edge_score: Int64;
+        source_user: Boolean;
+        baseline_option: Boolean;
+        target: Boolean;
+        stage_mask: Integer;
+        query_key: string;
+        text: string;
+    end;
+
+    TncLongRetainedExactEdge = record
+        position: Integer;
+        chunk_units: Integer;
+        exact_rank: Integer;
+        raw_weight: Integer;
+        top_weight: Integer;
+        confidence: Int64;
+        query_key: string;
+        text: string;
     end;
 
     TncLongChainCandidateDebug = record
@@ -190,6 +220,12 @@ type
         anchor_units: Integer;
         has_anchor: Boolean;
         baseline_lineage: Boolean;
+        retained_exact_edge_count: Integer;
+        retained_exact_edge_position: Integer;
+        retained_exact_edge_units: Integer;
+        retained_exact_edge_rank: Integer;
+        retained_exact_edge_top_weight: Integer;
+        retained_exact_edge_confidence: Int64;
         has_left_context: Boolean;
         query_path_bonus: Integer;
         query_path_penalty: Integer;
@@ -284,6 +320,22 @@ type
         complete_pool_consensus_changed_support: Integer;
         complete_pool_consensus_changed_top_match: Boolean;
         complete_pool_local_pairwise_score: Integer;
+        complete_pool_edge_model_anchor_count: Integer;
+        complete_pool_edge_model_score_total: Integer;
+        complete_pool_edge_model_score_max: Integer;
+        complete_pool_edge_model_word_count: Integer;
+        complete_pool_edge_model_word_score_total: Integer;
+        complete_pool_edge_model_word_score_min: Integer;
+        complete_pool_edge_model_word_score_max: Integer;
+        complete_pool_edge_model_word_score_mean: Integer;
+        exact_edge_shadow_rank: Integer;
+        exact_edge_auditor_score: Int64;
+        exact_edge_auditor_threshold: Int64;
+        exact_edge_auditor_decision: Integer;
+        exact_edge_fallback_auditor_score: Int64;
+        exact_edge_fallback_auditor_threshold: Int64;
+        exact_edge_fallback_auditor_decision: Integer;
+        exact_edge_pre_auditor_rank: Integer;
         ranker_score: Int64;
         abstain_score: Int64;
         ranker_applied: Boolean;
@@ -375,6 +427,12 @@ type
         word_lm_strong_ratio: Integer;
         word_lm_trigram_ratio: Integer;
         word_lm_zero_count: Integer;
+        retained_exact_edge_count: Integer;
+        retained_exact_edge_position: Integer;
+        retained_exact_edge_units: Integer;
+        retained_exact_edge_rank: Integer;
+        retained_exact_edge_top_weight: Integer;
+        retained_exact_edge_confidence: Int64;
     end;
 
     TncLongChainRuntimeCandidateArray = TArray<TncLongChainRuntimeCandidate>;
@@ -386,7 +444,8 @@ type
         lcps_local_repair,
         lcps_exact_pair,
         lcps_proper_name,
-        lcps_exact_lattice
+        lcps_exact_lattice,
+        lcps_exact_edge_chain
     );
 
     TncLongCompletePoolRuntimeCandidate = record
@@ -437,12 +496,22 @@ type
         local_pairwise_insert_rank: Integer;
         pool_rank: Integer;
         visible_evidence: Boolean;
+        edge_model_anchor_count: Integer;
+        edge_model_score_total: Integer;
+        edge_model_score_max: Integer;
+        edge_model_word_count: Integer;
+        edge_model_word_score_total: Integer;
+        edge_model_word_score_min: Integer;
+        edge_model_word_score_max: Integer;
+        edge_model_word_score_mean: Integer;
     end;
 
     TncLongCompletePoolRuntimeCandidateArray =
         TArray<TncLongCompletePoolRuntimeCandidate>;
 
     TncLongBeamStateDebugArray = TArray<TncLongBeamStateDebug>;
+    TncLongExactEdgeStageDebugArray = TArray<TncLongExactEdgeStageDebug>;
+    TncLongRetainedExactEdgeArray = TArray<TncLongRetainedExactEdge>;
 
     TncEngine = class
     private
@@ -622,6 +691,8 @@ type
         m_debug_capture_long_beam_states: Boolean;
         m_debug_expand_long_beam_states: Boolean;
         m_debug_long_beam_states: TncLongBeamStateDebugArray;
+        m_debug_long_exact_edge_stages: TncLongExactEdgeStageDebugArray;
+        m_debug_long_exact_edge_stage_index: TDictionary<string, Integer>;
         m_debug_long_chain_candidates: TncLongChainCandidateDebugArray;
         m_debug_long_final_candidates: TncLongFinalCandidateDebugArray;
         m_debug_capture_long_ranking_stages: Boolean;
@@ -629,6 +700,7 @@ type
         m_runtime_long_chain_candidates: TncLongChainRuntimeCandidateArray;
         m_runtime_long_complete_pool_candidates:
             TncLongCompletePoolRuntimeCandidateArray;
+        m_runtime_long_retained_exact_edges: TncLongRetainedExactEdgeArray;
         m_long_complete_pool_pairwise_text: string;
         m_long_complete_pool_pairwise_insert_rank: Integer;
         m_debug_long_chain_beam_width: Integer;
@@ -834,7 +906,9 @@ type
         procedure apply_long_final_visible_candidate_ranking(
             var candidates: TncCandidateList;
             var source_indices: TArray<Integer>;
-            const unified_pool_final: Boolean = False);
+            const unified_pool_final: Boolean = False;
+            const exact_edge_baseline_top1: string = '';
+            const exact_edge_baseline_top2: string = '');
         function build_segment_candidates(out out_candidates: TncCandidateList;
             const include_full_path: Boolean; out out_path_search_elapsed_ms: Int64;
             const allow_relaxed_missing_apostrophe: Boolean = False): Boolean;
@@ -879,6 +953,15 @@ type
         procedure toggle_input_mode;
         procedure reset_debug_target_recall_metrics;
         function is_debug_target_recall_prefix(const text: string): Boolean;
+        procedure debug_note_long_exact_edge_stage(const position: Integer;
+            const input_syllable_count: Integer; const query_key: string;
+            const text: string; const chunk_units: Integer;
+            const exact_rank: Integer; const raw_weight: Integer;
+            const top_weight: Integer; const effective_score: Integer;
+            const edge_score: Int64; const source_user: Boolean;
+            const baseline_option: Boolean; const stage_mask: Integer);
+        procedure debug_mark_long_exact_path_complete_pool(
+            const segment_path: string);
     public
         constructor create(const config: TncEngineConfig;
             const defer_optional_dictionary_models: Boolean = False;
@@ -943,6 +1026,10 @@ type
         function get_debug_candidate_segment_path(const candidate_index: Integer): string;
         function get_debug_target_recall(const target_text: string): TncTargetRecallDebug;
         function get_debug_long_beam_states: TncLongBeamStateDebugArray;
+        function get_debug_long_exact_edge_stages:
+            TncLongExactEdgeStageDebugArray;
+        function get_debug_long_retained_exact_edges:
+            TncLongRetainedExactEdgeArray;
         function get_debug_long_chain_candidates:
             TncLongChainCandidateDebugArray;
         function get_debug_long_final_candidates:
@@ -993,6 +1080,9 @@ implementation
 uses
     nc_long_search_ranker_model,
     nc_long_edge_retention_model,
+    nc_long_exact_edge_lattice_ranker_model,
+    nc_long_exact_edge_candidate_auditor_model,
+    nc_long_exact_edge_fallback_auditor_model,
     nc_long_second_stage_ranker_model,
     nc_long_pairwise_residual_model,
     nc_long_final_ranker_model,
@@ -1398,11 +1488,17 @@ begin
     m_debug_capture_long_ranking_stages := False;
     m_debug_expand_long_beam_states := False;
     SetLength(m_debug_long_beam_states, 0);
+    SetLength(m_debug_long_exact_edge_stages, 0);
+    if m_debug_long_exact_edge_stage_index <> nil then
+    begin
+        m_debug_long_exact_edge_stage_index.Clear;
+    end;
     SetLength(m_debug_long_chain_candidates, 0);
     SetLength(m_debug_long_final_candidates, 0);
     SetLength(m_debug_long_ranking_stages, 0);
     SetLength(m_runtime_long_chain_candidates, 0);
     SetLength(m_runtime_long_complete_pool_candidates, 0);
+    SetLength(m_runtime_long_retained_exact_edges, 0);
     m_long_complete_pool_pairwise_text := '';
     m_long_complete_pool_pairwise_insert_rank := -1;
     m_debug_long_chain_beam_width := 0;
@@ -1503,6 +1599,8 @@ begin
     m_current_segment_path_map := TDictionary<string, string>.Create;
     m_current_segment_path_score_map := TDictionary<string, Integer>.Create;
     m_current_segment_path_query_prefix_map := TDictionary<string, string>.Create;
+    m_debug_long_exact_edge_stage_index :=
+        TDictionary<string, Integer>.Create;
     SetLength(m_candidate_segment_paths, 0);
     m_short_three_exact_pair_query := '';
     SetLength(m_short_three_exact_pair_texts, 0);
@@ -1801,6 +1899,11 @@ begin
         m_current_segment_path_query_prefix_map.Free;
         m_current_segment_path_query_prefix_map := nil;
     end;
+    if m_debug_long_exact_edge_stage_index <> nil then
+    begin
+        m_debug_long_exact_edge_stage_index.Free;
+        m_debug_long_exact_edge_stage_index := nil;
+    end;
     SetLength(m_candidate_segment_paths, 0);
 
     if m_confirmed_segments <> nil then
@@ -1988,7 +2091,7 @@ begin
             cache := m_lookup_char_lm_full_score_cache;
         clsm_suffix:
             cache := m_lookup_char_lm_suffix_score_cache;
-        clsm_context:
+        clsm_context, clsm_short_context:
             cache := m_lookup_char_lm_context_score_cache;
     else
         cache := nil;
@@ -2005,6 +2108,9 @@ begin
             clsm_context:
                 provider_ok := m_dictionary.get_char_lm_continuation_scores(
                     left_context, texts, scores);
+            clsm_short_context:
+                provider_ok := m_dictionary.get_char_lm_short_context_scores(
+                    left_context, texts, scores);
         else
             provider_ok := False;
         end;
@@ -2012,7 +2118,7 @@ begin
     end;
 
     context_key := '';
-    if score_mode = clsm_context then
+    if score_mode in [clsm_context, clsm_short_context] then
     begin
         context_key := Trim(left_context) + #1;
     end;
@@ -2050,6 +2156,9 @@ begin
                 missing_texts, missing_scores);
         clsm_context:
             provider_ok := m_dictionary.get_char_lm_continuation_scores(
+                left_context, missing_texts, missing_scores);
+        clsm_short_context:
+            provider_ok := m_dictionary.get_char_lm_short_context_scores(
                 left_context, missing_texts, missing_scores);
     else
         provider_ok := False;
@@ -3948,6 +4057,7 @@ begin
     m_runtime_redup_text := '';
     SetLength(m_runtime_long_chain_candidates, 0);
     SetLength(m_runtime_long_complete_pool_candidates, 0);
+    SetLength(m_runtime_long_retained_exact_edges, 0);
     m_long_complete_pool_pairwise_text := '';
     m_long_complete_pool_pairwise_insert_rank := -1;
     m_debug_target_recall_text := '';
@@ -4039,6 +4149,11 @@ begin
     m_debug_target_candidate_stage_mask := 0;
     m_debug_target_full_path_budget_exhausted := False;
     SetLength(m_debug_long_beam_states, 0);
+    SetLength(m_debug_long_exact_edge_stages, 0);
+    if m_debug_long_exact_edge_stage_index <> nil then
+    begin
+        m_debug_long_exact_edge_stage_index.Clear;
+    end;
     SetLength(m_debug_long_chain_candidates, 0);
     SetLength(m_debug_long_final_candidates, 0);
     SetLength(m_debug_long_ranking_stages, 0);
@@ -4056,6 +4171,123 @@ begin
             Copy(m_debug_target_recall_text, 1, Length(normalized_text)));
 end;
 
+procedure TncEngine.debug_note_long_exact_edge_stage(const position: Integer;
+    const input_syllable_count: Integer; const query_key: string;
+    const text: string; const chunk_units: Integer;
+    const exact_rank: Integer; const raw_weight: Integer;
+    const top_weight: Integer; const effective_score: Integer;
+    const edge_score: Int64; const source_user: Boolean;
+    const baseline_option: Boolean; const stage_mask: Integer);
+var
+    normalized_text: string;
+    key: string;
+    idx: Integer;
+    item: TncLongExactEdgeStageDebug;
+begin
+    if (not m_debug_capture_long_beam_states) or
+        (m_debug_target_recall_text = '') or (position < 0) or
+        (chunk_units <= 0) or (exact_rank <= 0) or (stage_mask = 0) then
+    begin
+        Exit;
+    end;
+    normalized_text := Trim(text);
+    if normalized_text = '' then
+    begin
+        Exit;
+    end;
+    key := IntToStr(position) + #1 + IntToStr(chunk_units) + #1 +
+        LowerCase(normalized_text);
+    if (m_debug_long_exact_edge_stage_index <> nil) and
+        m_debug_long_exact_edge_stage_index.TryGetValue(key, idx) then
+    begin
+        item := m_debug_long_exact_edge_stages[idx];
+        item.stage_mask := item.stage_mask or stage_mask;
+        item.baseline_option := item.baseline_option or baseline_option;
+        item.source_user := item.source_user or source_user;
+        item.target := item.target or SameText(normalized_text,
+            Copy(m_debug_target_recall_text, position + 1,
+            Length(normalized_text)));
+        if (item.exact_rank <= 0) or (exact_rank < item.exact_rank) then
+        begin
+            item.exact_rank := exact_rank;
+            item.raw_weight := raw_weight;
+            item.top_weight := top_weight;
+            item.effective_score := effective_score;
+            item.edge_score := edge_score;
+            item.query_key := query_key;
+        end;
+        m_debug_long_exact_edge_stages[idx] := item;
+        Exit;
+    end;
+
+    item := Default(TncLongExactEdgeStageDebug);
+    item.position := position;
+    item.input_syllable_count := input_syllable_count;
+    item.chunk_units := chunk_units;
+    item.exact_rank := exact_rank;
+    item.raw_weight := raw_weight;
+    item.top_weight := top_weight;
+    item.effective_score := effective_score;
+    item.edge_score := edge_score;
+    item.source_user := source_user;
+    item.baseline_option := baseline_option;
+    item.target := SameText(normalized_text,
+        Copy(m_debug_target_recall_text, position + 1,
+        Length(normalized_text)));
+    item.stage_mask := stage_mask;
+    item.query_key := query_key;
+    item.text := normalized_text;
+    idx := Length(m_debug_long_exact_edge_stages);
+    SetLength(m_debug_long_exact_edge_stages, idx + 1);
+    m_debug_long_exact_edge_stages[idx] := item;
+    if m_debug_long_exact_edge_stage_index <> nil then
+    begin
+        m_debug_long_exact_edge_stage_index.Add(key, idx);
+    end;
+end;
+
+procedure TncEngine.debug_mark_long_exact_path_complete_pool(
+    const segment_path: string);
+const
+    c_complete_pool_stage = 8;
+var
+    parts: TArray<string>;
+    part: string;
+    normalized_part: string;
+    position: Integer;
+    chunk_units: Integer;
+    key: string;
+    idx: Integer;
+    item: TncLongExactEdgeStageDebug;
+begin
+    if (not m_debug_capture_long_beam_states) or
+        (m_debug_long_exact_edge_stage_index = nil) or
+        (Trim(segment_path) = '') then
+    begin
+        Exit;
+    end;
+    parts := segment_path.Split([c_segment_path_separator]);
+    position := 0;
+    for part in parts do
+    begin
+        normalized_part := Trim(part);
+        chunk_units := get_candidate_text_unit_count(normalized_part);
+        if chunk_units <= 0 then
+        begin
+            Continue;
+        end;
+        key := IntToStr(position) + #1 + IntToStr(chunk_units) + #1 +
+            LowerCase(normalized_part);
+        if m_debug_long_exact_edge_stage_index.TryGetValue(key, idx) then
+        begin
+            item := m_debug_long_exact_edge_stages[idx];
+            item.stage_mask := item.stage_mask or c_complete_pool_stage;
+            m_debug_long_exact_edge_stages[idx] := item;
+        end;
+        Inc(position, chunk_units);
+    end;
+end;
+
 procedure TncEngine.debug_set_target_recall_text(const text: string);
 begin
     m_debug_target_recall_text := Trim(text);
@@ -4066,7 +4298,16 @@ procedure TncEngine.debug_enable_long_beam_state_capture(
     const enabled: Boolean);
 begin
     m_debug_capture_long_beam_states := enabled;
+    // Beam reports are the training/audit surface for exact-edge recall.  The
+    // expanded option set must stay diagnostic-only until a trained model has
+    // passed the independent-corpus and production benchmark gates.
+    m_debug_expand_long_beam_states := enabled;
     SetLength(m_debug_long_beam_states, 0);
+    SetLength(m_debug_long_exact_edge_stages, 0);
+    if m_debug_long_exact_edge_stage_index <> nil then
+    begin
+        m_debug_long_exact_edge_stage_index.Clear;
+    end;
 end;
 
 procedure TncEngine.debug_enable_long_ranking_stage_capture(
@@ -50014,6 +50255,11 @@ var
         c_chain_lattice_long_prebeam_width = 28;
         c_chain_lattice_long_prebeam_min_syllables = 13;
         c_chain_lattice_lm_reserved_slots = 1;
+        c_chain_lattice_exact_edge_reserved_slots = 0;
+        c_chain_lattice_exact_edge_side_lane_enabled = False;
+        c_chain_lattice_exact_edge_min_units = 3;
+        c_chain_lattice_exact_edge_min_model_score = 2.5;
+        c_chain_lattice_exact_edge_probe_limit = 8;
         c_chain_lattice_lm_min_bonus = 360;
         c_chain_lattice_lm_min_gain = 120;
         c_chain_lattice_lm_max_base_gap = 90000;
@@ -50044,6 +50290,7 @@ var
             first_chunk_top_weight: Integer;
             first_chunk_effective_score: Integer;
             first_chunk_edge_score: Int64;
+            first_chunk_exact_edge_model_score: Double;
             first_chunk_source_user: Boolean;
             first_chunk_baseline_option: Boolean;
             score: Integer;
@@ -50051,6 +50298,12 @@ var
             has_anchor: Boolean;
             anchor_units: Integer;
             baseline_lineage: Boolean;
+            retained_exact_edge_count: Integer;
+            retained_exact_edge_position: Integer;
+            retained_exact_edge_units: Integer;
+            retained_exact_edge_rank: Integer;
+            retained_exact_edge_top_weight: Integer;
+            retained_exact_edge_confidence: Int64;
             ranker_original_rank: Integer;
             ranker_first_stage_score: Integer;
             ranker_second_stage_score: Int64;
@@ -50081,6 +50334,7 @@ var
             top_weight: Integer;
             edge_retention_score: Int64;
             edge_retention_features: TncLongEdgeRetentionFeatures;
+            exact_edge_model_score: Double;
             source_user: Boolean;
             direct_exact: Boolean;
             edge_expanded_only: Boolean;
@@ -50145,6 +50399,13 @@ var
         fast_phase_tick: UInt64;
         suppress_subspan_oracle_local: Boolean;
         use_direct_chunk_lattice_only: Boolean;
+        runtime_exact_edge_probe_collection_local: Boolean;
+
+        function use_exact_edge_ranker_expansion_local: Boolean;
+        begin
+            Result := m_debug_expand_long_beam_states or
+                runtime_exact_edge_probe_collection_local;
+        end;
 
         function get_chain_beam_width_local: Integer;
         begin
@@ -55476,13 +55737,20 @@ var
             c_fast_completion_bonus = 2200;
         var
             state_map_local: array of TExactChunkChainStateArray;
+            retained_state_map_local: array of TExactChunkChainStateArray;
             baseline_candidates_local: TExactChunkChainStateArray;
+            legacy_candidates_local: TExactChunkChainStateArray;
+            edge_probe_candidates_local: TExactChunkChainStateArray;
+            exact_edge_model_candidates_local:
+                TExactChunkChainStateArray;
             pos_local: Integer;
             chunk_len_local: Integer;
             next_pos_local: Integer;
             options_local: TExactChunkChainOptionArray;
+            probe_options_local: TExactChunkChainOptionArray;
             option_idx_local: Integer;
             suffix_idx_local: Integer;
+            suffix_count_local: Integer;
             debug_state_idx_local: Integer;
             candidate_state_local: TExactChunkChainState;
             suffix_state_local: TExactChunkChainState;
@@ -55508,10 +55776,12 @@ var
             prefix_state_local: TExactChunkChainState;
             prefix_state_found_local: Boolean;
             prefix_state_present_local: Boolean;
+            retained_slot_states_local: TExactChunkChainStateArray;
             fast_seed_requires_dp_local: Boolean;
             minimum_score_local: Integer;
             baseline_acceptance_score_local: Integer;
             baseline_acceptance_found_local: Boolean;
+            exact_edge_reserved_slots_local: Integer;
 
             function try_get_sentence_final_modal_particle_text_fast_local(
                 const syllable_key_local: string; out out_text_local: string): Boolean;
@@ -56638,24 +56908,26 @@ var
 
             procedure add_fast_option_local(
                 var local_options: TExactChunkChainOptionArray;
+                var legacy_options: TExactChunkChainOptionArray;
                 const local_option: TExactChunkChainOption);
             var
                 candidate_option_local: TExactChunkChainOption;
                 rebuilt_options_local: TExactChunkChainOptionArray;
                 insert_idx_local: Integer;
                 option_idx_local: Integer;
-                baseline_count_local: Integer;
-                baseline_limit_local: Integer;
                 existing_idx_local: Integer;
                 existing_option_local: TExactChunkChainOption;
                 duplicate_found_local: Boolean;
+                exact_edge_features_local:
+                    TncLongExactEdgeLatticeFeatures;
+                exact_edge_score_local: Integer;
             begin
                 if local_option.text = '' then
                 begin
                     Exit;
                 end;
 
-                if not m_debug_expand_long_beam_states then
+                if not use_exact_edge_ranker_expansion_local then
                 begin
                     candidate_option_local := local_option;
                     candidate_option_local.baseline_option := True;
@@ -56684,6 +56956,36 @@ var
                             get_chain_option_limit_local);
                     end;
                     Exit;
+                end;
+
+                if not local_option.edge_expanded_only then
+                begin
+                    candidate_option_local := local_option;
+                    candidate_option_local.baseline_option := True;
+                    SetLength(legacy_options, Length(legacy_options) + 1);
+                    legacy_options[High(legacy_options)] :=
+                        candidate_option_local;
+                    for insert_idx_local := High(legacy_options) downto 1 do
+                    begin
+                        if not is_exact_chunk_option_better_local(
+                            legacy_options[insert_idx_local],
+                            legacy_options[insert_idx_local - 1]) then
+                        begin
+                            Break;
+                        end;
+                        existing_option_local :=
+                            legacy_options[insert_idx_local - 1];
+                        legacy_options[insert_idx_local - 1] :=
+                            legacy_options[insert_idx_local];
+                        legacy_options[insert_idx_local] :=
+                            existing_option_local;
+                    end;
+                    if Length(legacy_options) >
+                        get_chain_option_limit_local then
+                    begin
+                        SetLength(legacy_options,
+                            get_chain_option_limit_local);
+                    end;
                 end;
 
                 candidate_option_local := local_option;
@@ -56755,26 +57057,19 @@ var
                     end;
                 end;
 
-                baseline_limit_local := get_chain_option_limit_local;
-                SetLength(rebuilt_options_local, 0);
-                baseline_count_local := 0;
-                for option_idx_local := 0 to High(local_options) do
+                rebuilt_options_local := Copy(legacy_options, 0,
+                    Length(legacy_options));
+                for option_idx_local := 0 to
+                    High(rebuilt_options_local) do
                 begin
-                    if local_options[option_idx_local].edge_expanded_only or
-                        (baseline_count_local >= baseline_limit_local) then
-                    begin
-                        Continue;
-                    end;
-                    existing_option_local := local_options[option_idx_local];
+                    existing_option_local :=
+                        rebuilt_options_local[option_idx_local];
                     existing_option_local.baseline_option := True;
-                    SetLength(rebuilt_options_local,
-                        Length(rebuilt_options_local) + 1);
-                    rebuilt_options_local[High(rebuilt_options_local)] :=
+                    rebuilt_options_local[option_idx_local] :=
                         existing_option_local;
-                    Inc(baseline_count_local);
                 end;
 
-                if m_debug_expand_long_beam_states then
+                if use_exact_edge_ranker_expansion_local then
                 begin
                     { Training capture needs every probed exact edge. Normal
                       search deliberately keeps the legacy option set until an
@@ -56812,6 +57107,62 @@ var
                             Length(rebuilt_options_local) + 1);
                         rebuilt_options_local[
                             High(rebuilt_options_local)] :=
+                            existing_option_local;
+                    end;
+                end;
+                for option_idx_local := 0 to
+                    High(rebuilt_options_local) do
+                begin
+                    existing_option_local :=
+                        rebuilt_options_local[option_idx_local];
+                    if existing_option_local.direct_exact and
+                        (existing_option_local.exact_rank > 0) and
+                        (not existing_option_local.source_user) and
+                        (get_candidate_text_unit_count(
+                        existing_option_local.text) >=
+                        c_chain_lattice_exact_edge_min_units) then
+                    begin
+                        existing_option_local.edge_retention_score :=
+                            long_edge_retention_score(
+                            existing_option_local.exact_rank,
+                            existing_option_local.raw_weight,
+                            existing_option_local.top_weight,
+                            existing_option_local.score,
+                            get_candidate_text_unit_count(
+                            existing_option_local.text),
+                            pos_local, syllable_count_local, False);
+                        if existing_option_local.edge_retention_score >
+                            High(Integer) then
+                        begin
+                            exact_edge_score_local := High(Integer);
+                        end
+                        else if existing_option_local.edge_retention_score <
+                            Low(Integer) then
+                        begin
+                            exact_edge_score_local := Low(Integer);
+                        end
+                        else
+                        begin
+                            exact_edge_score_local :=
+                                existing_option_local.edge_retention_score;
+                        end;
+                        build_long_exact_edge_lattice_features(
+                            existing_option_local.query_key,
+                            existing_option_local.text,
+                            get_candidate_text_unit_count(
+                            existing_option_local.text),
+                            existing_option_local.exact_rank,
+                            existing_option_local.raw_weight,
+                            existing_option_local.top_weight,
+                            existing_option_local.score,
+                            exact_edge_score_local,
+                            pos_local, syllable_count_local,
+                            existing_option_local.baseline_option,
+                            exact_edge_features_local);
+                        existing_option_local.exact_edge_model_score :=
+                            long_exact_edge_lattice_ranker_score(
+                            exact_edge_features_local);
+                        rebuilt_options_local[option_idx_local] :=
                             existing_option_local;
                     end;
                 end;
@@ -58633,6 +58984,18 @@ var
                         states_inner[state_idx_inner].ranker_first_stage_score;
                     m_runtime_long_chain_candidates[state_idx_inner].second_stage_score :=
                         states_inner[state_idx_inner].ranker_second_stage_score;
+                    m_runtime_long_chain_candidates[state_idx_inner].retained_exact_edge_count :=
+                        states_inner[state_idx_inner].retained_exact_edge_count;
+                    m_runtime_long_chain_candidates[state_idx_inner].retained_exact_edge_position :=
+                        states_inner[state_idx_inner].retained_exact_edge_position;
+                    m_runtime_long_chain_candidates[state_idx_inner].retained_exact_edge_units :=
+                        states_inner[state_idx_inner].retained_exact_edge_units;
+                    m_runtime_long_chain_candidates[state_idx_inner].retained_exact_edge_rank :=
+                        states_inner[state_idx_inner].retained_exact_edge_rank;
+                    m_runtime_long_chain_candidates[state_idx_inner].retained_exact_edge_top_weight :=
+                        states_inner[state_idx_inner].retained_exact_edge_top_weight;
+                    m_runtime_long_chain_candidates[state_idx_inner].retained_exact_edge_confidence :=
+                        states_inner[state_idx_inner].retained_exact_edge_confidence;
                     m_runtime_long_chain_candidates[state_idx_inner].feature_query_key :=
                         lookup_text;
                     m_runtime_long_chain_candidates[state_idx_inner].feature_context_key :=
@@ -58820,6 +59183,18 @@ var
                         features_inner.has_anchor;
                     captured_inner[state_idx_inner].baseline_lineage :=
                         features_inner.baseline_lineage;
+                    captured_inner[state_idx_inner].retained_exact_edge_count :=
+                        states_inner[state_idx_inner].retained_exact_edge_count;
+                    captured_inner[state_idx_inner].retained_exact_edge_position :=
+                        states_inner[state_idx_inner].retained_exact_edge_position;
+                    captured_inner[state_idx_inner].retained_exact_edge_units :=
+                        states_inner[state_idx_inner].retained_exact_edge_units;
+                    captured_inner[state_idx_inner].retained_exact_edge_rank :=
+                        states_inner[state_idx_inner].retained_exact_edge_rank;
+                    captured_inner[state_idx_inner].retained_exact_edge_top_weight :=
+                        states_inner[state_idx_inner].retained_exact_edge_top_weight;
+                    captured_inner[state_idx_inner].retained_exact_edge_confidence :=
+                        states_inner[state_idx_inner].retained_exact_edge_confidence;
                     captured_inner[state_idx_inner].has_left_context :=
                         features_inner.has_left_context;
                     captured_inner[state_idx_inner].query_path_bonus :=
@@ -58864,6 +59239,70 @@ var
                     Exit;
                 end;
                 m_debug_long_chain_candidates := captured_inner;
+            end;
+
+            procedure remember_retained_exact_edge_local(
+                const position_inner: Integer;
+                const state_inner: TExactChunkChainState;
+                const confidence_inner: Int64);
+            var
+                edge_idx_inner: Integer;
+                edge_units_inner: Integer;
+                item_inner: TncLongRetainedExactEdge;
+            begin
+                edge_units_inner := get_candidate_text_unit_count(
+                    state_inner.first_chunk_text);
+                if (position_inner < 0) or (edge_units_inner < 2) or
+                    (edge_units_inner > c_chain_lattice_max_chunk_syllables) or
+                    (state_inner.first_chunk_exact_rank <= 0) or
+                    (Trim(state_inner.first_chunk_query_key) = '') or
+                    (Trim(state_inner.first_chunk_text) = '') then
+                begin
+                    Exit;
+                end;
+                for edge_idx_inner := 0 to
+                    High(m_runtime_long_retained_exact_edges) do
+                begin
+                    if m_runtime_long_retained_exact_edges[
+                        edge_idx_inner].position <> position_inner then
+                    begin
+                        Continue;
+                    end;
+                    if confidence_inner <= m_runtime_long_retained_exact_edges[
+                        edge_idx_inner].confidence then
+                    begin
+                        Exit;
+                    end;
+                    item_inner := m_runtime_long_retained_exact_edges[
+                        edge_idx_inner];
+                    item_inner.chunk_units := edge_units_inner;
+                    item_inner.exact_rank :=
+                        state_inner.first_chunk_exact_rank;
+                    item_inner.raw_weight :=
+                        state_inner.first_chunk_raw_weight;
+                    item_inner.top_weight :=
+                        state_inner.first_chunk_top_weight;
+                    item_inner.confidence := confidence_inner;
+                    item_inner.query_key :=
+                        state_inner.first_chunk_query_key;
+                    item_inner.text := state_inner.first_chunk_text;
+                    m_runtime_long_retained_exact_edges[
+                        edge_idx_inner] := item_inner;
+                    Exit;
+                end;
+                item_inner := Default(TncLongRetainedExactEdge);
+                item_inner.position := position_inner;
+                item_inner.chunk_units := edge_units_inner;
+                item_inner.exact_rank := state_inner.first_chunk_exact_rank;
+                item_inner.raw_weight := state_inner.first_chunk_raw_weight;
+                item_inner.top_weight := state_inner.first_chunk_top_weight;
+                item_inner.confidence := confidence_inner;
+                item_inner.query_key := state_inner.first_chunk_query_key;
+                item_inner.text := state_inner.first_chunk_text;
+                SetLength(m_runtime_long_retained_exact_edges,
+                    Length(m_runtime_long_retained_exact_edges) + 1);
+                m_runtime_long_retained_exact_edges[
+                    High(m_runtime_long_retained_exact_edges)] := item_inner;
             end;
 
             procedure prune_baseline_fast_states_by_char_lm_local(
@@ -59071,7 +59510,8 @@ var
             procedure prune_fast_states_by_char_lm_local(
                 var states_inner: TExactChunkChainStateArray;
                 const state_start_pos_inner: Integer;
-                const baseline_states_inner: TExactChunkChainStateArray);
+                const baseline_states_inner: TExactChunkChainStateArray;
+                const enable_edge_probe_inner: Boolean);
             const
                 c_char_lm_original_rank_penalty = 20;
             var
@@ -59087,6 +59527,7 @@ var
                 best_score_inner: Integer;
                 current_score_inner: Integer;
                 baseline_keep_inner: Integer;
+                legacy_keep_width_inner: Integer;
                 best_model_score_inner: Int64;
                 current_model_score_inner: Int64;
                 insert_idx_inner: Integer;
@@ -59098,6 +59539,11 @@ var
                 baseline_prebeam_width_inner: Integer;
                 baseline_candidate_count_inner: Integer;
                 baseline_ranks_inner: TArray<Integer>;
+                shared_features_valid_inner: TArray<Boolean>;
+                shared_single_segments_inner: TArray<Integer>;
+                shared_head_lm_bonus_inner: TArray<Integer>;
+                shared_full_lm_bonus_inner: TArray<Integer>;
+                shared_lm_stats_inner: TArray<TLongWordLmBoundaryStats>;
 
                 function get_structure_signature_inner(
                     const state_inner: TExactChunkChainState): string;
@@ -59147,15 +59593,31 @@ var
                     end;
                 end;
 
-                function get_search_model_score_inner(
-                    const state_idx_score_inner: Integer): Int64;
+                procedure ensure_shared_state_features_inner(
+                    const state_idx_score_inner: Integer);
                 var
                     score_parts_inner: TArray<string>;
                     score_part_inner: string;
                     single_segments_score_inner: Integer;
-                    lm_stats_score_inner: TLongWordLmBoundaryStats;
-                    full_lm_bonus_score_inner: Integer;
                 begin
+                    if Length(shared_features_valid_inner) <>
+                        Length(states_inner) then
+                    begin
+                        SetLength(shared_features_valid_inner,
+                            Length(states_inner));
+                        SetLength(shared_single_segments_inner,
+                            Length(states_inner));
+                        SetLength(shared_head_lm_bonus_inner,
+                            Length(states_inner));
+                        SetLength(shared_full_lm_bonus_inner,
+                            Length(states_inner));
+                        SetLength(shared_lm_stats_inner,
+                            Length(states_inner));
+                    end;
+                    if shared_features_valid_inner[state_idx_score_inner] then
+                    begin
+                        Exit;
+                    end;
                     single_segments_score_inner := 0;
                     score_parts_inner := states_inner[
                         state_idx_score_inner].path.Split(
@@ -59168,33 +59630,57 @@ var
                             Inc(single_segments_score_inner);
                         end;
                     end;
-                    full_lm_bonus_score_inner :=
+                    shared_single_segments_inner[state_idx_score_inner] :=
+                        single_segments_score_inner;
+                    shared_lm_stats_inner[state_idx_score_inner] :=
+                        Default(TLongWordLmBoundaryStats);
+                    shared_full_lm_bonus_inner[state_idx_score_inner] :=
                         get_exact_chunk_chain_state_lm_bonus_local(
                         states_inner[state_idx_score_inner],
-                        state_start_pos_inner, lm_stats_score_inner);
-                    if lm_stats_score_inner.min_bonus = MaxInt then
+                        state_start_pos_inner,
+                        shared_lm_stats_inner[state_idx_score_inner]);
+                    if shared_lm_stats_inner[
+                        state_idx_score_inner].min_bonus = MaxInt then
                     begin
-                        lm_stats_score_inner.min_bonus := 0;
+                        shared_lm_stats_inner[
+                            state_idx_score_inner].min_bonus := 0;
+                    end;
+                    shared_head_lm_bonus_inner[state_idx_score_inner] :=
+                        get_exact_chunk_chain_state_head_lm_bonus_local(
+                        states_inner[state_idx_score_inner],
+                        state_start_pos_inner);
+                    shared_features_valid_inner[state_idx_score_inner] := True;
+                end;
+
+                function get_search_model_score_inner(
+                    const state_idx_score_inner: Integer;
+                    const original_rank_inner: Integer): Int64;
+                var
+                    rank_inner: Integer;
+                begin
+                    ensure_shared_state_features_inner(state_idx_score_inner);
+                    rank_inner := original_rank_inner;
+                    if rank_inner <= 0 then
+                    begin
+                        rank_inner := state_idx_score_inner + 1;
                     end;
                     Result := long_search_ranker_score(
                         char_scores_inner[state_idx_score_inner],
-                        state_idx_score_inner + 1,
+                        rank_inner,
                         states_inner[state_idx_score_inner].score,
-                        get_exact_chunk_chain_state_head_lm_bonus_local(
-                        states_inner[state_idx_score_inner],
-                        state_start_pos_inner),
-                        full_lm_bonus_score_inner,
-                        lm_stats_score_inner.boundary_count,
-                        lm_stats_score_inner.min_bonus,
-                        lm_stats_score_inner.max_bonus,
-                        lm_stats_score_inner.first_bonus,
-                        lm_stats_score_inner.last_bonus,
-                        lm_stats_score_inner.supported_count,
-                        lm_stats_score_inner.strong_count,
-                        lm_stats_score_inner.trigram_count,
-                        lm_stats_score_inner.zero_count,
+                        shared_head_lm_bonus_inner[state_idx_score_inner],
+                        shared_full_lm_bonus_inner[state_idx_score_inner],
+                        shared_lm_stats_inner[state_idx_score_inner].boundary_count,
+                        shared_lm_stats_inner[state_idx_score_inner].min_bonus,
+                        shared_lm_stats_inner[state_idx_score_inner].max_bonus,
+                        shared_lm_stats_inner[state_idx_score_inner].first_bonus,
+                        shared_lm_stats_inner[state_idx_score_inner].last_bonus,
+                        shared_lm_stats_inner[state_idx_score_inner].supported_count,
+                        shared_lm_stats_inner[state_idx_score_inner].strong_count,
+                        shared_lm_stats_inner[state_idx_score_inner].trigram_count,
+                        shared_lm_stats_inner[state_idx_score_inner].zero_count,
                         states_inner[state_idx_score_inner].segments,
-                        single_segments_score_inner,
+                        shared_single_segments_inner[state_idx_score_inner],
                         get_candidate_text_unit_count(states_inner[
                         state_idx_score_inner].first_chunk_text),
                         states_inner[state_idx_score_inner].anchor_units,
@@ -59316,6 +59802,8 @@ var
                         capture_item_inner.position := state_start_pos_inner;
                         capture_item_inner.input_syllable_count :=
                             syllable_count_local;
+                        capture_item_inner.first_chunk_query_key :=
+                            states_inner[capture_idx_inner].first_chunk_query_key;
                         capture_item_inner.original_rank := capture_idx_inner + 1;
                         capture_item_inner.base_score :=
                             states_inner[capture_idx_inner].score;
@@ -59415,6 +59903,19 @@ var
                             Trim(states_inner[capture_idx_inner].text);
                         capture_item_inner.segment_path :=
                             states_inner[capture_idx_inner].path;
+                        debug_note_long_exact_edge_stage(
+                            state_start_pos_inner, syllable_count_local,
+                            states_inner[capture_idx_inner].first_chunk_query_key,
+                            states_inner[capture_idx_inner].first_chunk_text,
+                            capture_item_inner.first_chunk_units,
+                            capture_item_inner.first_chunk_exact_rank,
+                            capture_item_inner.first_chunk_raw_weight,
+                            capture_item_inner.first_chunk_top_weight,
+                            capture_item_inner.first_chunk_effective_score,
+                            capture_item_inner.first_chunk_edge_score,
+                            capture_item_inner.first_chunk_source_user,
+                            capture_item_inner.first_chunk_baseline_option,
+                            2 or (Ord(capture_item_inner.selected) * 4));
                         m_debug_long_beam_states[capture_base_inner +
                             capture_idx_inner] := capture_item_inner;
                     end;
@@ -59457,7 +59958,8 @@ var
                 if (Length(states_inner) <= beam_width_inner) and
                     (baseline_candidate_count_inner <= Min(
                     c_chain_lattice_baseline_beam_width,
-                    effective_keep_width_inner)) then
+                    effective_keep_width_inner)) and
+                    (not enable_edge_probe_inner) then
                 begin
                     note_target_stage_inner(True);
                     Exit;
@@ -59465,7 +59967,7 @@ var
 
                 base_keep_inner := get_chain_char_base_slots_local;
                 score_start_idx_inner := base_keep_inner;
-                if m_debug_expand_long_beam_states then
+                if enable_edge_probe_inner then
                 begin
                     score_start_idx_inner := 0;
                 end;
@@ -59552,9 +60054,8 @@ var
                     Inc(keep_idx_inner);
                 end;
 
-                // Keep the old six-slot character-LM beam intact. The two
-                // wider slots are a strict recall expansion rather than a
-                // replacement for previously retained states.
+                // Keep the character-LM, search-model and structure slots
+                // intact. Exact-edge recall runs in its bounded side lattice.
                 baseline_keep_inner := Min(
                     c_chain_lattice_baseline_beam_width,
                     effective_keep_width_inner);
@@ -59572,12 +60073,18 @@ var
                     best_model_score_inner := Low(Int64);
                     for state_idx_inner := 0 to High(states_inner) do
                     begin
-                        if selected_inner[state_idx_inner] then
+                        if selected_inner[state_idx_inner] or
+                            (enable_edge_probe_inner and
+                            (not states_inner[
+                            state_idx_inner].baseline_lineage)) then
                         begin
                             Continue;
                         end;
                         current_model_score_inner :=
-                            get_search_model_score_inner(state_idx_inner);
+                            get_search_model_score_inner(state_idx_inner,
+                            IfThen(enable_edge_probe_inner,
+                            baseline_ranks_inner[state_idx_inner],
+                            state_idx_inner + 1));
                         if (best_idx_inner < 0) or
                             (current_model_score_inner >
                             best_model_score_inner) then
@@ -59605,14 +60112,28 @@ var
                     for state_idx_inner := 0 to High(states_inner) do
                     begin
                         if selected_inner[state_idx_inner] or
+                            (enable_edge_probe_inner and
+                            (not states_inner[
+                            state_idx_inner].baseline_lineage)) or
                             has_selected_structure_inner(
                             get_structure_signature_inner(
                             states_inner[state_idx_inner])) then
                         begin
                             Continue;
                         end;
-                        current_score_inner := char_scores_inner[state_idx_inner] -
-                            state_idx_inner * c_char_lm_original_rank_penalty;
+                        if enable_edge_probe_inner then
+                        begin
+                            current_score_inner := char_scores_inner[
+                                state_idx_inner] -
+                                (baseline_ranks_inner[state_idx_inner] - 1) *
+                                c_char_lm_original_rank_penalty;
+                        end
+                        else
+                        begin
+                            current_score_inner := char_scores_inner[
+                                state_idx_inner] - state_idx_inner *
+                                c_char_lm_original_rank_penalty;
+                        end;
                         if (best_idx_inner < 0) or
                             (current_score_inner > best_score_inner) then
                         begin
@@ -59631,13 +60152,16 @@ var
                     end;
                 end;
 
-                while keep_idx_inner < effective_keep_width_inner do
+                legacy_keep_width_inner := effective_keep_width_inner;
+                while keep_idx_inner < legacy_keep_width_inner do
                 begin
-                    if not select_best_char_lm_state_inner(False) then
+                    if not select_best_char_lm_state_inner(
+                        enable_edge_probe_inner) then
                     begin
                         Break;
                     end;
                 end;
+
                 capture_beam_states_inner;
                 SetLength(kept_states_inner, keep_idx_inner);
 
@@ -59703,6 +60227,7 @@ var
                 split_path_penalty_inner: Integer;
                 split_lm_bonus_inner: Integer;
                 normalized_single_key_inner: string;
+                legacy_options_inner: TExactChunkChainOptionArray;
 
                 function is_place_noun_unit_for_fast_context_inner(
                     const unit_value_inner: string): Boolean;
@@ -60237,7 +60762,7 @@ var
                                 Break;
                             end;
                             scan_raw_weight_inner := 0;
-                            if m_debug_expand_long_beam_states then
+                            if use_exact_edge_ranker_expansion_local then
                             begin
                                 if Trim(lookup_results_inner[
                                     scan_idx_inner_local].comment) <> '' then
@@ -60264,7 +60789,7 @@ var
                                 single_score_inner :=
                                     get_exact_chunk_effective_weight_local(
                                     lookup_results_inner[scan_idx_inner_local]);
-                                if m_debug_expand_long_beam_states then
+                                if use_exact_edge_ranker_expansion_local then
                                 begin
                                     single_rank_inner :=
                                         scan_idx_inner_local + 1;
@@ -60304,7 +60829,8 @@ var
                     single_option_inner.segments := 1;
                     single_option_inner.has_anchor := True;
                     single_option_inner.anchor_units := 1;
-                    add_fast_option_local(out_options_local, single_option_inner);
+                    add_fast_option_local(out_options_local,
+                        legacy_options_inner, single_option_inner);
                 end;
 
                 procedure add_single_exact_edge_candidates_inner(
@@ -60393,13 +60919,14 @@ var
                         edge_option_inner.has_anchor := False;
                         edge_option_inner.anchor_units := 0;
                         add_fast_option_local(out_options_local,
-                            edge_option_inner);
+                            legacy_options_inner, edge_option_inner);
                     end;
                 end;
 
             begin
                 Result := False;
                 SetLength(out_options_local, 0);
+                SetLength(legacy_options_inner, 0);
                 best_direct_raw_weight_inner := Low(Integer);
                 query_key_inner := build_query_key_local(start_idx_local,
                     chunk_len_inner);
@@ -60449,7 +60976,8 @@ var
                         option_inner.segments := 1;
                         option_inner.has_anchor := False;
                         option_inner.anchor_units := 0;
-                        add_fast_option_local(out_options_local, option_inner);
+                        add_fast_option_local(out_options_local,
+                            legacy_options_inner, option_inner);
                         if normalized_single_key_inner = 'wei' then
                         begin
                             if not SameText(text_inner, string(Char($672A))) then
@@ -60469,7 +60997,7 @@ var
                             add_fixed_single_option_inner(string(Char($4E0E)),
                                 2200);
                         end;
-                        if m_debug_expand_long_beam_states then
+                        if use_exact_edge_ranker_expansion_local then
                         begin
                             add_single_exact_edge_candidates_inner(text_inner);
                         end;
@@ -60495,7 +61023,7 @@ var
                     begin
                         add_fixed_single_option_inner(string(Char($4E0E)), 2200);
                     end;
-                    if m_debug_expand_long_beam_states then
+                    if use_exact_edge_ranker_expansion_local then
                     begin
                         add_single_exact_edge_candidates_inner(text_inner);
                     end;
@@ -60619,7 +61147,8 @@ var
                                 option_inner.segments := 2;
                                 option_inner.has_anchor := True;
                                 option_inner.anchor_units := 2;
-                                add_fast_option_local(out_options_local, option_inner);
+                                add_fast_option_local(out_options_local,
+                                    legacy_options_inner, option_inner);
                             end;
                         end;
                     end;
@@ -60723,7 +61252,8 @@ var
                                 option_inner.segments := 2;
                                 option_inner.has_anchor := True;
                                 option_inner.anchor_units := chunk_len_inner;
-                                add_fast_option_local(out_options_local, option_inner);
+                                add_fast_option_local(out_options_local,
+                                    legacy_options_inner, option_inner);
                             end;
                         end;
                     end;
@@ -60864,7 +61394,8 @@ var
                                 option_inner.segments := 2;
                                 option_inner.has_anchor := True;
                                 option_inner.anchor_units := chunk_len_inner;
-                                add_fast_option_local(out_options_local, option_inner);
+                                add_fast_option_local(out_options_local,
+                                    legacy_options_inner, option_inner);
                             end;
                         end;
                     end;
@@ -60954,7 +61485,7 @@ var
                     option_inner.path := text_inner;
                     option_inner.query_key := query_key_inner;
                     option_inner.score := score_inner;
-                    if m_debug_expand_long_beam_states then
+                    if use_exact_edge_ranker_expansion_local then
                     begin
                         option_inner.exact_rank := lookup_idx_inner + 1;
                         option_inner.raw_weight := raw_weight_inner;
@@ -60968,7 +61499,8 @@ var
                     option_inner.has_anchor :=
                         chunk_len_inner >= c_chain_min_anchor_syllables;
                     option_inner.anchor_units := chunk_len_inner;
-                    add_fast_option_local(out_options_local, option_inner);
+                    add_fast_option_local(out_options_local,
+                        legacy_options_inner, option_inner);
                 end;
                 Result := Length(out_options_local) > 0;
             end;
@@ -60976,6 +61508,30 @@ var
             procedure consider_generated_fast_state_local(
                 const generated_state_inner: TExactChunkChainState);
             begin
+                debug_note_long_exact_edge_stage(pos_local,
+                    syllable_count_local,
+                    generated_state_inner.first_chunk_query_key,
+                    generated_state_inner.first_chunk_text,
+                    get_candidate_text_unit_count(
+                    generated_state_inner.first_chunk_text),
+                    generated_state_inner.first_chunk_exact_rank,
+                    generated_state_inner.first_chunk_raw_weight,
+                    generated_state_inner.first_chunk_top_weight,
+                    generated_state_inner.first_chunk_effective_score,
+                    generated_state_inner.first_chunk_edge_score,
+                    generated_state_inner.first_chunk_source_user,
+                    generated_state_inner.first_chunk_baseline_option, 1);
+                if (not m_debug_expand_long_beam_states) and
+                    (exact_edge_reserved_slots_local > 0) and
+                    ((not generated_state_inner.first_chunk_baseline_option) or
+                    (generated_state_inner.retained_exact_edge_count > 0)) then
+                begin
+                    consider_exact_chunk_chain_state_local(
+                        edge_probe_candidates_local,
+                        generated_state_inner, pos_local,
+                        get_chain_prebeam_width_local);
+                    Exit;
+                end;
                 consider_exact_chunk_chain_state_local(
                     state_map_local[pos_local], generated_state_inner,
                     pos_local, get_chain_prebeam_width_local);
@@ -60987,12 +61543,519 @@ var
                 end;
             end;
 
+            procedure collect_runtime_exact_edge_probe_states_local(
+                const start_pos_inner: Integer;
+                const chunk_len_inner: Integer;
+                const next_pos_inner: Integer;
+                const probe_options_inner: TExactChunkChainOptionArray);
+            var
+                probe_idx_inner: Integer;
+                probe_state_inner: TExactChunkChainState;
+                probe_suffix_inner: TExactChunkChainState;
+                context_adjust_inner: Integer;
+
+                procedure retain_model_probe_inner(
+                    const value_inner: TExactChunkChainState);
+                var
+                    existing_idx_inner: Integer;
+                    insert_idx_inner: Integer;
+                    swap_inner: TExactChunkChainState;
+                begin
+                    for existing_idx_inner := 0 to
+                        High(exact_edge_model_candidates_local) do
+                    begin
+                        if SameText(exact_edge_model_candidates_local[
+                            existing_idx_inner].first_chunk_query_key,
+                            value_inner.first_chunk_query_key) and
+                            SameText(Trim(exact_edge_model_candidates_local[
+                            existing_idx_inner].first_chunk_text),
+                            Trim(value_inner.first_chunk_text)) and
+                            SameText(exact_edge_model_candidates_local[
+                            existing_idx_inner].path, value_inner.path) then
+                        begin
+                            if value_inner.score >
+                                exact_edge_model_candidates_local[
+                                existing_idx_inner].score then
+                            begin
+                                exact_edge_model_candidates_local[
+                                    existing_idx_inner] := value_inner;
+                            end;
+                            Exit;
+                        end;
+                    end;
+                    SetLength(exact_edge_model_candidates_local,
+                        Length(exact_edge_model_candidates_local) + 1);
+                    exact_edge_model_candidates_local[
+                        High(exact_edge_model_candidates_local)] :=
+                        value_inner;
+                    insert_idx_inner :=
+                        High(exact_edge_model_candidates_local);
+                    while insert_idx_inner > 0 do
+                    begin
+                        if exact_edge_model_candidates_local[
+                            insert_idx_inner - 1].first_chunk_exact_edge_model_score >
+                            exact_edge_model_candidates_local[
+                            insert_idx_inner].first_chunk_exact_edge_model_score then
+                        begin
+                            Break;
+                        end;
+                        if (exact_edge_model_candidates_local[
+                            insert_idx_inner - 1].first_chunk_exact_edge_model_score =
+                            exact_edge_model_candidates_local[
+                            insert_idx_inner].first_chunk_exact_edge_model_score) and
+                            (exact_edge_model_candidates_local[
+                            insert_idx_inner - 1].score >=
+                            exact_edge_model_candidates_local[
+                            insert_idx_inner].score) then
+                        begin
+                            Break;
+                        end;
+                        swap_inner := exact_edge_model_candidates_local[
+                            insert_idx_inner - 1];
+                        exact_edge_model_candidates_local[
+                            insert_idx_inner - 1] :=
+                            exact_edge_model_candidates_local[
+                            insert_idx_inner];
+                        exact_edge_model_candidates_local[
+                            insert_idx_inner] := swap_inner;
+                        Dec(insert_idx_inner);
+                    end;
+                    if Length(exact_edge_model_candidates_local) >
+                        c_chain_lattice_exact_edge_probe_limit then
+                    begin
+                        SetLength(exact_edge_model_candidates_local,
+                            c_chain_lattice_exact_edge_probe_limit);
+                    end;
+                end;
+            begin
+                if m_debug_expand_long_beam_states or
+                    (exact_edge_reserved_slots_local <= 0) or
+                    (chunk_len_inner <
+                    c_chain_lattice_exact_edge_min_units) or
+                    (Length(state_map_local[next_pos_inner]) <= 0) then
+                begin
+                    Exit;
+                end;
+                probe_suffix_inner := state_map_local[next_pos_inner][0];
+                for probe_idx_inner := 0 to High(probe_options_inner) do
+                begin
+                    if (not probe_options_inner[
+                        probe_idx_inner].direct_exact) or
+                        probe_options_inner[probe_idx_inner].source_user or
+                        (probe_options_inner[
+                        probe_idx_inner].exact_edge_model_score <
+                        c_chain_lattice_exact_edge_min_model_score) then
+                    begin
+                        Continue;
+                    end;
+                    probe_state_inner := Default(TExactChunkChainState);
+                    probe_state_inner.text := probe_options_inner[
+                        probe_idx_inner].text + probe_suffix_inner.text;
+                    probe_state_inner.path := probe_options_inner[
+                        probe_idx_inner].path;
+                    if probe_suffix_inner.path <> '' then
+                    begin
+                        probe_state_inner.path := probe_state_inner.path +
+                            c_segment_path_separator +
+                            probe_suffix_inner.path;
+                    end;
+                    probe_state_inner.first_chunk_text :=
+                        probe_options_inner[probe_idx_inner].text;
+                    probe_state_inner.first_chunk_query_key :=
+                        probe_options_inner[probe_idx_inner].query_key;
+                    probe_state_inner.first_chunk_exact_rank :=
+                        probe_options_inner[probe_idx_inner].exact_rank;
+                    probe_state_inner.first_chunk_raw_weight :=
+                        probe_options_inner[probe_idx_inner].raw_weight;
+                    probe_state_inner.first_chunk_top_weight :=
+                        probe_options_inner[probe_idx_inner].top_weight;
+                    probe_state_inner.first_chunk_effective_score :=
+                        probe_options_inner[probe_idx_inner].score;
+                    probe_state_inner.first_chunk_edge_score :=
+                        probe_options_inner[
+                        probe_idx_inner].edge_retention_score;
+                    probe_state_inner.first_chunk_exact_edge_model_score :=
+                        probe_options_inner[
+                        probe_idx_inner].exact_edge_model_score;
+                    probe_state_inner.first_chunk_source_user := False;
+                    probe_state_inner.first_chunk_baseline_option :=
+                        probe_options_inner[
+                        probe_idx_inner].baseline_option;
+                    probe_state_inner.score := probe_options_inner[
+                        probe_idx_inner].score + probe_suffix_inner.score;
+                    Dec(probe_state_inner.score,
+                        get_competing_boundary_penalty_fast_local(
+                        probe_state_inner.text, start_pos_inner,
+                        chunk_len_inner,
+                        probe_options_inner[probe_idx_inner],
+                        probe_suffix_inner));
+                    if probe_suffix_inner.first_chunk_text <> '' then
+                    begin
+                        Inc(probe_state_inner.score,
+                            m_dictionary.get_context_bonus(
+                            probe_options_inner[probe_idx_inner].text,
+                            probe_suffix_inner.first_chunk_text));
+                        Inc(probe_state_inner.score,
+                            get_adjacent_exact_chunk_context_bonus_local(
+                            probe_options_inner[probe_idx_inner].text,
+                            probe_suffix_inner.first_chunk_text));
+                        context_adjust_inner :=
+                            get_function_particle_suffix_context_adjustment_local(
+                            effective_syllables[start_pos_inner +
+                            chunk_len_inner - 1].text,
+                            probe_options_inner[probe_idx_inner].text,
+                            probe_suffix_inner.first_chunk_text);
+                        Inc(probe_state_inner.score,
+                            context_adjust_inner);
+                    end;
+                    probe_state_inner.segments :=
+                        probe_options_inner[probe_idx_inner].segments +
+                        probe_suffix_inner.segments;
+                    probe_state_inner.has_anchor :=
+                        probe_options_inner[probe_idx_inner].has_anchor or
+                        probe_suffix_inner.has_anchor;
+                    probe_state_inner.anchor_units := Max(
+                        probe_options_inner[probe_idx_inner].anchor_units,
+                        probe_suffix_inner.anchor_units);
+                    probe_state_inner.retained_exact_edge_count :=
+                        probe_suffix_inner.retained_exact_edge_count;
+                    probe_state_inner.retained_exact_edge_position :=
+                        probe_suffix_inner.retained_exact_edge_position;
+                    probe_state_inner.retained_exact_edge_units :=
+                        probe_suffix_inner.retained_exact_edge_units;
+                    probe_state_inner.retained_exact_edge_rank :=
+                        probe_suffix_inner.retained_exact_edge_rank;
+                    probe_state_inner.retained_exact_edge_top_weight :=
+                        probe_suffix_inner.retained_exact_edge_top_weight;
+                    probe_state_inner.retained_exact_edge_confidence :=
+                        probe_suffix_inner.retained_exact_edge_confidence;
+                    probe_state_inner.baseline_lineage := False;
+                    debug_note_long_exact_edge_stage(start_pos_inner,
+                        syllable_count_local,
+                        probe_state_inner.first_chunk_query_key,
+                        probe_state_inner.first_chunk_text,
+                        chunk_len_inner,
+                        probe_state_inner.first_chunk_exact_rank,
+                        probe_state_inner.first_chunk_raw_weight,
+                        probe_state_inner.first_chunk_top_weight,
+                        probe_state_inner.first_chunk_effective_score,
+                        probe_state_inner.first_chunk_edge_score,
+                        False, False, 1);
+                    retain_model_probe_inner(probe_state_inner);
+                end;
+            end;
+
+            function try_get_retained_edge_for_position_local(
+                const position_inner: Integer;
+                out edge_inner: TncLongRetainedExactEdge): Boolean;
+            var
+                edge_idx_inner: Integer;
+            begin
+                Result := False;
+                edge_inner := Default(TncLongRetainedExactEdge);
+                for edge_idx_inner := 0 to
+                    High(m_runtime_long_retained_exact_edges) do
+                begin
+                    if m_runtime_long_retained_exact_edges[
+                        edge_idx_inner].position = position_inner then
+                    begin
+                        edge_inner := m_runtime_long_retained_exact_edges[
+                            edge_idx_inner];
+                        Exit(True);
+                    end;
+                end;
+            end;
+
+            procedure mark_state_with_retained_edge_local(
+                var state_inner: TExactChunkChainState;
+                const edge_inner: TncLongRetainedExactEdge);
+            begin
+                if (state_inner.retained_exact_edge_count <= 0) or
+                    (edge_inner.confidence >
+                    state_inner.retained_exact_edge_confidence) then
+                begin
+                    state_inner.retained_exact_edge_position :=
+                        edge_inner.position;
+                    state_inner.retained_exact_edge_units :=
+                        edge_inner.chunk_units;
+                    state_inner.retained_exact_edge_rank :=
+                        edge_inner.exact_rank;
+                    state_inner.retained_exact_edge_top_weight :=
+                        edge_inner.top_weight;
+                    state_inner.retained_exact_edge_confidence :=
+                        edge_inner.confidence;
+                end;
+                Inc(state_inner.retained_exact_edge_count);
+                state_inner.baseline_lineage := False;
+            end;
+
+            function retained_slot_state_is_better_local(
+                const candidate_inner: TExactChunkChainState;
+                const current_inner: TExactChunkChainState;
+                const state_start_pos_inner: Integer): Boolean;
+            var
+                candidate_lm_inner: Integer;
+                current_lm_inner: Integer;
+                candidate_stats_inner: TLongWordLmBoundaryStats;
+                current_stats_inner: TLongWordLmBoundaryStats;
+                candidate_confidence_inner: Int64;
+                current_confidence_inner: Int64;
+                candidate_score_inner: Int64;
+                current_score_inner: Int64;
+
+                function bounded_confidence_inner(
+                    const value_inner: Int64): Int64;
+                begin
+                    Result := value_inner div 8;
+                    if Result < -48000 then
+                    begin
+                        Result := -48000;
+                    end
+                    else if Result > 96000 then
+                    begin
+                        Result := 96000;
+                    end;
+                end;
+            begin
+                candidate_lm_inner := get_exact_chunk_chain_state_lm_bonus_local(
+                    candidate_inner, state_start_pos_inner,
+                    candidate_stats_inner);
+                current_lm_inner := get_exact_chunk_chain_state_lm_bonus_local(
+                    current_inner, state_start_pos_inner, current_stats_inner);
+                candidate_confidence_inner := bounded_confidence_inner(
+                    candidate_inner.retained_exact_edge_confidence);
+                current_confidence_inner := bounded_confidence_inner(
+                    current_inner.retained_exact_edge_confidence);
+                candidate_score_inner := Int64(candidate_inner.score) +
+                    candidate_lm_inner + candidate_confidence_inner;
+                current_score_inner := Int64(current_inner.score) +
+                    current_lm_inner + current_confidence_inner;
+                Result := candidate_score_inner > current_score_inner;
+                if candidate_score_inner = current_score_inner then
+                begin
+                    Result := candidate_inner.retained_exact_edge_count >
+                        current_inner.retained_exact_edge_count;
+                end;
+                if (candidate_score_inner = current_score_inner) and
+                    (candidate_inner.retained_exact_edge_count =
+                    current_inner.retained_exact_edge_count) then
+                begin
+                    Result := is_exact_chunk_chain_state_better_local(
+                        candidate_inner, current_inner);
+                end;
+            end;
+
+            procedure choose_retained_exact_edge_slots_local(
+                const position_inner: Integer;
+                const propagated_states_inner:
+                    TExactChunkChainStateArray;
+                const model_states_inner: TExactChunkChainStateArray;
+                out states_inner: TExactChunkChainStateArray);
+            var
+                retained_edge_inner: TncLongRetainedExactEdge;
+                source_idx_inner: Integer;
+                candidate_inner: TExactChunkChainState;
+
+                procedure consider_side_state_inner(
+                    const value_inner: TExactChunkChainState);
+                var
+                    side_idx_inner: Integer;
+                    insert_idx_inner: Integer;
+                    swap_inner: TExactChunkChainState;
+                begin
+                    for side_idx_inner := 0 to High(states_inner) do
+                    begin
+                        if SameText(Trim(states_inner[side_idx_inner].text),
+                            Trim(value_inner.text)) and
+                            SameText(states_inner[side_idx_inner].path,
+                            value_inner.path) then
+                        begin
+                            if retained_slot_state_is_better_local(
+                                value_inner, states_inner[side_idx_inner],
+                                position_inner) then
+                            begin
+                                states_inner[side_idx_inner] := value_inner;
+                            end;
+                            Exit;
+                        end;
+                    end;
+                    SetLength(states_inner, Length(states_inner) + 1);
+                    states_inner[High(states_inner)] := value_inner;
+                    insert_idx_inner := High(states_inner);
+                    while (insert_idx_inner > 0) and
+                        retained_slot_state_is_better_local(
+                        states_inner[insert_idx_inner],
+                        states_inner[insert_idx_inner - 1],
+                        position_inner) do
+                    begin
+                        swap_inner := states_inner[insert_idx_inner - 1];
+                        states_inner[insert_idx_inner - 1] :=
+                            states_inner[insert_idx_inner];
+                        states_inner[insert_idx_inner] := swap_inner;
+                        Dec(insert_idx_inner);
+                    end;
+                    if Length(states_inner) >
+                        exact_edge_reserved_slots_local then
+                    begin
+                        SetLength(states_inner,
+                            exact_edge_reserved_slots_local);
+                    end;
+                end;
+            begin
+                SetLength(states_inner, 0);
+                for source_idx_inner := 0 to
+                    High(propagated_states_inner) do
+                begin
+                    candidate_inner :=
+                        propagated_states_inner[source_idx_inner];
+                    if candidate_inner.retained_exact_edge_count > 0 then
+                    begin
+                        consider_side_state_inner(candidate_inner);
+                    end;
+                end;
+                if Length(model_states_inner) <= 0 then
+                begin
+                    Exit;
+                end;
+                retained_edge_inner := Default(TncLongRetainedExactEdge);
+                retained_edge_inner.position := position_inner;
+                retained_edge_inner.chunk_units :=
+                    get_candidate_text_unit_count(
+                    model_states_inner[0].first_chunk_text);
+                retained_edge_inner.exact_rank :=
+                    model_states_inner[0].first_chunk_exact_rank;
+                retained_edge_inner.raw_weight :=
+                    model_states_inner[0].first_chunk_raw_weight;
+                retained_edge_inner.top_weight :=
+                    model_states_inner[0].first_chunk_top_weight;
+                retained_edge_inner.confidence := Round(
+                    model_states_inner[0].first_chunk_exact_edge_model_score *
+                    100000.0) + Int64(retained_edge_inner.chunk_units) *
+                    1000 - Int64(Max(0,
+                    retained_edge_inner.exact_rank - 1)) * 100;
+                retained_edge_inner.query_key :=
+                    model_states_inner[0].first_chunk_query_key;
+                retained_edge_inner.text :=
+                    model_states_inner[0].first_chunk_text;
+                if (retained_edge_inner.chunk_units <
+                    c_chain_lattice_exact_edge_min_units) or
+                    (model_states_inner[
+                    0].first_chunk_exact_edge_model_score <
+                    c_chain_lattice_exact_edge_min_model_score) then
+                begin
+                    Exit;
+                end;
+                for source_idx_inner := 0 to High(model_states_inner) do
+                begin
+                    candidate_inner := model_states_inner[source_idx_inner];
+                    if (candidate_inner.first_chunk_exact_rank <= 0) or
+                        candidate_inner.first_chunk_source_user or
+                        (not SameText(candidate_inner.first_chunk_query_key,
+                        retained_edge_inner.query_key)) or
+                        (not SameText(Trim(candidate_inner.first_chunk_text),
+                        Trim(retained_edge_inner.text))) then
+                    begin
+                        Continue;
+                    end;
+                    mark_state_with_retained_edge_local(candidate_inner,
+                        retained_edge_inner);
+                    consider_side_state_inner(candidate_inner);
+                end;
+                remember_retained_exact_edge_local(position_inner,
+                    model_states_inner[0], retained_edge_inner.confidence);
+            end;
+
+            procedure append_retained_exact_edge_slots_local(
+                var states_inner: TExactChunkChainStateArray;
+                const side_states_inner: TExactChunkChainStateArray);
+            var
+                side_idx_inner: Integer;
+                state_idx_inner: Integer;
+                duplicate_inner: Boolean;
+            begin
+                for side_idx_inner := 0 to Min(
+                    exact_edge_reserved_slots_local - 1,
+                    High(side_states_inner)) do
+                begin
+                    duplicate_inner := False;
+                    for state_idx_inner := 0 to High(states_inner) do
+                    begin
+                        if SameText(Trim(states_inner[state_idx_inner].text),
+                            Trim(side_states_inner[side_idx_inner].text)) and
+                            SameText(states_inner[state_idx_inner].path,
+                            side_states_inner[side_idx_inner].path) then
+                        begin
+                            duplicate_inner := True;
+                            Break;
+                        end;
+                    end;
+                    if duplicate_inner then
+                    begin
+                        Continue;
+                    end;
+                    SetLength(states_inner, Length(states_inner) + 1);
+                    states_inner[High(states_inner)] :=
+                        side_states_inner[side_idx_inner];
+                end;
+            end;
+
+            procedure sort_final_states_with_retained_slot_local(
+                var states_inner: TExactChunkChainStateArray);
+            var
+                normal_states_inner: TExactChunkChainStateArray;
+                side_states_inner: TExactChunkChainStateArray;
+                state_idx_inner: Integer;
+                normal_count_inner: Integer;
+                side_count_inner: Integer;
+            begin
+                normal_count_inner := 0;
+                side_count_inner := 0;
+                SetLength(normal_states_inner, Length(states_inner));
+                SetLength(side_states_inner, Length(states_inner));
+                for state_idx_inner := 0 to High(states_inner) do
+                begin
+                    if states_inner[
+                        state_idx_inner].retained_exact_edge_count > 0 then
+                    begin
+                        side_states_inner[side_count_inner] :=
+                            states_inner[state_idx_inner];
+                        Inc(side_count_inner);
+                    end
+                    else
+                    begin
+                        normal_states_inner[normal_count_inner] :=
+                            states_inner[state_idx_inner];
+                        Inc(normal_count_inner);
+                    end;
+                end;
+                SetLength(normal_states_inner, normal_count_inner);
+                SetLength(side_states_inner, side_count_inner);
+                sort_fast_states_by_order_score_local(normal_states_inner);
+                if side_count_inner > 0 then
+                begin
+                    sort_fast_states_by_order_score_local(side_states_inner);
+                    side_count_inner := Min(side_count_inner,
+                        exact_edge_reserved_slots_local);
+                    SetLength(normal_states_inner, normal_count_inner +
+                        side_count_inner);
+                    for state_idx_inner := 0 to side_count_inner - 1 do
+                    begin
+                        normal_states_inner[normal_count_inner +
+                            state_idx_inner] := side_states_inner[
+                            state_idx_inner];
+                    end;
+                end;
+                states_inner := normal_states_inner;
+            end;
+
         begin
             Result := False;
             out_text := '';
             out_path := '';
             out_score := 0;
             out_segments := 0;
+            exact_edge_reserved_slots_local :=
+                c_chain_lattice_exact_edge_reserved_slots;
             SetLength(out_states, 0);
             if (input_syllable_count < 6) or (input_syllable_count > 40) then
             begin
@@ -61052,9 +62115,11 @@ var
             end;
 
             SetLength(state_map_local, syllable_count_local + 1);
+            SetLength(retained_state_map_local, syllable_count_local + 1);
             for pos_local := 0 to syllable_count_local do
             begin
                 SetLength(state_map_local[pos_local], 0);
+                SetLength(retained_state_map_local[pos_local], 0);
             end;
             base_state_local := Default(TExactChunkChainState);
             base_state_local.score := 0;
@@ -61067,6 +62132,8 @@ var
             for pos_local := syllable_count_local - 1 downto 0 do
             begin
                 SetLength(baseline_candidates_local, 0);
+                SetLength(edge_probe_candidates_local, 0);
+                SetLength(exact_edge_model_candidates_local, 0);
                 for chunk_len_local := 1 to Min(c_fast_max_chunk_syllables,
                     syllable_count_local - pos_local) do
                 begin
@@ -61083,11 +62150,31 @@ var
 
                     for option_idx_local := 0 to High(options_local) do
                     begin
-                        for suffix_idx_local := 0 to
-                            High(state_map_local[next_pos_local]) do
+                        suffix_count_local :=
+                            Length(state_map_local[next_pos_local]);
+                        if c_chain_lattice_exact_edge_side_lane_enabled then
                         begin
-                            suffix_state_local :=
-                                state_map_local[next_pos_local][suffix_idx_local];
+                            Inc(suffix_count_local,
+                                Length(retained_state_map_local[
+                                next_pos_local]));
+                        end;
+                        for suffix_idx_local := 0 to
+                            suffix_count_local - 1 do
+                        begin
+                            if suffix_idx_local <
+                                Length(state_map_local[next_pos_local]) then
+                            begin
+                                suffix_state_local :=
+                                    state_map_local[next_pos_local][
+                                    suffix_idx_local];
+                            end
+                            else
+                            begin
+                                suffix_state_local :=
+                                    retained_state_map_local[next_pos_local][
+                                    suffix_idx_local - Length(
+                                    state_map_local[next_pos_local])];
+                            end;
                             candidate_state_local := Default(TExactChunkChainState);
                             candidate_state_local.text :=
                                 options_local[option_idx_local].text +
@@ -61119,6 +62206,9 @@ var
                                 options_local[option_idx_local].score;
                             candidate_state_local.first_chunk_edge_score :=
                                 options_local[option_idx_local].edge_retention_score;
+                            candidate_state_local.first_chunk_exact_edge_model_score :=
+                                options_local[
+                                option_idx_local].exact_edge_model_score;
                             candidate_state_local.first_chunk_source_user :=
                                 options_local[option_idx_local].source_user;
                             candidate_state_local.first_chunk_baseline_option :=
@@ -61270,6 +62360,18 @@ var
                                 candidate_state_local.anchor_units :=
                                     suffix_state_local.anchor_units;
                             end;
+                            candidate_state_local.retained_exact_edge_count :=
+                                suffix_state_local.retained_exact_edge_count;
+                            candidate_state_local.retained_exact_edge_position :=
+                                suffix_state_local.retained_exact_edge_position;
+                            candidate_state_local.retained_exact_edge_units :=
+                                suffix_state_local.retained_exact_edge_units;
+                            candidate_state_local.retained_exact_edge_rank :=
+                                suffix_state_local.retained_exact_edge_rank;
+                            candidate_state_local.retained_exact_edge_top_weight :=
+                                suffix_state_local.retained_exact_edge_top_weight;
+                            candidate_state_local.retained_exact_edge_confidence :=
+                                suffix_state_local.retained_exact_edge_confidence;
                             candidate_state_local.baseline_lineage :=
                                 suffix_state_local.baseline_lineage and
                                 options_local[option_idx_local].baseline_option;
@@ -61375,14 +62477,69 @@ var
                             end;
                         end;
                     end;
+                    if (not m_debug_expand_long_beam_states) and
+                        (exact_edge_reserved_slots_local > 0) then
+                    begin
+                        runtime_exact_edge_probe_collection_local := True;
+                        try
+                            if try_collect_fast_options_local(pos_local,
+                                chunk_len_local, probe_options_local) then
+                            begin
+                                collect_runtime_exact_edge_probe_states_local(
+                                    pos_local, chunk_len_local,
+                                    next_pos_local, probe_options_local);
+                            end;
+                        finally
+                            runtime_exact_edge_probe_collection_local := False;
+                        end;
+                    end;
                 end;
+                legacy_candidates_local := Copy(baseline_candidates_local,
+                    0, Length(baseline_candidates_local));
                 prune_baseline_fast_states_by_char_lm_local(
                     baseline_candidates_local, pos_local);
-                prune_fast_states_by_char_lm_local(
-                    state_map_local[pos_local], pos_local,
-                    baseline_candidates_local);
-                merge_baseline_and_expanded_fast_states_local(
-                    state_map_local[pos_local], baseline_candidates_local);
+                if m_debug_expand_long_beam_states then
+                begin
+                    prune_fast_states_by_char_lm_local(
+                        state_map_local[pos_local], pos_local,
+                        baseline_candidates_local, True);
+                    merge_baseline_and_expanded_fast_states_local(
+                        state_map_local[pos_local],
+                        baseline_candidates_local);
+                end
+                else if (exact_edge_reserved_slots_local > 0) and
+                    ((Length(edge_probe_candidates_local) > 0) or
+                    (Length(exact_edge_model_candidates_local) > 0)) then
+                begin
+                    choose_retained_exact_edge_slots_local(pos_local,
+                        edge_probe_candidates_local,
+                        exact_edge_model_candidates_local,
+                        retained_slot_states_local);
+                    prune_fast_states_by_char_lm_local(
+                        legacy_candidates_local, pos_local,
+                        baseline_candidates_local, False);
+                    state_map_local[pos_local] :=
+                        legacy_candidates_local;
+                    merge_baseline_and_expanded_fast_states_local(
+                        state_map_local[pos_local],
+                        baseline_candidates_local);
+                    if c_chain_lattice_exact_edge_side_lane_enabled and
+                        (Length(retained_slot_states_local) > 0) then
+                    begin
+                        retained_state_map_local[pos_local] :=
+                            Copy(retained_slot_states_local, 0,
+                            Length(retained_slot_states_local));
+                    end;
+                end
+                else
+                begin
+                    prune_fast_states_by_char_lm_local(
+                        state_map_local[pos_local], pos_local,
+                        baseline_candidates_local, False);
+                    merge_baseline_and_expanded_fast_states_local(
+                        state_map_local[pos_local],
+                        baseline_candidates_local);
+                end;
             end;
 
             if greedy_state_found_local then
@@ -61424,7 +62581,13 @@ var
                 end;
             end;
 
-            sort_fast_states_by_order_score_local(state_map_local[0]);
+            if c_chain_lattice_exact_edge_side_lane_enabled and
+                (Length(retained_state_map_local[0]) > 0) then
+            begin
+                append_retained_exact_edge_slots_local(state_map_local[0],
+                    retained_state_map_local[0]);
+            end;
+            sort_final_states_with_retained_slot_local(state_map_local[0]);
             capture_final_chain_candidates_local(state_map_local[0]);
 
             baseline_acceptance_score_local := Low(Integer);
@@ -66223,6 +67386,7 @@ var
         standalone_chunk_budget_remaining := 12;
         use_direct_chunk_lattice_only := True;
         suppress_subspan_oracle_local := syllable_count_local <= 8;
+        runtime_exact_edge_probe_collection_local := False;
         if suppress_subspan_oracle_local then
         begin
             Inc(m_disable_subspan_standalone_oracle);
@@ -78101,6 +79265,237 @@ var
         remember_segment_path_for_candidate(out_candidate.text, '',
             out_encoded_path, out_candidate.score);
         Result := True;
+    end;
+
+    function try_build_five_syllable_strong_exact_partition_candidate_local(
+        out out_candidate: TncCandidate;
+        out out_encoded_path: string): Boolean;
+    const
+        c_segment_probe_limit = 8;
+        c_min_pair_lm_weight = 420;
+        c_pair_bonus_cap = 1560;
+        c_complete_bonus = 300000;
+        c_pair_scale = 8;
+    var
+        syllables_local: TncPinyinParseResult;
+        best_score_local: Int64;
+
+        function build_key_local(const start_idx_local,
+            count_local: Integer): string;
+        var
+            idx_local: Integer;
+        begin
+            Result := '';
+            if (start_idx_local < 0) or (count_local <= 0) or
+                (start_idx_local + count_local > Length(syllables_local)) then
+            begin
+                Exit;
+            end;
+            for idx_local := start_idx_local to
+                start_idx_local + count_local - 1 do
+            begin
+                Result := Result + normalize_pinyin_text(
+                    syllables_local[idx_local].text);
+            end;
+        end;
+
+        function collect_exact_segments_local(const start_idx_local,
+            count_local: Integer; out values_local: TncCandidateList): Boolean;
+        var
+            key_local: string;
+            raw_local: TncCandidateList;
+            idx_local: Integer;
+            text_local: string;
+        begin
+            SetLength(values_local, 0);
+            key_local := build_key_local(start_idx_local, count_local);
+            if (key_local = '') or
+                (not dictionary_exact_lookup_cached(key_local, raw_local)) then
+            begin
+                Exit(False);
+            end;
+            for idx_local := 0 to High(raw_local) do
+            begin
+                if Length(values_local) >= c_segment_probe_limit then
+                begin
+                    Break;
+                end;
+                if Trim(raw_local[idx_local].comment) <> '' then
+                begin
+                    Continue;
+                end;
+                text_local := Trim(raw_local[idx_local].text);
+                if (text_local = '') or
+                    (get_candidate_text_unit_count(text_local) <> count_local) then
+                begin
+                    Continue;
+                end;
+                SetLength(values_local, Length(values_local) + 1);
+                values_local[High(values_local)] := raw_local[idx_local];
+            end;
+            Result := Length(values_local) > 0;
+        end;
+
+        function segment_weight_local(const value_local: TncCandidate): Integer;
+        begin
+            Result := value_local.score;
+            if value_local.has_dict_weight and
+                (value_local.dict_weight > Result) then
+            begin
+                Result := value_local.dict_weight;
+            end;
+            Result := Min(Result, 4096);
+        end;
+
+        function pair_bonus_local(const evidence_local: TncPairPathEvidenceList;
+            const encoded_path_local: string): Integer;
+        var
+            evidence_idx_local: Integer;
+            lm_weight_local: Integer;
+        begin
+            Result := 0;
+            for evidence_idx_local := 0 to High(evidence_local) do
+            begin
+                if not SameText(Trim(evidence_local[evidence_idx_local].encoded_path),
+                    encoded_path_local) then
+                begin
+                    Continue;
+                end;
+                lm_weight_local := evidence_local[evidence_idx_local].lm_transition_weight;
+                if lm_weight_local < c_min_pair_lm_weight then
+                begin
+                    Exit(0);
+                end;
+                Exit(Min(c_pair_bonus_cap, lm_weight_local * 3));
+            end;
+        end;
+
+        procedure consider_partition_local(const first_units_local,
+            second_units_local, third_units_local: Integer);
+        var
+            first_values_local: TncCandidateList;
+            second_values_local: TncCandidateList;
+            third_values_local: TncCandidateList;
+            first_idx_local: Integer;
+            second_idx_local: Integer;
+            third_idx_local: Integer;
+            first_text_local: string;
+            second_text_local: string;
+            third_text_local: string;
+            first_pair_key_local: string;
+            second_pair_key_local: string;
+            first_pair_evidence_local: TncPairPathEvidenceList;
+            second_pair_evidence_local: TncPairPathEvidenceList;
+            pair_first_local: Integer;
+            pair_second_local: Integer;
+            score_local: Int64;
+        begin
+            if (first_units_local + second_units_local +
+                third_units_local <> 5) or
+                (not collect_exact_segments_local(0, first_units_local,
+                first_values_local)) or
+                (not collect_exact_segments_local(first_units_local,
+                second_units_local, second_values_local)) or
+                (not collect_exact_segments_local(first_units_local +
+                second_units_local, third_units_local, third_values_local)) then
+            begin
+                Exit;
+            end;
+            first_pair_key_local := build_key_local(0,
+                first_units_local + second_units_local);
+            second_pair_key_local := build_key_local(first_units_local,
+                second_units_local + third_units_local);
+            if (not m_dictionary.get_exact_pair_path_evidence(
+                first_pair_key_local, first_pair_evidence_local)) or
+                (not m_dictionary.get_exact_pair_path_evidence(
+                second_pair_key_local, second_pair_evidence_local)) then
+            begin
+                Exit;
+            end;
+
+            for first_idx_local := 0 to High(first_values_local) do
+            begin
+                first_text_local := Trim(first_values_local[first_idx_local].text);
+                for second_idx_local := 0 to High(second_values_local) do
+                begin
+                    second_text_local := Trim(
+                        second_values_local[second_idx_local].text);
+                    pair_first_local := pair_bonus_local(
+                        first_pair_evidence_local, first_text_local +
+                        c_segment_path_separator + second_text_local);
+                    if pair_first_local <= 0 then
+                    begin
+                        Continue;
+                    end;
+                    for third_idx_local := 0 to High(third_values_local) do
+                    begin
+                        third_text_local := Trim(
+                            third_values_local[third_idx_local].text);
+                        pair_second_local := pair_bonus_local(
+                            second_pair_evidence_local, second_text_local +
+                            c_segment_path_separator + third_text_local);
+                        if pair_second_local <= 0 then
+                        begin
+                            Continue;
+                        end;
+                        score_local := c_complete_bonus +
+                            segment_weight_local(
+                            first_values_local[first_idx_local]) +
+                            segment_weight_local(
+                            second_values_local[second_idx_local]) +
+                            segment_weight_local(
+                            third_values_local[third_idx_local]) +
+                            (Int64(pair_first_local + pair_second_local) *
+                            c_pair_scale);
+                        if score_local <= best_score_local then
+                        begin
+                            Continue;
+                        end;
+                        best_score_local := score_local;
+                        FillChar(out_candidate, SizeOf(out_candidate), 0);
+                        out_candidate.text := first_text_local +
+                            second_text_local + third_text_local;
+                        out_candidate.comment := '';
+                        out_candidate.score := Integer(Min(Int64(MaxInt),
+                            score_local));
+                        out_candidate.source := cs_rule;
+                        out_candidate.display_kind := cdk_lm_compound;
+                        out_candidate.has_dict_weight := True;
+                        out_candidate.dict_weight := out_candidate.score;
+                        out_encoded_path := first_text_local +
+                            c_segment_path_separator + second_text_local +
+                            c_segment_path_separator + third_text_local;
+                    end;
+                end;
+            end;
+        end;
+    begin
+        Result := False;
+        FillChar(out_candidate, SizeOf(out_candidate), 0);
+        out_encoded_path := '';
+        if (m_dictionary = nil) or (input_syllable_count <> 5) or
+            all_initial_compact_query or has_internal_dangling_initial or
+            (not is_full_pinyin_key(lookup_text)) or
+            has_strong_exact_complete_lookup_weight_local(512) then
+        begin
+            Exit;
+        end;
+        syllables_local := get_effective_compact_pinyin_syllables(lookup_text);
+        if Length(syllables_local) <> 5 then
+        begin
+            Exit;
+        end;
+        best_score_local := Low(Int64);
+        consider_partition_local(2, 2, 1);
+        consider_partition_local(1, 2, 2);
+        consider_partition_local(2, 1, 2);
+        Result := (out_encoded_path <> '') and
+            (Trim(out_candidate.text) <> '');
+        if Result then
+        begin
+            remember_segment_path_for_candidate(out_candidate.text, '',
+                out_encoded_path, out_candidate.score);
+        end;
     end;
 
     function dictionary_prefix_lookup_cached(const pinyin_key: string;
@@ -119193,6 +120588,7 @@ begin
         m_runtime_redup_text := '';
         SetLength(m_runtime_long_chain_candidates, 0);
         SetLength(m_runtime_long_complete_pool_candidates, 0);
+        SetLength(m_runtime_long_retained_exact_edges, 0);
         m_long_complete_pool_pairwise_text := '';
         m_long_complete_pool_pairwise_insert_rank := -1;
         clear_segment_path_tracking;
@@ -120646,6 +122042,50 @@ begin
                 Ord(runtime_phrase_added), Ord(runtime_redup_added),
                 Ord(all_initial_compact_query)]),
                 direct_three_syllable_two_plus_one_candidate, False);
+            Exit;
+        end;
+        if try_build_five_syllable_strong_exact_partition_candidate_local(
+            direct_chain_candidate, direct_chain_encoded_path) then
+        begin
+            SetLength(m_candidates, 1);
+            m_candidates[0] := direct_chain_candidate;
+            if build_exact_leading_prefix_partial_candidates(lookup_text,
+                exact_head_partial_candidates) then
+            begin
+                m_candidates := merge_candidate_lists(m_candidates,
+                    exact_head_partial_candidates, 0);
+            end;
+            ensure_fast_prefix_single_char_partials_visible(m_candidates, 0);
+            promote_candidate_to_front_local(m_candidates,
+                direct_chain_candidate);
+            finalize_preserved_candidates_and_prepare_exit(Format(
+                'multi=%d seg=%d dangling=%d head_only=%d runtime=%d redup=%d strongexact5=1 allinit=%d',
+                [Ord(has_multi_syllable_input), Ord(has_segment_candidates),
+                Ord(has_internal_dangling_initial),
+                Ord(head_only_multi_syllable), Ord(runtime_phrase_added),
+                Ord(runtime_redup_added), Ord(all_initial_compact_query)]),
+                direct_chain_candidate, False);
+            // Preserved finalization may collapse this path with an inferred
+            // duplicate. Keep the generated-path marker used by rendering and
+            // by the user-dictionary learning guard.
+            for i := 0 to High(m_candidates) do
+            begin
+                if SameText(Trim(m_candidates[i].text),
+                    Trim(direct_chain_candidate.text)) and
+                    SameText(Trim(m_candidates[i].comment),
+                    Trim(direct_chain_candidate.comment)) then
+                begin
+                    m_candidates[i].display_kind := cdk_lm_compound;
+                    Break;
+                end;
+            end;
+            // This candidate is a local five-syllable recovery, not a stable
+            // incremental seed. Reusing it on the next key can lock a long
+            // sentence onto this temporary segmentation before the wider
+            // lattice has a chance to reconsider the boundary.
+            m_last_candidates_incrementally_reusable := False;
+            m_last_ranked_query_key := '';
+            m_last_ranked_top_path := '';
             Exit;
         end;
         if (not has_strong_exact_complete_lookup_weight_local(512)) and
@@ -126811,13 +128251,24 @@ const
     c_exact_lattice_single_option_limit = 8;
     c_exact_lattice_max_segment_units = 5;
     c_exact_lattice_signature_limit = 3;
+    c_exact_edge_model_lattice_beam_width = 16;
+    c_exact_edge_model_lattice_candidate_limit = 16;
+    c_exact_edge_model_lattice_option_limit = 16;
+    c_exact_edge_model_lattice_single_option_limit = 16;
+    c_exact_edge_model_min_anchor_units = 3;
+    c_exact_edge_model_min_anchor_score = 2.5;
+    c_retained_exact_lattice_probe_limit = 16;
     c_exact_anchor_candidate_limit = 32;
     c_exact_anchor_best_candidate_limit = 24;
+    c_retained_exact_anchor_candidate_limit = 12;
     c_exact_anchor_seed_limit = 2;
     c_exact_anchor_options_per_position = 4;
     c_exact_anchor_word_option_limit = 4;
     c_exact_dual_anchor_candidate_limit = 12;
     c_exact_dual_anchor_pair_pool_limit = 36;
+    c_retained_exact_subpath_width = 3;
+    c_retained_exact_subpath_option_limit = 4;
+    c_retained_exact_anchor_paths_per_edge = 3;
     c_single_option_limit = 6;
     c_signature_soft_limit = 4;
     c_chain_reserved = 6;
@@ -126825,6 +128276,7 @@ const
     c_local_reserved = 12;
     c_proper_name_reserved = 2;
     c_exact_lattice_reserved = 8;
+    c_exact_edge_chain_reserved = 2;
     c_visible_complete_limit = 2;
     c_min_lm_pair_weight = 390;
     c_min_query_pair_weight = 420;
@@ -126843,6 +128295,19 @@ type
         previous_units: Integer;
         segment_count: Integer;
         transition_support: Integer;
+        retained_edge_count: Integer;
+        retained_bonus_total: Int64;
+        retained_anchor_start: Integer;
+        retained_anchor_units: Integer;
+        retained_anchor_exact_rank: Integer;
+        retained_anchor_top_weight: Integer;
+        model_anchor_count: Integer;
+        model_anchor_score_total: Double;
+        model_anchor_score_max: Double;
+        model_word_count: Integer;
+        model_word_score_total: Double;
+        model_word_score_min: Double;
+        model_word_score_max: Double;
     end;
     TncCompletePoolLatticeStateArray =
         TArray<TncCompletePoolLatticeState>;
@@ -126875,6 +128340,11 @@ type
         segment_count: Integer;
         text: string;
         path_text: string;
+        first_segment_text: string;
+        last_segment_text: string;
+        first_segment_units: Integer;
+        last_segment_units: Integer;
+        transition_support: Integer;
     end;
     TncExactSubpathStateArray = TArray<TncExactSubpathState>;
     TncExactSubpathStateMatrix = TArray<TncExactSubpathStateArray>;
@@ -126882,7 +128352,10 @@ type
     TncBooleanMatrix = TArray<TncBooleanArray>;
 var
     raw_pool: TncLongCompletePoolRuntimeCandidateArray;
+    baseline_raw_pool: TncLongCompletePoolRuntimeCandidateArray;
+    full_raw_pool: TncLongCompletePoolRuntimeCandidateArray;
     raw_index_by_text: TDictionary<string, Integer>;
+    baseline_index_by_text: TDictionary<string, Integer>;
     selected_indices: TArray<Integer>;
     selected_texts: TDictionary<string, Boolean>;
     selected_signature_counts: TDictionary<string, Integer>;
@@ -126894,6 +128367,10 @@ var
     original_source_indices: TArray<Integer>;
     internal_candidates: TncCandidateList;
     internal_source_indices: TArray<Integer>;
+    baseline_candidates: TncCandidateList;
+    baseline_source_indices: TArray<Integer>;
+    baseline_top1: string;
+    baseline_top2: string;
     original_visible_count: Integer;
     raw_original_count: Integer;
     pair_candidate_count: Integer;
@@ -126901,10 +128378,6 @@ var
     raw_idx: Integer;
     chain_idx: Integer;
     source_idx: Integer;
-    selected_idx: Integer;
-    sort_pos: Integer;
-    sort_insert_pos: Integer;
-    sort_value: Integer;
     candidate_value: TncCandidate;
     char_texts: TArray<string>;
     char_scores: TArray<Integer>;
@@ -126932,6 +128405,7 @@ var
     pairwise_best_score: Double;
     pairwise_insert_rank: Integer;
     pool_phase_tick: UInt64;
+    chain_source_kind: TncLongCompletePoolSource;
 
     procedure note_pool_phase(const phase_name: string);
     var
@@ -127329,6 +128803,7 @@ var
             lcps_proper_name: Result := 5;
             lcps_chain: Result := 4;
             lcps_exact_lattice: Result := 4;
+            lcps_exact_edge_chain: Result := 4;
             lcps_exact_pair: Result := 3;
             lcps_existing: Result := 2;
             lcps_local_repair: Result := 1;
@@ -127347,7 +128822,32 @@ var
         const pair_evidence: Integer; const anchor_start: Integer;
         const anchor_units: Integer;
         const anchor_exact_rank: Integer;
-        const anchor_top_weight: Integer); forward;
+        const anchor_top_weight: Integer;
+        const baseline_eligible: Boolean); forward;
+
+    function candidate_text_is_edge_only(const candidate_text: string): Boolean;
+    var
+        chain_candidate_idx: Integer;
+        retained_match: Boolean;
+    begin
+        retained_match := False;
+        for chain_candidate_idx := 0 to
+            High(m_runtime_long_chain_candidates) do
+        begin
+            if not SameText(Trim(m_runtime_long_chain_candidates[
+                chain_candidate_idx].text), Trim(candidate_text)) then
+            begin
+                Continue;
+            end;
+            if m_runtime_long_chain_candidates[
+                chain_candidate_idx].retained_exact_edge_count <= 0 then
+            begin
+                Exit(False);
+            end;
+            retained_match := True;
+        end;
+        Result := retained_match;
+    end;
 
     function cached_lm_transition_bonus(const query_value: string;
         const path_value: string): Integer;
@@ -127395,7 +128895,156 @@ var
         word_lm_cache.Add(cache_key, Result);
     end;
 
-    procedure generate_exact_lattice_candidates;
+    procedure collect_model_retained_exact_edges;
+    const
+        c_edge_limit = 4;
+        c_option_limit = 16;
+        c_min_model_score = 2.5;
+        c_min_model_margin = 0.0;
+    type
+        TEdgeProposal = record
+            valid: Boolean;
+            model_score: Double;
+            pair_rate: Double;
+            edge: TncLongRetainedExactEdge;
+        end;
+        TEdgeProposalArray = TArray<TEdgeProposal>;
+    var
+        proposals: TEdgeProposalArray;
+        best: TEdgeProposal;
+        second_score: Double;
+        swap_value: TEdgeProposal;
+        exact_candidates: TncCandidateList;
+        candidate_value_local: TncCandidate;
+        candidate_text_local: string;
+        query_key: string;
+        position: Integer;
+        span_units: Integer;
+        candidate_idx: Integer;
+        option_count: Integer;
+        raw_weight: Integer;
+        top_weight: Integer;
+        retention_score: Int64;
+        features: TncLongExactEdgeLatticeFeatures;
+        model_score: Double;
+        proposal_idx: Integer;
+        insert_idx: Integer;
+    begin
+        SetLength(proposals, 0);
+        for position := 0 to expected_units - 2 do
+        begin
+            best := Default(TEdgeProposal);
+            best.model_score := -MaxDouble;
+            second_score := -MaxDouble;
+            for span_units := 3 to Min(c_exact_lattice_max_segment_units,
+                expected_units - position) do
+            begin
+                query_key := build_span_key(position, span_units);
+                if (query_key = '') or
+                    (not load_exact_candidates(query_key,
+                    exact_candidates)) then
+                begin
+                    Continue;
+                end;
+                option_count := 0;
+                top_weight := 0;
+                for candidate_idx := 0 to High(exact_candidates) do
+                begin
+                    candidate_value_local := exact_candidates[candidate_idx];
+                    candidate_text_local := Trim(
+                        candidate_value_local.text);
+                    if (Trim(candidate_value_local.comment) <> '') or
+                        (get_candidate_text_unit_count(candidate_text_local) <>
+                        span_units) then
+                    begin
+                        Continue;
+                    end;
+                    Inc(option_count);
+                    raw_weight := candidate_raw_weight(
+                        candidate_value_local);
+                    if option_count = 1 then
+                    begin
+                        top_weight := raw_weight;
+                    end;
+                    if option_count > c_option_limit then
+                    begin
+                        Break;
+                    end;
+                    retention_score := long_edge_retention_score(
+                        option_count, raw_weight, top_weight,
+                        candidate_value_local.score, span_units, position,
+                        expected_units,
+                        candidate_value_local.source = cs_user);
+                    build_long_exact_edge_lattice_features(query_key,
+                        candidate_text_local, span_units, option_count,
+                        raw_weight, top_weight,
+                        candidate_value_local.score,
+                        clamp_int64_to_integer(retention_score), position,
+                        expected_units,
+                        option_count <= c_exact_lattice_word_option_limit,
+                        features);
+                    model_score := long_exact_edge_lattice_ranker_score(
+                        features);
+                    if model_score > best.model_score then
+                    begin
+                        second_score := best.model_score;
+                        best.valid := True;
+                        best.model_score := model_score;
+                        best.pair_rate := features[11];
+                        best.edge.position := position;
+                        best.edge.chunk_units := span_units;
+                        best.edge.exact_rank := option_count;
+                        best.edge.raw_weight := raw_weight;
+                        best.edge.top_weight := top_weight;
+                        best.edge.confidence := Round(model_score * 100000.0) +
+                            Int64(span_units) * 1000 - option_count * 100;
+                        best.edge.query_key := query_key;
+                        best.edge.text := candidate_text_local;
+                    end
+                    else if model_score > second_score then
+                    begin
+                        second_score := model_score;
+                    end;
+                end;
+            end;
+            if best.valid and (best.model_score >= c_min_model_score) and
+                ((best.model_score - second_score) >=
+                c_min_model_margin) then
+            begin
+                SetLength(proposals, Length(proposals) + 1);
+                proposals[High(proposals)] := best;
+            end;
+        end;
+
+        for proposal_idx := 1 to High(proposals) do
+        begin
+            swap_value := proposals[proposal_idx];
+            insert_idx := proposal_idx - 1;
+            while (insert_idx >= 0) and
+                (swap_value.edge.confidence >
+                proposals[insert_idx].edge.confidence) do
+            begin
+                proposals[insert_idx + 1] := proposals[insert_idx];
+                Dec(insert_idx);
+            end;
+            proposals[insert_idx + 1] := swap_value;
+        end;
+        if Length(proposals) > c_edge_limit then
+        begin
+            SetLength(proposals, c_edge_limit);
+        end;
+        SetLength(m_runtime_long_retained_exact_edges,
+            Length(proposals));
+        for proposal_idx := 0 to High(proposals) do
+        begin
+            m_runtime_long_retained_exact_edges[proposal_idx] :=
+                proposals[proposal_idx].edge;
+        end;
+    end;
+
+    procedure generate_exact_lattice_candidates(
+        const use_retained_exact_edges: Boolean;
+        const use_edge_model: Boolean);
     var
         states_by_position: TArray<TncCompletePoolLatticeStateArray>;
         source_states: TncCompletePoolLatticeStateArray;
@@ -127414,6 +129063,10 @@ var
         candidate_idx: Integer;
         option_count: Integer;
         option_limit: Integer;
+        baseline_option_limit: Integer;
+        capacity_option_limit: Integer;
+        lattice_beam_width: Integer;
+        lattice_candidate_limit: Integer;
         insert_idx: Integer;
         retained_count: Integer;
         destination_count: Integer;
@@ -127425,6 +129078,48 @@ var
         trigram_bonus: Integer;
         candidate_text_local: string;
         candidate_key: string;
+        retained_edge: TncLongRetainedExactEdge;
+        retained_edge_match: Boolean;
+        retained_search_bonus: Int64;
+        edge_model_features: TncLongExactEdgeLatticeFeatures;
+        edge_model_score: Double;
+        edge_model_adjustment: Int64;
+        edge_model_anchor: Boolean;
+        edge_model_raw_weight: Integer;
+        edge_model_top_weight: Integer;
+        edge_model_retention_score: Int64;
+
+        function find_retained_edge(const position_value: Integer;
+            const span_value: Integer; const query_value: string;
+            const text_value: string;
+            out edge_value: TncLongRetainedExactEdge): Boolean;
+        var
+            edge_idx_local: Integer;
+        begin
+            Result := False;
+            edge_value := Default(TncLongRetainedExactEdge);
+            if not use_retained_exact_edges then
+            begin
+                Exit;
+            end;
+            for edge_idx_local := 0 to
+                High(m_runtime_long_retained_exact_edges) do
+            begin
+                if (m_runtime_long_retained_exact_edges[
+                    edge_idx_local].position = position_value) and
+                    (m_runtime_long_retained_exact_edges[
+                    edge_idx_local].chunk_units = span_value) and
+                    SameText(m_runtime_long_retained_exact_edges[
+                    edge_idx_local].query_key, query_value) and
+                    SameText(Trim(m_runtime_long_retained_exact_edges[
+                    edge_idx_local].text), Trim(text_value)) then
+                begin
+                    edge_value := m_runtime_long_retained_exact_edges[
+                        edge_idx_local];
+                    Exit(True);
+                end;
+            end;
+        end;
 
         procedure append_state(var values: TncCompletePoolLatticeStateArray;
             const value: TncCompletePoolLatticeState);
@@ -127516,14 +129211,12 @@ var
                     end;
                     append_state(retained_states,
                         sorted_states[sort_idx]);
-                    if Length(retained_states) >=
-                        c_exact_lattice_beam_width then
+                    if Length(retained_states) >= lattice_beam_width then
                     begin
                         Break;
                     end;
                 end;
-                if Length(retained_states) >=
-                    c_exact_lattice_beam_width then
+                if Length(retained_states) >= lattice_beam_width then
                 begin
                     Break;
                 end;
@@ -127531,6 +129224,23 @@ var
             states_by_position[position_value] := retained_states;
         end;
     begin
+        if use_retained_exact_edges and use_edge_model then
+        begin
+            Exit;
+        end;
+        if use_retained_exact_edges and
+            (Length(m_runtime_long_retained_exact_edges) <= 0) then
+        begin
+            Exit;
+        end;
+        lattice_beam_width := c_exact_lattice_beam_width;
+        lattice_candidate_limit := c_exact_lattice_candidate_limit;
+        if use_edge_model then
+        begin
+            lattice_beam_width := c_exact_edge_model_lattice_beam_width;
+            lattice_candidate_limit :=
+                c_exact_edge_model_lattice_candidate_limit;
+        end;
         SetLength(states_by_position, expected_units + 1);
         SetLength(states_by_position[0], 1);
         states_by_position[0][0] := Default(TncCompletePoolLatticeState);
@@ -127553,18 +129263,44 @@ var
                 end;
                 if span_units = 1 then
                 begin
-                    option_limit := c_exact_lattice_single_option_limit;
+                    baseline_option_limit :=
+                        c_exact_lattice_single_option_limit;
                 end
                 else
                 begin
-                    option_limit := c_exact_lattice_word_option_limit;
+                    baseline_option_limit :=
+                        c_exact_lattice_word_option_limit;
+                end;
+                option_limit := baseline_option_limit;
+                if use_edge_model then
+                begin
+                    if span_units = 1 then
+                    begin
+                        { The learned lane retains exact word edges.  Single
+                          characters remain a bounded connector and must not
+                          consume the wider word-edge probe budget. }
+                        option_limit :=
+                            c_exact_edge_model_lattice_single_option_limit;
+                    end
+                    else
+                    begin
+                        option_limit :=
+                            c_exact_edge_model_lattice_option_limit;
+                    end;
                 end;
                 option_count := 0;
+                edge_model_top_weight := 0;
                 destination := position + span_units;
                 destination_count := Length(
                     states_by_position[destination]);
+                capacity_option_limit := option_limit;
+                if use_retained_exact_edges then
+                begin
+                    capacity_option_limit := Max(capacity_option_limit,
+                        c_retained_exact_lattice_probe_limit);
+                end;
                 destination_capacity := destination_count +
-                    Length(source_states) * Min(option_limit,
+                    Length(source_states) * Min(capacity_option_limit,
                     Length(exact_candidates));
                 SetLength(states_by_position[destination],
                     destination_capacity);
@@ -127578,10 +129314,74 @@ var
                     begin
                         Continue;
                     end;
+                    retained_edge_match := find_retained_edge(position,
+                        span_units, query_key, candidate_text_local,
+                        retained_edge);
                     Inc(option_count);
+                    edge_model_raw_weight := candidate_raw_weight(
+                        candidate_value_local);
+                    if option_count = 1 then
+                    begin
+                        edge_model_top_weight := edge_model_raw_weight;
+                    end;
                     if option_count > option_limit then
                     begin
-                        Break;
+                        if not use_retained_exact_edges then
+                        begin
+                            Break;
+                        end;
+                        if not retained_edge_match then
+                        begin
+                            if candidate_idx + 1 >=
+                                c_retained_exact_lattice_probe_limit then
+                            begin
+                                Break;
+                            end;
+                            Continue;
+                        end;
+                    end;
+                    retained_search_bonus := 0;
+                    if retained_edge_match then
+                    begin
+                        retained_search_bonus := 180000 +
+                            Int64(span_units) * 12000 -
+                            Int64(Max(0, retained_edge.exact_rank - 1)) *
+                            6000;
+                    end;
+                    edge_model_adjustment := 0;
+                    edge_model_score := 0.0;
+                    edge_model_anchor := False;
+                    if use_edge_model then
+                    begin
+                        edge_model_retention_score :=
+                            long_edge_retention_score(option_count,
+                            edge_model_raw_weight, edge_model_top_weight,
+                            candidate_value_local.score, span_units,
+                            position, expected_units,
+                            candidate_value_local.source = cs_user);
+                        build_long_exact_edge_lattice_features(query_key,
+                            candidate_text_local, span_units, option_count,
+                            edge_model_raw_weight, edge_model_top_weight,
+                            candidate_value_local.score,
+                            clamp_int64_to_integer(
+                            edge_model_retention_score), position,
+                            expected_units,
+                            option_count <= baseline_option_limit,
+                            edge_model_features);
+                        edge_model_score :=
+                            long_exact_edge_lattice_ranker_score(
+                            edge_model_features);
+                        edge_model_score := Max(-8.0,
+                            Min(8.0, edge_model_score));
+                        edge_model_adjustment := Round(
+                            edge_model_score *
+                            c_long_exact_edge_lattice_model_scale +
+                            c_long_exact_edge_lattice_segment_penalty);
+                        edge_model_anchor :=
+                            (span_units >=
+                            c_exact_edge_model_min_anchor_units) and
+                            (edge_model_score >=
+                            c_exact_edge_model_min_anchor_score);
                     end;
                     for state_idx := 0 to High(source_states) do
                     begin
@@ -127622,9 +129422,11 @@ var
 
                         next_state := state_value;
                         next_state.score := state_value.score +
-                            candidate_raw_weight(candidate_value_local) +
+                            edge_model_raw_weight +
                             Int64(span_units * span_units) * 1200 +
-                            Int64(transition_bonus) * 4;
+                            Int64(transition_bonus) * 4 +
+                            retained_search_bonus +
+                            edge_model_adjustment;
                         next_state.text := state_value.text +
                             candidate_text_local;
                         if state_value.path = '' then
@@ -127651,6 +129453,55 @@ var
                         next_state.transition_support :=
                             state_value.transition_support +
                             transition_bonus;
+                        if retained_edge_match then
+                        begin
+                            next_state.retained_edge_count :=
+                                state_value.retained_edge_count + 1;
+                            next_state.retained_bonus_total :=
+                                state_value.retained_bonus_total +
+                                retained_search_bonus;
+                            next_state.retained_anchor_start := position;
+                            next_state.retained_anchor_units := span_units;
+                            next_state.retained_anchor_exact_rank :=
+                                retained_edge.exact_rank;
+                            next_state.retained_anchor_top_weight :=
+                                retained_edge.top_weight;
+                        end;
+                        if edge_model_anchor then
+                        begin
+                            next_state.model_anchor_count :=
+                                state_value.model_anchor_count + 1;
+                            next_state.model_anchor_score_total :=
+                                state_value.model_anchor_score_total +
+                                edge_model_score;
+                            next_state.model_anchor_score_max := Max(
+                                state_value.model_anchor_score_max,
+                                edge_model_score);
+                        end;
+                        if use_edge_model and (span_units >= 2) then
+                        begin
+                            next_state.model_word_count :=
+                                state_value.model_word_count + 1;
+                            next_state.model_word_score_total :=
+                                state_value.model_word_score_total +
+                                edge_model_score;
+                            if state_value.model_word_count = 0 then
+                            begin
+                                next_state.model_word_score_min :=
+                                    edge_model_score;
+                                next_state.model_word_score_max :=
+                                    edge_model_score;
+                            end
+                            else
+                            begin
+                                next_state.model_word_score_min := Min(
+                                    state_value.model_word_score_min,
+                                    edge_model_score);
+                                next_state.model_word_score_max := Max(
+                                    state_value.model_word_score_max,
+                                    edge_model_score);
+                            end;
+                        end;
                         states_by_position[destination][destination_count] :=
                             next_state;
                         Inc(destination_count);
@@ -127662,22 +129513,86 @@ var
         end;
 
         source_states := states_by_position[expected_units];
-        retained_count := Min(c_exact_lattice_candidate_limit,
+        retained_count := Min(lattice_candidate_limit,
             Length(source_states));
         for state_idx := 0 to retained_count - 1 do
         begin
+            if use_retained_exact_edges and
+                (source_states[state_idx].retained_edge_count <= 0) then
+            begin
+                Continue;
+            end;
             generated := Default(TncCandidate);
             generated.text := source_states[state_idx].text;
             generated.comment := '';
             generated.source := cs_rule;
             generated.score := clamp_int64_to_integer(
-                source_states[state_idx].score);
+                source_states[state_idx].score -
+                source_states[state_idx].retained_bonus_total);
             generated.has_dict_weight := False;
             generated.dict_weight := 0;
-            add_candidate(generated, -1, source_states[state_idx].path,
-                lcps_exact_lattice, state_idx + 1, -1, False, 0, -1,
-                0, 0, source_states[state_idx].transition_support,
-                -1, 0, 0, 0);
+            if use_retained_exact_edges then
+            begin
+                add_candidate(generated, -1,
+                    source_states[state_idx].path,
+                    lcps_exact_edge_chain, state_idx + 1, -1, False, 0, -1,
+                    0, 0, source_states[state_idx].transition_support,
+                    source_states[state_idx].retained_anchor_start,
+                    source_states[state_idx].retained_anchor_units,
+                    source_states[state_idx].retained_anchor_exact_rank,
+                    source_states[state_idx].retained_anchor_top_weight,
+                    False);
+            end
+            else
+            begin
+                add_candidate(generated, -1,
+                    source_states[state_idx].path,
+                    lcps_exact_lattice, state_idx + 1, -1, False, 0, -1,
+                    0, 0, source_states[state_idx].transition_support,
+                    IfThen(use_edge_model, -2, -1), 0, 0, 0,
+                    not use_edge_model);
+            end;
+            if use_edge_model then
+            begin
+                candidate_key := LowerCase(Trim(generated.text));
+                if raw_index_by_text.TryGetValue(candidate_key,
+                    insert_idx) then
+                begin
+                    raw_pool[insert_idx].edge_model_anchor_count := Max(
+                        raw_pool[insert_idx].edge_model_anchor_count,
+                        source_states[state_idx].model_anchor_count);
+                    raw_pool[insert_idx].edge_model_score_total := Max(
+                        raw_pool[insert_idx].edge_model_score_total,
+                        Round(source_states[state_idx].
+                        model_anchor_score_total * 1000.0));
+                    raw_pool[insert_idx].edge_model_score_max := Max(
+                        raw_pool[insert_idx].edge_model_score_max,
+                        Round(source_states[state_idx].
+                        model_anchor_score_max * 1000.0));
+                    if (source_states[state_idx].model_word_count > 0) and
+                        ((raw_pool[insert_idx].edge_model_word_count <= 0) or
+                        (source_states[state_idx].model_word_score_total >
+                        raw_pool[insert_idx].edge_model_word_score_total /
+                        1000.0)) then
+                    begin
+                        raw_pool[insert_idx].edge_model_word_count :=
+                            source_states[state_idx].model_word_count;
+                        raw_pool[insert_idx].edge_model_word_score_total :=
+                            Round(source_states[state_idx].
+                            model_word_score_total * 1000.0);
+                        raw_pool[insert_idx].edge_model_word_score_min :=
+                            Round(source_states[state_idx].
+                            model_word_score_min * 1000.0);
+                        raw_pool[insert_idx].edge_model_word_score_max :=
+                            Round(source_states[state_idx].
+                            model_word_score_max * 1000.0);
+                        raw_pool[insert_idx].edge_model_word_score_mean :=
+                            Round(source_states[state_idx].
+                            model_word_score_total * 1000.0 /
+                            source_states[state_idx].model_word_count);
+                    end;
+                end;
+            end;
         end;
     end;
 
@@ -127702,7 +129617,9 @@ var
         Result := candidate_item.seed_rank < current_item.seed_rank;
     end;
 
-    procedure retain_raw_candidate(
+    procedure retain_candidate_in_pool(
+        var target_pool: TncLongCompletePoolRuntimeCandidateArray;
+        const target_index: TDictionary<string, Integer>;
         const value: TncLongCompletePoolRuntimeCandidate);
     var
         key: string;
@@ -127714,11 +129631,35 @@ var
         begin
             Exit;
         end;
-        if raw_index_by_text.TryGetValue(key, existing_idx) then
+        if target_index.TryGetValue(key, existing_idx) then
         begin
-            item := raw_pool[existing_idx];
+            item := target_pool[existing_idx];
             item.pair_evidence := Max(item.pair_evidence,
                 value.pair_evidence);
+            item.edge_model_anchor_count := Max(
+                item.edge_model_anchor_count,
+                value.edge_model_anchor_count);
+            item.edge_model_score_total := Max(
+                item.edge_model_score_total,
+                value.edge_model_score_total);
+            item.edge_model_score_max := Max(
+                item.edge_model_score_max,
+                value.edge_model_score_max);
+            if (value.edge_model_word_count > 0) and
+                ((item.edge_model_word_count <= 0) or
+                (value.edge_model_word_score_total >
+                item.edge_model_word_score_total)) then
+            begin
+                item.edge_model_word_count := value.edge_model_word_count;
+                item.edge_model_word_score_total :=
+                    value.edge_model_word_score_total;
+                item.edge_model_word_score_min :=
+                    value.edge_model_word_score_min;
+                item.edge_model_word_score_max :=
+                    value.edge_model_word_score_max;
+                item.edge_model_word_score_mean :=
+                    value.edge_model_word_score_mean;
+            end;
             item.proper_name_confidence := Max(
                 item.proper_name_confidence,
                 value.proper_name_confidence);
@@ -127748,17 +129689,30 @@ var
             begin
                 item.candidate.display_kind := cdk_lm_compound;
             end;
-            raw_pool[existing_idx] := item;
+            target_pool[existing_idx] := item;
             Exit;
         end;
-        if Length(raw_pool) >= c_raw_pool_limit then
+        if Length(target_pool) >= c_raw_pool_limit then
         begin
             Exit;
         end;
-        existing_idx := Length(raw_pool);
-        SetLength(raw_pool, existing_idx + 1);
-        raw_pool[existing_idx] := value;
-        raw_index_by_text.Add(key, existing_idx);
+        existing_idx := Length(target_pool);
+        SetLength(target_pool, existing_idx + 1);
+        target_pool[existing_idx] := value;
+        target_index.Add(key, existing_idx);
+    end;
+
+    procedure retain_raw_candidate(
+        const value: TncLongCompletePoolRuntimeCandidate);
+    begin
+        retain_candidate_in_pool(raw_pool, raw_index_by_text, value);
+    end;
+
+    procedure retain_baseline_candidate(
+        const value: TncLongCompletePoolRuntimeCandidate);
+    begin
+        retain_candidate_in_pool(baseline_raw_pool,
+            baseline_index_by_text, value);
     end;
 
     procedure add_candidate(const value: TncCandidate;
@@ -127771,7 +129725,8 @@ var
         const pair_evidence: Integer; const anchor_start: Integer;
         const anchor_units: Integer;
         const anchor_exact_rank: Integer;
-        const anchor_top_weight: Integer);
+        const anchor_top_weight: Integer;
+        const baseline_eligible: Boolean);
     var
         item: TncLongCompletePoolRuntimeCandidate;
         resolved_path: string;
@@ -127782,7 +129737,9 @@ var
         begin
             Exit;
         end;
-        if (source_kind = lcps_exact_lattice) and (anchor_units > 0) and
+        if ((source_kind = lcps_exact_lattice) or
+            (source_kind = lcps_exact_edge_chain)) and
+            (anchor_units > 0) and
             decode_trusted_exact_path(Trim(value.text), preferred_path,
             signature, name_confidence) then
         begin
@@ -127815,6 +129772,10 @@ var
         item.proper_name_confidence := name_confidence;
         item.local_pairwise_insert_rank := -1;
         retain_raw_candidate(item);
+        if baseline_eligible then
+        begin
+            retain_baseline_candidate(item);
+        end;
     end;
 
     function build_text_from_path_parts(const parts: TArray<string>): string;
@@ -127991,6 +129952,282 @@ var
         end;
     end;
 
+    procedure build_ranked_exact_anchor_subpaths(
+        out prefix_states: TncExactSubpathStateMatrix;
+        out suffix_states: TncExactSubpathStateMatrix);
+    var
+        boundary_idx: Integer;
+        unit_count: Integer;
+        candidate_state: TncExactSubpathState;
+        source_state: TncExactSubpathState;
+        exact_candidates: TncCandidateList;
+        segment_text: string;
+        query_key: string;
+        transition_query: string;
+        transition_path: string;
+        transition_bonus: Integer;
+        candidate_idx: Integer;
+        usable_count: Integer;
+        source_state_idx: Integer;
+        segment_units: Integer;
+        source_idx: Integer;
+        next_idx: Integer;
+
+        function candidate_is_usable(const value: TncCandidate;
+            const expected_segment_units: Integer): Boolean;
+        begin
+            Result := (Trim(value.comment) = '') and
+                (get_candidate_text_unit_count(Trim(value.text)) =
+                expected_segment_units) and
+                long_exact_chunk_weight_is_eligible(value.dict_weight,
+                value.has_dict_weight);
+        end;
+
+        function state_is_better(const candidate_value: TncExactSubpathState;
+            const current_value: TncExactSubpathState): Boolean;
+        begin
+            if candidate_value.score <> current_value.score then
+            begin
+                Exit(candidate_value.score > current_value.score);
+            end;
+            if candidate_value.segment_count <> current_value.segment_count then
+            begin
+                Exit(candidate_value.segment_count <
+                    current_value.segment_count);
+            end;
+            Result := CompareText(candidate_value.path_text,
+                current_value.path_text) < 0;
+        end;
+
+        procedure retain_state(var values: TncExactSubpathStateArray;
+            const value: TncExactSubpathState);
+        var
+            value_idx: Integer;
+            insert_idx: Integer;
+            swap_value: TncExactSubpathState;
+        begin
+            for value_idx := 0 to High(values) do
+            begin
+                if SameText(values[value_idx].path_text,
+                    value.path_text) then
+                begin
+                    if state_is_better(value, values[value_idx]) then
+                    begin
+                        values[value_idx] := value;
+                    end;
+                    Exit;
+                end;
+            end;
+            SetLength(values, Length(values) + 1);
+            values[High(values)] := value;
+            insert_idx := High(values);
+            while (insert_idx > 0) and state_is_better(
+                values[insert_idx], values[insert_idx - 1]) do
+            begin
+                swap_value := values[insert_idx - 1];
+                values[insert_idx - 1] := values[insert_idx];
+                values[insert_idx] := swap_value;
+                Dec(insert_idx);
+            end;
+            if Length(values) > c_retained_exact_subpath_width then
+            begin
+                SetLength(values, c_retained_exact_subpath_width);
+            end;
+        end;
+
+    begin
+        unit_count := expected_units;
+        SetLength(prefix_states, unit_count + 1);
+        SetLength(suffix_states, unit_count + 1);
+        SetLength(prefix_states[0], 1);
+        prefix_states[0][0] := Default(TncExactSubpathState);
+        prefix_states[0][0].valid := True;
+
+        for boundary_idx := 1 to unit_count do
+        begin
+            for segment_units := 1 to Min(
+                c_exact_lattice_max_segment_units, boundary_idx) do
+            begin
+                source_idx := boundary_idx - segment_units;
+                if Length(prefix_states[source_idx]) <= 0 then
+                begin
+                    Continue;
+                end;
+                query_key := build_span_key(source_idx, segment_units);
+                if (query_key = '') or
+                    (not load_exact_candidates(query_key, exact_candidates)) then
+                begin
+                    Continue;
+                end;
+                usable_count := 0;
+                for candidate_idx := 0 to High(exact_candidates) do
+                begin
+                    if not candidate_is_usable(
+                        exact_candidates[candidate_idx], segment_units) then
+                    begin
+                        Continue;
+                    end;
+                    Inc(usable_count);
+                    if usable_count > c_retained_exact_subpath_option_limit then
+                    begin
+                        Break;
+                    end;
+                    segment_text := Trim(
+                        exact_candidates[candidate_idx].text);
+                    for source_state_idx := 0 to
+                        High(prefix_states[source_idx]) do
+                    begin
+                        source_state := prefix_states[source_idx][
+                            source_state_idx];
+                        transition_bonus := 0;
+                        if (source_state.last_segment_text <> '') and
+                            (source_state.last_segment_units > 0) then
+                        begin
+                            transition_query := build_span_key(source_idx -
+                                source_state.last_segment_units,
+                                source_state.last_segment_units +
+                                segment_units);
+                            transition_path :=
+                                source_state.last_segment_text +
+                                c_segment_path_separator + segment_text;
+                            transition_bonus := cached_path_transition_bonus(
+                                transition_query, transition_path);
+                        end;
+                        candidate_state := Default(TncExactSubpathState);
+                        candidate_state.valid := True;
+                        candidate_state.score := source_state.score +
+                            candidate_raw_weight(
+                            exact_candidates[candidate_idx]) +
+                            Int64(segment_units * segment_units) * 1200 +
+                            Int64(transition_bonus) * 4;
+                        candidate_state.segment_count :=
+                            source_state.segment_count + 1;
+                        candidate_state.text := source_state.text +
+                            segment_text;
+                        candidate_state.path_text :=
+                            source_state.path_text;
+                        if candidate_state.path_text <> '' then
+                        begin
+                            candidate_state.path_text :=
+                                candidate_state.path_text +
+                                c_segment_path_separator;
+                        end;
+                        candidate_state.path_text :=
+                            candidate_state.path_text + segment_text;
+                        candidate_state.first_segment_text :=
+                            source_state.first_segment_text;
+                        candidate_state.first_segment_units :=
+                            source_state.first_segment_units;
+                        if candidate_state.first_segment_text = '' then
+                        begin
+                            candidate_state.first_segment_text := segment_text;
+                            candidate_state.first_segment_units :=
+                                segment_units;
+                        end;
+                        candidate_state.last_segment_text := segment_text;
+                        candidate_state.last_segment_units := segment_units;
+                        candidate_state.transition_support :=
+                            source_state.transition_support + transition_bonus;
+                        retain_state(prefix_states[boundary_idx],
+                            candidate_state);
+                    end;
+                end;
+            end;
+        end;
+
+        SetLength(suffix_states[unit_count], 1);
+        suffix_states[unit_count][0] := Default(TncExactSubpathState);
+        suffix_states[unit_count][0].valid := True;
+        for boundary_idx := unit_count - 1 downto 0 do
+        begin
+            for segment_units := 1 to Min(
+                c_exact_lattice_max_segment_units,
+                unit_count - boundary_idx) do
+            begin
+                next_idx := boundary_idx + segment_units;
+                if Length(suffix_states[next_idx]) <= 0 then
+                begin
+                    Continue;
+                end;
+                query_key := build_span_key(boundary_idx, segment_units);
+                if (query_key = '') or
+                    (not load_exact_candidates(query_key, exact_candidates)) then
+                begin
+                    Continue;
+                end;
+                usable_count := 0;
+                for candidate_idx := 0 to High(exact_candidates) do
+                begin
+                    if not candidate_is_usable(
+                        exact_candidates[candidate_idx], segment_units) then
+                    begin
+                        Continue;
+                    end;
+                    Inc(usable_count);
+                    if usable_count > c_retained_exact_subpath_option_limit then
+                    begin
+                        Break;
+                    end;
+                    segment_text := Trim(
+                        exact_candidates[candidate_idx].text);
+                    for source_state_idx := 0 to
+                        High(suffix_states[next_idx]) do
+                    begin
+                        source_state := suffix_states[next_idx][
+                            source_state_idx];
+                        transition_bonus := 0;
+                        if (source_state.first_segment_text <> '') and
+                            (source_state.first_segment_units > 0) then
+                        begin
+                            transition_query := build_span_key(boundary_idx,
+                                segment_units +
+                                source_state.first_segment_units);
+                            transition_path := segment_text +
+                                c_segment_path_separator +
+                                source_state.first_segment_text;
+                            transition_bonus := cached_path_transition_bonus(
+                                transition_query, transition_path);
+                        end;
+                        candidate_state := Default(TncExactSubpathState);
+                        candidate_state.valid := True;
+                        candidate_state.score := source_state.score +
+                            candidate_raw_weight(
+                            exact_candidates[candidate_idx]) +
+                            Int64(segment_units * segment_units) * 1200 +
+                            Int64(transition_bonus) * 4;
+                        candidate_state.segment_count :=
+                            source_state.segment_count + 1;
+                        candidate_state.text := segment_text +
+                            source_state.text;
+                        candidate_state.path_text := segment_text;
+                        if source_state.path_text <> '' then
+                        begin
+                            candidate_state.path_text :=
+                                candidate_state.path_text +
+                                c_segment_path_separator +
+                                source_state.path_text;
+                        end;
+                        candidate_state.first_segment_text := segment_text;
+                        candidate_state.first_segment_units := segment_units;
+                        candidate_state.last_segment_text :=
+                            source_state.last_segment_text;
+                        candidate_state.last_segment_units :=
+                            source_state.last_segment_units;
+                        if candidate_state.last_segment_text = '' then
+                        begin
+                            candidate_state.last_segment_text := segment_text;
+                            candidate_state.last_segment_units := segment_units;
+                        end;
+                        candidate_state.transition_support :=
+                            source_state.transition_support + transition_bonus;
+                        retain_state(suffix_states[boundary_idx],
+                            candidate_state);
+                    end;
+                end;
+            end;
+        end;
+    end;
+
     procedure build_exact_anchor_subpaths(const units: TArray<string>;
         out prefix_states: TncExactSubpathStateArray;
         out suffix_states: TncExactSubpathStateArray);
@@ -128111,6 +130348,284 @@ var
                     suffix_states[boundary_idx].segment_count)) then
                 begin
                     suffix_states[boundary_idx] := candidate_state;
+                end;
+            end;
+        end;
+    end;
+
+    procedure generate_retained_exact_edge_anchor_candidates(
+        const candidate_limit: Integer);
+    type
+        TAnchorCombination = record
+            score: Int64;
+            transition_support: Integer;
+            prefix_state: TncExactSubpathState;
+            suffix_state: TncExactSubpathState;
+        end;
+        TAnchorCombinationArray = TArray<TAnchorCombination>;
+    var
+        prefix_states: TncExactSubpathStateMatrix;
+        suffix_states: TncExactSubpathStateMatrix;
+        prefix_state: TncExactSubpathState;
+        suffix_state: TncExactSubpathState;
+        combination: TAnchorCombination;
+        combinations: TAnchorCombinationArray;
+        seed_item: TncLongCompletePoolRuntimeCandidate;
+        seed_units: TArray<string>;
+        generated_units: TArray<string>;
+        retained_units: TArray<string>;
+        retained_edge: TncLongRetainedExactEdge;
+        exact_candidate: TncCandidate;
+        seed_span_candidate: TncCandidate;
+        generated: TncCandidate;
+        generated_text: string;
+        generated_path: string;
+        prefix_path: string;
+        suffix_path: string;
+        seed_span_text: string;
+        query_key: string;
+        edge_idx: Integer;
+        seed_idx: Integer;
+        unit_idx: Integer;
+        prefix_idx: Integer;
+        suffix_idx: Integer;
+        combination_idx: Integer;
+        insert_idx: Integer;
+        destination: Integer;
+        difference_count: Integer;
+        changed_position: Integer;
+        generated_count: Integer;
+        raw_count_before: Integer;
+        seed_span_weight: Integer;
+        anchor_confidence: Int64;
+        left_transition_bonus: Integer;
+        right_transition_bonus: Integer;
+        transition_query: string;
+        transition_path: string;
+
+        procedure retain_combination(const value: TAnchorCombination);
+        var
+            swap_value: TAnchorCombination;
+        begin
+            SetLength(combinations, Length(combinations) + 1);
+            combinations[High(combinations)] := value;
+            insert_idx := High(combinations);
+            while (insert_idx > 0) and
+                (combinations[insert_idx].score >
+                combinations[insert_idx - 1].score) do
+            begin
+                swap_value := combinations[insert_idx - 1];
+                combinations[insert_idx - 1] := combinations[insert_idx];
+                combinations[insert_idx] := swap_value;
+                Dec(insert_idx);
+            end;
+            if Length(combinations) >
+                c_retained_exact_anchor_paths_per_edge then
+            begin
+                SetLength(combinations,
+                    c_retained_exact_anchor_paths_per_edge);
+            end;
+        end;
+    begin
+        if (candidate_limit <= 0) or (raw_original_count <= 0) or
+            (Length(m_runtime_long_retained_exact_edges) <= 0) then
+        begin
+            Exit;
+        end;
+        { Keep a small, fixed-width exact-path beam on both sides. A single
+          best subpath preserves the same local ambiguity that originally
+          pushed the exact edge out of the beam. }
+        build_ranked_exact_anchor_subpaths(prefix_states, suffix_states);
+        generated_count := 0;
+        seed_idx := 0;
+        seed_item := raw_pool[seed_idx];
+        seed_units := split_text_units(Trim(seed_item.candidate.text));
+        if Length(seed_units) <> expected_units then
+        begin
+            Exit;
+        end;
+        for edge_idx := 0 to
+            High(m_runtime_long_retained_exact_edges) do
+        begin
+            if generated_count >= candidate_limit then
+            begin
+                Exit;
+            end;
+            retained_edge :=
+                m_runtime_long_retained_exact_edges[edge_idx];
+            destination := retained_edge.position +
+                retained_edge.chunk_units;
+            if (retained_edge.position < 0) or
+                (retained_edge.chunk_units < 2) or
+                (destination > expected_units) or
+                (Length(prefix_states[retained_edge.position]) <= 0) or
+                (Length(suffix_states[destination]) <= 0) then
+            begin
+                Continue;
+            end;
+            query_key := build_span_key(retained_edge.position,
+                retained_edge.chunk_units);
+            if (query_key = '') or
+                (not SameText(query_key, retained_edge.query_key)) or
+                (not find_exact_candidate(query_key,
+                retained_edge.text, retained_edge.chunk_units,
+                exact_candidate)) then
+            begin
+                Continue;
+            end;
+            retained_units := split_text_units(
+                Trim(retained_edge.text));
+            if Length(retained_units) <>
+                retained_edge.chunk_units then
+            begin
+                Continue;
+            end;
+            seed_span_text := '';
+            for unit_idx := retained_edge.position to
+                destination - 1 do
+            begin
+                seed_span_text := seed_span_text + seed_units[unit_idx];
+            end;
+            seed_span_weight := 0;
+            if find_exact_candidate(query_key, seed_span_text,
+                retained_edge.chunk_units, seed_span_candidate) then
+            begin
+                seed_span_weight := candidate_raw_weight(
+                    seed_span_candidate);
+            end;
+            anchor_confidence :=
+                Int64(retained_edge.chunk_units) * 10000 +
+                Int64(retained_edge.raw_weight) * 10 -
+                Int64(Max(0, retained_edge.exact_rank - 1)) * 2500;
+            SetLength(combinations, 0);
+            for prefix_idx := 0 to High(prefix_states[
+                retained_edge.position]) do
+            begin
+                prefix_state := prefix_states[
+                    retained_edge.position][prefix_idx];
+                for suffix_idx := 0 to High(suffix_states[destination]) do
+                begin
+                    suffix_state := suffix_states[destination][suffix_idx];
+                    left_transition_bonus := 0;
+                    if (prefix_state.last_segment_text <> '') and
+                        (prefix_state.last_segment_units > 0) then
+                    begin
+                        transition_query := build_span_key(
+                            retained_edge.position -
+                            prefix_state.last_segment_units,
+                            prefix_state.last_segment_units +
+                            retained_edge.chunk_units);
+                        transition_path :=
+                            prefix_state.last_segment_text +
+                            c_segment_path_separator +
+                            Trim(retained_edge.text);
+                        left_transition_bonus :=
+                            cached_path_transition_bonus(transition_query,
+                            transition_path);
+                    end;
+                    right_transition_bonus := 0;
+                    if (suffix_state.first_segment_text <> '') and
+                        (suffix_state.first_segment_units > 0) then
+                    begin
+                        transition_query := build_span_key(
+                            retained_edge.position,
+                            retained_edge.chunk_units +
+                            suffix_state.first_segment_units);
+                        transition_path := Trim(retained_edge.text) +
+                            c_segment_path_separator +
+                            suffix_state.first_segment_text;
+                        right_transition_bonus :=
+                            cached_path_transition_bonus(transition_query,
+                            transition_path);
+                    end;
+                    combination := Default(TAnchorCombination);
+                    combination.prefix_state := prefix_state;
+                    combination.suffix_state := suffix_state;
+                    combination.transition_support :=
+                        prefix_state.transition_support +
+                        suffix_state.transition_support +
+                        left_transition_bonus + right_transition_bonus;
+                    combination.score := prefix_state.score +
+                        suffix_state.score +
+                        candidate_raw_weight(exact_candidate) +
+                        Int64(retained_edge.chunk_units *
+                        retained_edge.chunk_units) * 1200 +
+                        Int64(left_transition_bonus +
+                        right_transition_bonus) * 4 + anchor_confidence;
+                    retain_combination(combination);
+                end;
+            end;
+            for combination_idx := 0 to High(combinations) do
+            begin
+                if generated_count >= candidate_limit then
+                begin
+                    Exit;
+                end;
+                prefix_state := combinations[
+                    combination_idx].prefix_state;
+                suffix_state := combinations[
+                    combination_idx].suffix_state;
+                generated_text := prefix_state.text +
+                    Trim(retained_edge.text) + suffix_state.text;
+                generated_units := split_text_units(generated_text);
+                if Length(generated_units) <> expected_units then
+                begin
+                    Continue;
+                end;
+                difference_count := 0;
+                changed_position := -1;
+                for unit_idx := 0 to High(generated_units) do
+                begin
+                    if not SameText(generated_units[unit_idx],
+                        seed_units[unit_idx]) then
+                    begin
+                        Inc(difference_count);
+                        if changed_position < 0 then
+                        begin
+                            changed_position := unit_idx;
+                        end;
+                    end;
+                end;
+                if difference_count <= 0 then
+                begin
+                    Continue;
+                end;
+                prefix_path := prefix_state.path_text;
+                suffix_path := suffix_state.path_text;
+                generated_path := prefix_path;
+                if generated_path <> '' then
+                begin
+                    generated_path := generated_path +
+                        c_segment_path_separator;
+                end;
+                generated_path := generated_path +
+                    Trim(retained_edge.text);
+                if suffix_path <> '' then
+                begin
+                    generated_path := generated_path +
+                        c_segment_path_separator + suffix_path;
+                end;
+                generated := seed_item.candidate;
+                generated.text := generated_text;
+                generated.comment := '';
+                generated.source := cs_rule;
+                generated.has_dict_weight := False;
+                generated.dict_weight := 0;
+                generated.score := clamp_int64_to_integer(
+                    combinations[combination_idx].score);
+                raw_count_before := Length(raw_pool);
+                add_candidate(generated, -1, generated_path,
+                    lcps_exact_edge_chain, seed_item.seed_rank,
+                    seed_item.seed_visible_index, False, difference_count,
+                    changed_position, seed_span_weight,
+                    candidate_raw_weight(exact_candidate),
+                    combinations[combination_idx].transition_support,
+                    retained_edge.position, retained_edge.chunk_units,
+                    retained_edge.exact_rank, retained_edge.top_weight,
+                    False);
+                if Length(raw_pool) > raw_count_before then
+                begin
+                    Inc(generated_count);
                 end;
             end;
         end;
@@ -128427,7 +130942,7 @@ var
                         changed_position, proposal.source_weight,
                         candidate_raw_weight(proposal.candidate), 0, position,
                         proposal.span_units, proposal.exact_rank,
-                        proposal.top_weight);
+                        proposal.top_weight, True);
                     if Length(raw_pool) > raw_count_before then
                     begin
                         Inc(generated_count);
@@ -128977,7 +131492,7 @@ var
                     Max(dual_pair.left_anchor.exact_rank,
                     dual_pair.right_anchor.exact_rank),
                     Max(dual_pair.left_anchor.top_weight,
-                    dual_pair.right_anchor.top_weight));
+                    dual_pair.right_anchor.top_weight), True);
                 if Length(raw_pool) > raw_count_before then
                 begin
                     Inc(dual_generated_count);
@@ -129168,7 +131683,8 @@ var
                     add_candidate(generated, -1, generated_path,
                         lcps_exact_pair, seed_item.seed_rank,
                         seed_item.seed_visible_index, False, 1,
-                        window_start, 0, 0, evidence_value, -1, 0, 0, 0);
+                        window_start, 0, 0, evidence_value, -1, 0, 0, 0,
+                        True);
                     Inc(pair_candidate_count);
                     if pair_candidate_count >= c_pair_candidate_limit then
                     begin
@@ -129314,7 +131830,7 @@ var
                     seed_item.seed_visible_index, False, 1, unit_idx,
                     source_weight,
                     candidate_raw_weight(single_options[option_idx]), 0,
-                    -1, 0, 0, 0);
+                    -1, 0, 0, 0, True);
             end;
         end;
     end;
@@ -129541,7 +132057,9 @@ var
         Result := -1;
         for reusable_idx := 0 to High(m_runtime_long_chain_candidates) do
         begin
-            if (not m_runtime_long_chain_candidates[reusable_idx].features_valid) or
+            if (m_runtime_long_chain_candidates[
+                reusable_idx].retained_exact_edge_count > 0) or
+                (not m_runtime_long_chain_candidates[reusable_idx].features_valid) or
                 (not SameText(
                 m_runtime_long_chain_candidates[reusable_idx].feature_query_key,
                 normalized_query)) or
@@ -130069,6 +132587,314 @@ var
         Result := True;
     end;
 
+    function is_retained_exact_edge_chain_text(
+        const candidate_text: string): Boolean;
+    var
+        pool_idx: Integer;
+    begin
+        Result := False;
+        for pool_idx := 0 to High(
+            m_runtime_long_complete_pool_candidates) do
+        begin
+            if (m_runtime_long_complete_pool_candidates[
+                pool_idx].source_kind = lcps_exact_edge_chain) and
+                SameText(Trim(m_runtime_long_complete_pool_candidates[
+                pool_idx].candidate.text), Trim(candidate_text)) then
+            begin
+                Exit(True);
+            end;
+        end;
+    end;
+
+    procedure demote_unapproved_retained_exact_edge_chains;
+    var
+        stable_candidates: TncCandidateList;
+        stable_sources: TArray<Integer>;
+        deferred_candidates: TncCandidateList;
+        deferred_sources: TArray<Integer>;
+        candidate_idx: Integer;
+        stable_count: Integer;
+        deferred_count: Integer;
+    begin
+        stable_count := 0;
+        deferred_count := 0;
+        SetLength(stable_candidates, Length(internal_candidates));
+        SetLength(stable_sources, Length(internal_source_indices));
+        SetLength(deferred_candidates, Length(internal_candidates));
+        SetLength(deferred_sources, Length(internal_source_indices));
+        for candidate_idx := 0 to High(internal_candidates) do
+        begin
+            if is_retained_exact_edge_chain_text(
+                internal_candidates[candidate_idx].text) then
+            begin
+                deferred_candidates[deferred_count] :=
+                    internal_candidates[candidate_idx];
+                if candidate_idx < Length(internal_source_indices) then
+                begin
+                    deferred_sources[deferred_count] :=
+                        internal_source_indices[candidate_idx];
+                end;
+                Inc(deferred_count);
+            end
+            else
+            begin
+                stable_candidates[stable_count] :=
+                    internal_candidates[candidate_idx];
+                if candidate_idx < Length(internal_source_indices) then
+                begin
+                    stable_sources[stable_count] :=
+                        internal_source_indices[candidate_idx];
+                end;
+                Inc(stable_count);
+            end;
+        end;
+        SetLength(stable_candidates, stable_count + deferred_count);
+        SetLength(stable_sources, stable_count + deferred_count);
+        for candidate_idx := 0 to deferred_count - 1 do
+        begin
+            stable_candidates[stable_count + candidate_idx] :=
+                deferred_candidates[candidate_idx];
+            stable_sources[stable_count + candidate_idx] :=
+                deferred_sources[candidate_idx];
+        end;
+        internal_candidates := stable_candidates;
+        internal_source_indices := stable_sources;
+    end;
+
+    procedure sync_baseline_pool_features;
+    var
+        baseline_signature_counts: TDictionary<string, Integer>;
+        baseline_idx: Integer;
+        source_pool_idx: Integer;
+        signature_count: Integer;
+        key: string;
+    begin
+        baseline_signature_counts := TDictionary<string, Integer>.Create;
+        try
+            for baseline_idx := 0 to High(baseline_raw_pool) do
+            begin
+                signature_count := 0;
+                baseline_signature_counts.TryGetValue(
+                    baseline_raw_pool[baseline_idx].segmentation_signature,
+                    signature_count);
+                baseline_signature_counts.AddOrSetValue(
+                    baseline_raw_pool[baseline_idx].segmentation_signature,
+                    signature_count + 1);
+            end;
+            for baseline_idx := 0 to High(baseline_raw_pool) do
+            begin
+                key := LowerCase(Trim(
+                    baseline_raw_pool[baseline_idx].candidate.text));
+                if (key = '') or (not raw_index_by_text.TryGetValue(key,
+                    source_pool_idx)) then
+                begin
+                    Continue;
+                end;
+                baseline_raw_pool[baseline_idx].char_lm_score :=
+                    raw_pool[source_pool_idx].char_lm_score;
+                baseline_raw_pool[baseline_idx].char_lm_suffix_score :=
+                    raw_pool[source_pool_idx].char_lm_suffix_score;
+                baseline_raw_pool[baseline_idx].char_lm_context_score :=
+                    raw_pool[source_pool_idx].char_lm_context_score;
+                baseline_raw_pool[baseline_idx].word_lm_bonus :=
+                    raw_pool[source_pool_idx].word_lm_bonus;
+                baseline_raw_pool[baseline_idx].word_lm_boundary_count :=
+                    raw_pool[source_pool_idx].word_lm_boundary_count;
+                baseline_raw_pool[baseline_idx].word_lm_boundary_min :=
+                    raw_pool[source_pool_idx].word_lm_boundary_min;
+                baseline_raw_pool[baseline_idx].word_lm_boundary_max :=
+                    raw_pool[source_pool_idx].word_lm_boundary_max;
+                baseline_raw_pool[baseline_idx].word_lm_boundary_first :=
+                    raw_pool[source_pool_idx].word_lm_boundary_first;
+                baseline_raw_pool[baseline_idx].word_lm_boundary_last :=
+                    raw_pool[source_pool_idx].word_lm_boundary_last;
+                baseline_raw_pool[baseline_idx].word_lm_supported_ratio :=
+                    raw_pool[source_pool_idx].word_lm_supported_ratio;
+                baseline_raw_pool[baseline_idx].word_lm_strong_ratio :=
+                    raw_pool[source_pool_idx].word_lm_strong_ratio;
+                baseline_raw_pool[baseline_idx].word_lm_trigram_ratio :=
+                    raw_pool[source_pool_idx].word_lm_trigram_ratio;
+                baseline_raw_pool[baseline_idx].word_lm_zero_count :=
+                    raw_pool[source_pool_idx].word_lm_zero_count;
+                baseline_raw_pool[baseline_idx].consensus_support :=
+                    raw_pool[source_pool_idx].consensus_support;
+                baseline_raw_pool[baseline_idx].consensus_seed_count :=
+                    raw_pool[source_pool_idx].consensus_seed_count;
+                baseline_raw_pool[baseline_idx].consensus_support_mean :=
+                    raw_pool[source_pool_idx].consensus_support_mean;
+                baseline_raw_pool[baseline_idx].consensus_support_min :=
+                    raw_pool[source_pool_idx].consensus_support_min;
+                baseline_raw_pool[baseline_idx].consensus_majority_units :=
+                    raw_pool[source_pool_idx].consensus_majority_units;
+                baseline_raw_pool[baseline_idx].consensus_unanimous_units :=
+                    raw_pool[source_pool_idx].consensus_unanimous_units;
+                baseline_raw_pool[baseline_idx].consensus_nearest_distance :=
+                    raw_pool[source_pool_idx].consensus_nearest_distance;
+                baseline_raw_pool[baseline_idx].consensus_mean_distance :=
+                    raw_pool[source_pool_idx].consensus_mean_distance;
+                baseline_raw_pool[baseline_idx].consensus_changed_support :=
+                    raw_pool[source_pool_idx].consensus_changed_support;
+                baseline_raw_pool[baseline_idx].consensus_changed_top_match :=
+                    raw_pool[source_pool_idx].consensus_changed_top_match;
+                signature_count := 0;
+                baseline_signature_counts.TryGetValue(
+                    baseline_raw_pool[baseline_idx].segmentation_signature,
+                    signature_count);
+                baseline_raw_pool[baseline_idx].signature_support :=
+                    signature_count;
+                { The shadow pool represents the pre-edge-recall pipeline. }
+                baseline_raw_pool[baseline_idx].edge_model_anchor_count := 0;
+                baseline_raw_pool[baseline_idx].edge_model_score_total := 0;
+                baseline_raw_pool[baseline_idx].edge_model_score_max := 0;
+                baseline_raw_pool[baseline_idx].edge_model_word_count := 0;
+                baseline_raw_pool[baseline_idx].edge_model_word_score_total := 0;
+                baseline_raw_pool[baseline_idx].edge_model_word_score_min := 0;
+                baseline_raw_pool[baseline_idx].edge_model_word_score_max := 0;
+                baseline_raw_pool[baseline_idx].edge_model_word_score_mean := 0;
+            end;
+        finally
+            baseline_signature_counts.Free;
+        end;
+    end;
+
+    procedure build_runtime_pool_from_raw(const mark_debug: Boolean;
+        const preserve_shadow_top: Boolean = False);
+    var
+        local_raw_idx: Integer;
+        local_sort_pos: Integer;
+        local_sort_insert_pos: Integer;
+        local_sort_value: Integer;
+        local_selected_idx: Integer;
+        local_signature_count: Integer;
+    begin
+        SetLength(sorted_indices, Length(raw_pool));
+        for local_raw_idx := 0 to High(raw_pool) do
+        begin
+            sorted_indices[local_raw_idx] := local_raw_idx;
+        end;
+        { The raw pool is bounded. Stable insertion sort preserves source
+          order for exact score ties without allocating a comparer. }
+        for local_sort_pos := 1 to High(sorted_indices) do
+        begin
+            local_sort_value := sorted_indices[local_sort_pos];
+            local_sort_insert_pos := local_sort_pos - 1;
+            while (local_sort_insert_pos >= 0) and pool_sort_is_better(
+                local_sort_value,
+                sorted_indices[local_sort_insert_pos]) do
+            begin
+                sorted_indices[local_sort_insert_pos + 1] :=
+                    sorted_indices[local_sort_insert_pos];
+                Dec(local_sort_insert_pos);
+            end;
+            sorted_indices[local_sort_insert_pos + 1] := local_sort_value;
+        end;
+
+        SetLength(selected_indices, 0);
+        selected_texts.Clear;
+        selected_signature_counts.Clear;
+        for local_raw_idx := 0 to High(raw_pool) do
+        begin
+            if raw_pool[local_raw_idx].source_kind = lcps_visible then
+            begin
+                select_raw_index(local_raw_idx);
+            end;
+        end;
+        { The exact-edge lane is additive. Keep the settled pre-edge Top1/Top2
+          available so the final auditor can always abstain without changing
+          established output. }
+        if preserve_shadow_top then
+        begin
+            if raw_index_by_text.TryGetValue(
+                LowerCase(Trim(baseline_top1)), local_raw_idx) then
+            begin
+                select_raw_index(local_raw_idx);
+            end;
+            if raw_index_by_text.TryGetValue(
+                LowerCase(Trim(baseline_top2)), local_raw_idx) then
+            begin
+                select_raw_index(local_raw_idx);
+            end;
+        end;
+        reserve_source_lane(lcps_proper_name,
+            c_proper_name_reserved, True);
+        reserve_source_lane(lcps_chain, c_chain_reserved);
+        reserve_source_lane(lcps_exact_lattice,
+            c_exact_lattice_reserved);
+        reserve_source_lane(lcps_exact_edge_chain,
+            c_exact_edge_chain_reserved);
+        reserve_source_lane(lcps_exact_pair, c_pair_reserved);
+        reserve_source_lane(lcps_local_repair, c_local_reserved);
+
+        for local_selected_idx := 0 to High(sorted_indices) do
+        begin
+            local_raw_idx := sorted_indices[local_selected_idx];
+            local_signature_count := 0;
+            selected_signature_counts.TryGetValue(
+                raw_pool[local_raw_idx].segmentation_signature,
+                local_signature_count);
+            if local_signature_count >= c_signature_soft_limit then
+            begin
+                Continue;
+            end;
+            select_raw_index(local_raw_idx);
+            if Length(selected_indices) >= c_pool_limit then
+            begin
+                Break;
+            end;
+        end;
+        for local_selected_idx := 0 to High(sorted_indices) do
+        begin
+            if Length(selected_indices) >= c_pool_limit then
+            begin
+                Break;
+            end;
+            select_raw_index(sorted_indices[local_selected_idx]);
+        end;
+
+        SetLength(m_runtime_long_complete_pool_candidates,
+            Length(selected_indices));
+        for local_selected_idx := 0 to High(selected_indices) do
+        begin
+            local_raw_idx := selected_indices[local_selected_idx];
+            raw_pool[local_raw_idx].pool_rank := local_selected_idx + 1;
+            raw_pool[local_raw_idx].local_pairwise_score := 0;
+            raw_pool[local_raw_idx].local_pairwise_insert_rank := -1;
+            m_runtime_long_complete_pool_candidates[local_selected_idx] :=
+                raw_pool[local_raw_idx];
+            m_runtime_long_complete_pool_candidates[local_selected_idx].visible_evidence :=
+                generated_pool_candidate_has_visible_evidence(
+                raw_pool[local_raw_idx].candidate.text, False);
+            remember_segment_path_for_candidate(
+                raw_pool[local_raw_idx].candidate.text, '',
+                raw_pool[local_raw_idx].segment_path,
+                raw_pool[local_raw_idx].candidate.score);
+            if mark_debug then
+            begin
+                debug_mark_long_exact_path_complete_pool(
+                    raw_pool[local_raw_idx].segment_path);
+            end;
+        end;
+    end;
+
+    procedure copy_runtime_pool_to_internal(
+        out target_candidates: TncCandidateList;
+        out target_sources: TArray<Integer>);
+    var
+        local_selected_idx: Integer;
+    begin
+        SetLength(target_candidates,
+            Length(m_runtime_long_complete_pool_candidates));
+        SetLength(target_sources, Length(target_candidates));
+        for local_selected_idx := 0 to High(
+            m_runtime_long_complete_pool_candidates) do
+        begin
+            target_candidates[local_selected_idx] :=
+                m_runtime_long_complete_pool_candidates[local_selected_idx].candidate;
+            target_sources[local_selected_idx] :=
+                m_runtime_long_complete_pool_candidates[local_selected_idx].source_index;
+        end;
+    end;
+
 begin
     pool_phase_tick := 0;
     if m_config.debug_mode then
@@ -130108,7 +132934,9 @@ begin
         Length(source_indices));
     original_visible_count := Length(original_candidates);
     SetLength(raw_pool, 0);
+    SetLength(baseline_raw_pool, 0);
     raw_index_by_text := TDictionary<string, Integer>.Create;
+    baseline_index_by_text := TDictionary<string, Integer>.Create;
     selected_texts := TDictionary<string, Boolean>.Create;
     selected_signature_counts := TDictionary<string, Integer>.Create;
     signature_totals := TDictionary<string, Integer>.Create;
@@ -130125,7 +132953,8 @@ begin
             end;
             add_candidate(original_candidates[idx], source_idx, '',
                 lcps_visible, idx + 1, idx, True, 0, -1, 0, 0, 0,
-                -1, 0, 0, 0);
+                -1, 0, 0, 0, not candidate_text_is_edge_only(
+                original_candidates[idx].text));
         end;
 
         for chain_idx := 0 to High(m_runtime_long_chain_candidates) do
@@ -130152,18 +132981,26 @@ begin
             candidate_value.source := cs_rule;
             candidate_value.has_dict_weight := False;
             candidate_value.dict_weight := 0;
+            chain_source_kind := lcps_chain;
+            if m_runtime_long_chain_candidates[
+                chain_idx].retained_exact_edge_count > 0 then
+            begin
+                chain_source_kind := lcps_exact_edge_chain;
+            end;
             add_candidate(candidate_value, -1,
                 m_runtime_long_chain_candidates[chain_idx].segment_path,
-                lcps_chain,
+                chain_source_kind,
                 m_runtime_long_chain_candidates[chain_idx].rank,
-                -1, True, 0, -1, 0, 0, 0, -1, 0, 0, 0);
+                -1, True, 0, -1, 0, 0, 0, -1, 0, 0, 0,
+                chain_source_kind <> lcps_exact_edge_chain);
         end;
 
         for idx := 0 to Min(c_existing_probe_limit - 1,
             High(m_candidates)) do
         begin
             add_candidate(m_candidates[idx], idx, '', lcps_existing,
-                idx + 1, -1, True, 0, -1, 0, 0, 0, -1, 0, 0, 0);
+                idx + 1, -1, True, 0, -1, 0, 0, 0, -1, 0, 0, 0,
+                True);
         end;
         raw_original_count := Length(raw_pool);
         note_pool_phase('seed');
@@ -130174,12 +133011,17 @@ begin
             Exit;
         end;
 
-        generate_exact_lattice_candidates;
+        collect_model_retained_exact_edges;
+        generate_exact_lattice_candidates(False, False);
+        generate_exact_lattice_candidates(True, False);
+        generate_exact_lattice_candidates(False, True);
         note_pool_phase('lattice');
         generate_exact_anchor_candidates(False,
             c_exact_anchor_candidate_limit);
         generate_exact_anchor_candidates(True,
             c_exact_anchor_best_candidate_limit);
+        generate_retained_exact_edge_anchor_candidates(
+            c_retained_exact_anchor_candidate_limit);
         note_pool_phase('anchor');
         generate_exact_pair_candidates;
         note_pool_phase('pair');
@@ -130297,8 +133139,10 @@ begin
               as independent support changes the learned features of every
               established candidate that shares their segmentation, even
               when the probe itself never reaches the visible ranks. }
-            if (raw_pool[raw_idx].anchor_units <= 0) or
-                (raw_pool[raw_idx].anchor_exact_rank < 4) then
+            if (raw_pool[raw_idx].source_kind <> lcps_exact_edge_chain) and
+                (raw_pool[raw_idx].anchor_start <> -2) and
+                ((raw_pool[raw_idx].anchor_units <= 0) or
+                (raw_pool[raw_idx].anchor_exact_rank < 4)) then
             begin
                 signature_totals.TryGetValue(
                     raw_pool[raw_idx].segmentation_signature, idx);
@@ -130318,103 +133162,39 @@ begin
             raw_pool[raw_idx].signature_support := idx;
         end;
 
-        SetLength(sorted_indices, Length(raw_pool));
-        for raw_idx := 0 to High(raw_pool) do
-        begin
-            sorted_indices[raw_idx] := raw_idx;
-        end;
-        { The raw pool is deliberately bounded at 192 entries. A stable
-          insertion sort avoids allocating a captured comparer in Delphi and
-          preserves deterministic source order for exact score ties. }
-        for sort_pos := 1 to High(sorted_indices) do
-        begin
-            sort_value := sorted_indices[sort_pos];
-            sort_insert_pos := sort_pos - 1;
-            while (sort_insert_pos >= 0) and pool_sort_is_better(
-                sort_value, sorted_indices[sort_insert_pos]) do
-            begin
-                sorted_indices[sort_insert_pos + 1] :=
-                    sorted_indices[sort_insert_pos];
-                Dec(sort_insert_pos);
-            end;
-            sorted_indices[sort_insert_pos + 1] := sort_value;
-        end;
-        note_pool_phase('presort');
+        sync_baseline_pool_features;
+        full_raw_pool := raw_pool;
 
-        SetLength(selected_indices, 0);
-        for raw_idx := 0 to High(raw_pool) do
+        { Rank the pre-edge-recall pool from the same cached feature batch.
+          This shadow pass performs no lattice, exact or character-LM query. }
+        raw_pool := baseline_raw_pool;
+        build_runtime_pool_from_raw(False);
+        score_local_pairwise_candidates;
+        copy_runtime_pool_to_internal(baseline_candidates,
+            baseline_source_indices);
+        apply_long_final_visible_candidate_ranking(baseline_candidates,
+            baseline_source_indices, True);
+        baseline_top1 := '';
+        baseline_top2 := '';
+        if Length(baseline_candidates) > 0 then
         begin
-            if raw_pool[raw_idx].source_kind = lcps_visible then
-            begin
-                select_raw_index(raw_idx);
-            end;
+            baseline_top1 := Trim(baseline_candidates[0].text);
         end;
-        reserve_source_lane(lcps_proper_name,
-            c_proper_name_reserved, True);
-        reserve_source_lane(lcps_chain, c_chain_reserved);
-        reserve_source_lane(lcps_exact_lattice,
-            c_exact_lattice_reserved);
-        reserve_source_lane(lcps_exact_pair, c_pair_reserved);
-        reserve_source_lane(lcps_local_repair, c_local_reserved);
+        if Length(baseline_candidates) > 1 then
+        begin
+            baseline_top2 := Trim(baseline_candidates[1].text);
+        end;
+        note_pool_phase('shadow');
 
-        for selected_idx := 0 to High(sorted_indices) do
-        begin
-            raw_idx := sorted_indices[selected_idx];
-            idx := 0;
-            selected_signature_counts.TryGetValue(
-                raw_pool[raw_idx].segmentation_signature, idx);
-            if idx >= c_signature_soft_limit then
-            begin
-                Continue;
-            end;
-            select_raw_index(raw_idx);
-            if Length(selected_indices) >= c_pool_limit then
-            begin
-                Break;
-            end;
-        end;
-        for selected_idx := 0 to High(sorted_indices) do
-        begin
-            if Length(selected_indices) >= c_pool_limit then
-            begin
-                Break;
-            end;
-            select_raw_index(sorted_indices[selected_idx]);
-        end;
-
-        SetLength(m_runtime_long_complete_pool_candidates,
-            Length(selected_indices));
-        for selected_idx := 0 to High(selected_indices) do
-        begin
-            raw_idx := selected_indices[selected_idx];
-            raw_pool[raw_idx].pool_rank := selected_idx + 1;
-            m_runtime_long_complete_pool_candidates[selected_idx] :=
-                raw_pool[raw_idx];
-            m_runtime_long_complete_pool_candidates[selected_idx].visible_evidence :=
-                generated_pool_candidate_has_visible_evidence(
-                raw_pool[raw_idx].candidate.text, False);
-            remember_segment_path_for_candidate(
-                raw_pool[raw_idx].candidate.text, '',
-                raw_pool[raw_idx].segment_path,
-                raw_pool[raw_idx].candidate.score);
-        end;
+        raw_pool := full_raw_pool;
+        build_runtime_pool_from_raw(True, True);
         note_pool_phase('select');
         score_local_pairwise_candidates;
         note_pool_phase('localpair');
-
-        SetLength(internal_candidates,
-            Length(m_runtime_long_complete_pool_candidates));
-        SetLength(internal_source_indices, Length(internal_candidates));
-        for selected_idx := 0 to High(
-            m_runtime_long_complete_pool_candidates) do
-        begin
-            internal_candidates[selected_idx] :=
-                m_runtime_long_complete_pool_candidates[selected_idx].candidate;
-            internal_source_indices[selected_idx] :=
-                m_runtime_long_complete_pool_candidates[selected_idx].source_index;
-        end;
+        copy_runtime_pool_to_internal(internal_candidates,
+            internal_source_indices);
         apply_long_final_visible_candidate_ranking(internal_candidates,
-            internal_source_indices, True);
+            internal_source_indices, True, baseline_top1, baseline_top2);
         note_pool_phase('rank');
 
         SetLength(merged_candidates, original_visible_count);
@@ -130493,6 +133273,7 @@ begin
         signature_totals.Free;
         selected_signature_counts.Free;
         selected_texts.Free;
+        baseline_index_by_text.Free;
         raw_index_by_text.Free;
     end;
 end;
@@ -130500,7 +133281,9 @@ end;
 procedure TncEngine.apply_long_final_visible_candidate_ranking(
     var candidates: TncCandidateList;
     var source_indices: TArray<Integer>;
-    const unified_pool_final: Boolean);
+    const unified_pool_final: Boolean;
+    const exact_edge_baseline_top1: string;
+    const exact_edge_baseline_top2: string);
 const
     c_ranking_stage_legacy_input = 0;
     c_ranking_stage_unified_ranker = 1;
@@ -130521,6 +133304,9 @@ const
     c_deep_local_repair_max_rank = 32;
     c_deep_local_repair_min_char_lm_gain = 500;
     c_deep_local_repair_min_suffix_lm_gain = 300;
+type
+    TncLongExactEdgeAuditorBaseFeatures = array[0..44] of Double;
+    TncLongExactEdgeFallbackAuditorBaseFeatures = array[0..65] of Double;
 var
     profile: Integer;
     candidate_count: Integer;
@@ -130584,6 +133370,20 @@ var
     complete_pool_post_static_difference_debug_scores: TArray<Int64>;
     complete_pool_post_static_difference_current_rank_debug: TArray<Integer>;
     complete_pool_post_static_difference_promoted_index: Integer;
+    exact_edge_auditor_features: TncLongExactEdgeAuditorFeatures;
+    exact_edge_auditor_score: Double;
+    exact_edge_auditor_threshold: Double;
+    exact_edge_baseline_top1_index: Integer;
+    exact_edge_baseline_top2_index: Integer;
+    exact_edge_current_top_index: Integer;
+    exact_edge_auditor_source_kind: Integer;
+    exact_edge_auditor_decision: Integer;
+    exact_edge_fallback_auditor_features:
+        TncLongExactEdgeFallbackAuditorFeatures;
+    exact_edge_fallback_auditor_score: Double;
+    exact_edge_fallback_auditor_threshold: Double;
+    exact_edge_fallback_auditor_decision: Integer;
+    exact_edge_pre_auditor_ranks: TArray<Integer>;
     local_difference_features: TncLongLocalDifferenceResidualFeatures;
     local_difference_score: Int64;
     best_local_difference_score: Int64;
@@ -130676,6 +133476,11 @@ var
         Result := -1;
         for idx_local := 0 to High(m_runtime_long_chain_candidates) do
         begin
+            if m_runtime_long_chain_candidates[
+                idx_local].retained_exact_edge_count > 0 then
+            begin
+                Continue;
+            end;
             if SameText(Trim(m_runtime_long_chain_candidates[idx_local].text),
                 Trim(candidate_text)) then
             begin
@@ -130786,6 +133591,317 @@ var
         difference_span_units := Max(0,
             Max(Length(candidate_units), Length(top_units)) -
             same_prefix_units - same_suffix_units);
+    end;
+
+    procedure fill_exact_edge_auditor_base_features(
+        const features: TncLongFinalRankerFeatures;
+        out values: TncLongExactEdgeAuditorBaseFeatures);
+    begin
+        values[0] := features.candidate_score;
+        values[1] := features.path_segments;
+        values[2] := features.path_single_segments;
+        values[3] := features.path_max_segment_units;
+        values[4] := features.char_lm_score;
+        values[5] := features.char_lm_suffix_score;
+        values[6] := features.char_lm_context_score;
+        values[7] := features.word_lm_bonus;
+        values[8] := features.word_lm_boundary_count;
+        values[9] := features.word_lm_boundary_min;
+        values[10] := features.word_lm_boundary_max;
+        values[11] := features.word_lm_boundary_first;
+        values[12] := features.word_lm_boundary_last;
+        values[13] := features.word_lm_supported_ratio;
+        values[14] := features.word_lm_strong_ratio;
+        values[15] := features.word_lm_trigram_ratio;
+        values[16] := features.word_lm_zero_count;
+        values[17] := features.score_per_unit;
+        values[18] := features.complete_pool_rank;
+        values[19] := features.complete_pool_seed_rank;
+        values[20] := Ord(features.complete_pool_original);
+        values[21] := features.complete_pool_substitutions;
+        values[22] := Ord(features.complete_pool_anchor_present);
+        values[23] := features.complete_pool_anchor_units;
+        values[24] := features.complete_pool_anchor_exact_rank;
+        values[25] := features.complete_pool_anchor_weight_gain;
+        values[26] := features.complete_pool_pair_evidence;
+        values[27] := features.complete_pool_proper_name_confidence;
+        values[28] := features.complete_pool_signature_support;
+        values[29] := features.complete_pool_consensus_support;
+        values[30] := features.complete_pool_consensus_seed_count;
+        values[31] := features.complete_pool_consensus_support_mean;
+        values[32] := features.complete_pool_consensus_support_min;
+        values[33] := features.complete_pool_consensus_majority_units;
+        values[34] := features.complete_pool_consensus_unanimous_units;
+        values[35] := features.complete_pool_consensus_nearest_distance;
+        values[36] := features.complete_pool_consensus_mean_distance;
+        values[37] := features.complete_pool_edge_model_anchor_count;
+        values[38] := features.complete_pool_edge_model_score_total;
+        values[39] := features.complete_pool_edge_model_score_max;
+        values[40] := features.complete_pool_edge_model_word_count;
+        values[41] := features.complete_pool_edge_model_word_score_total;
+        values[42] := features.complete_pool_edge_model_word_score_min;
+        values[43] := features.complete_pool_edge_model_word_score_max;
+        values[44] := features.complete_pool_edge_model_word_score_mean;
+    end;
+
+    procedure fill_exact_edge_fallback_auditor_base_features(
+        const features: TncLongFinalRankerFeatures;
+        out values: TncLongExactEdgeFallbackAuditorBaseFeatures);
+    var
+        primary_values: TncLongExactEdgeAuditorBaseFeatures;
+        primary_idx: Integer;
+    begin
+        fill_exact_edge_auditor_base_features(features, primary_values);
+        for primary_idx := 0 to High(primary_values) do
+        begin
+            values[primary_idx] := primary_values[primary_idx];
+        end;
+        values[45] := features.dict_weight;
+        values[46] := Ord(features.has_dict_weight);
+        values[47] := Ord(features.source_chain);
+        values[48] := Ord(features.source_pattern);
+        values[49] := Ord(features.source_local_rerank);
+        values[50] := features.legacy_rank;
+        values[51] := features.chain_rank;
+        values[52] := features.chain_score_gap;
+        values[53] := features.path_confidence_score;
+        values[54] := features.path_confidence_tier;
+        values[55] := features.char_lm_context_gain;
+        values[56] := features.query_path_bonus;
+        values[57] := features.query_path_penalty;
+        values[58] := features.dict_weight_per_unit;
+        values[59] := Ord(features.complete_dictionary);
+        values[60] := Ord(features.complete_chain);
+        values[61] := features.complete_pool_source_kind;
+        values[62] := features.complete_pool_changed_position;
+        values[63] := features.complete_pool_consensus_changed_support;
+        values[64] := Ord(
+            features.complete_pool_consensus_changed_top_match);
+        values[65] := features.complete_pool_local_pairwise_score;
+    end;
+
+    procedure build_exact_edge_auditor_features(
+        const challenger_index: Integer;
+        const baseline_index: Integer;
+        out features: TncLongExactEdgeAuditorFeatures);
+    var
+        challenger_values: TncLongExactEdgeAuditorBaseFeatures;
+        baseline_values: TncLongExactEdgeAuditorBaseFeatures;
+        feature_idx: Integer;
+        different_units: Integer;
+        different_runs: Integer;
+        max_different_run: Integer;
+        same_prefix_units: Integer;
+        same_suffix_units: Integer;
+        difference_span_units: Integer;
+    begin
+        FillChar(features, SizeOf(features), 0);
+        fill_exact_edge_auditor_base_features(
+            rank_features[challenger_index], challenger_values);
+        fill_exact_edge_auditor_base_features(
+            rank_features[baseline_index], baseline_values);
+        features[0] := rank_features[challenger_index].input_syllable_count;
+        features[1] := 1.0;
+        for feature_idx := 0 to High(challenger_values) do
+        begin
+            features[2 + feature_idx] := challenger_values[feature_idx];
+            features[47 + feature_idx] := baseline_values[feature_idx];
+            features[92 + feature_idx] := challenger_values[feature_idx] -
+                baseline_values[feature_idx];
+        end;
+        get_text_relation(legacy_candidates[challenger_index].text,
+            legacy_candidates[baseline_index].text, different_units,
+            different_runs, max_different_run, same_prefix_units,
+            same_suffix_units, difference_span_units);
+        features[137] := different_units;
+        features[138] := different_runs;
+        features[139] := max_different_run;
+        features[140] := same_prefix_units;
+        features[141] := same_suffix_units;
+    end;
+
+    procedure build_exact_edge_fallback_auditor_features(
+        const challenger_index: Integer;
+        const baseline_index: Integer;
+        out features: TncLongExactEdgeFallbackAuditorFeatures);
+    var
+        challenger_values: TncLongExactEdgeFallbackAuditorBaseFeatures;
+        baseline_values: TncLongExactEdgeFallbackAuditorBaseFeatures;
+        feature_idx: Integer;
+        different_units: Integer;
+        different_runs: Integer;
+        max_different_run: Integer;
+        same_prefix_units: Integer;
+        same_suffix_units: Integer;
+        difference_span_units: Integer;
+    begin
+        FillChar(features, SizeOf(features), 0);
+        fill_exact_edge_fallback_auditor_base_features(
+            rank_features[challenger_index], challenger_values);
+        fill_exact_edge_fallback_auditor_base_features(
+            rank_features[baseline_index], baseline_values);
+        features[0] := rank_features[challenger_index].input_syllable_count;
+        features[1] := 1.0;
+        for feature_idx := 0 to High(challenger_values) do
+        begin
+            features[2 + feature_idx] := challenger_values[feature_idx];
+            features[68 + feature_idx] := baseline_values[feature_idx];
+            features[134 + feature_idx] := challenger_values[feature_idx] -
+                baseline_values[feature_idx];
+        end;
+        get_text_relation(legacy_candidates[challenger_index].text,
+            legacy_candidates[baseline_index].text, different_units,
+            different_runs, max_different_run, same_prefix_units,
+            same_suffix_units, difference_span_units);
+        features[200] := different_units;
+        features[201] := different_runs;
+        features[202] := max_different_run;
+        features[203] := same_prefix_units;
+        features[204] := same_suffix_units;
+    end;
+
+    function find_legacy_candidate_index(const candidate_text: string): Integer;
+    var
+        legacy_idx: Integer;
+    begin
+        Result := -1;
+        if Trim(candidate_text) = '' then
+        begin
+            Exit;
+        end;
+        for legacy_idx := 0 to High(legacy_candidates) do
+        begin
+            if SameText(Trim(legacy_candidates[legacy_idx].text),
+                Trim(candidate_text)) then
+            begin
+                Exit(legacy_idx);
+            end;
+        end;
+    end;
+
+    procedure move_ordered_candidate_to_position(
+        const candidate_index: Integer; const target_position: Integer);
+    var
+        current_position: Integer;
+        move_idx: Integer;
+    begin
+        current_position := -1;
+        for move_idx := 0 to High(ordered_indices) do
+        begin
+            if ordered_indices[move_idx] = candidate_index then
+            begin
+                current_position := move_idx;
+                Break;
+            end;
+        end;
+        if (current_position < 0) or (target_position < 0) or
+            (target_position >= Length(ordered_indices)) or
+            (current_position = target_position) then
+        begin
+            Exit;
+        end;
+        if current_position > target_position then
+        begin
+            for move_idx := current_position downto target_position + 1 do
+            begin
+                ordered_indices[move_idx] := ordered_indices[move_idx - 1];
+            end;
+        end
+        else
+        begin
+            for move_idx := current_position to target_position - 1 do
+            begin
+                ordered_indices[move_idx] := ordered_indices[move_idx + 1];
+            end;
+        end;
+        ordered_indices[target_position] := candidate_index;
+    end;
+
+    procedure apply_exact_edge_final_auditor;
+    begin
+        exact_edge_auditor_decision := -1;
+        exact_edge_fallback_auditor_decision := -1;
+        if (not unified_pool_final) or
+            (Trim(exact_edge_baseline_top1) = '') or
+            (Length(ordered_indices) <= 0) then
+        begin
+            Exit;
+        end;
+        exact_edge_current_top_index := ordered_indices[0];
+        exact_edge_baseline_top1_index := find_legacy_candidate_index(
+            exact_edge_baseline_top1);
+        if (exact_edge_baseline_top1_index < 0) or
+            (exact_edge_current_top_index = exact_edge_baseline_top1_index) or
+            rank_features[exact_edge_current_top_index].source_user or
+            rank_features[exact_edge_current_top_index].complete_user or
+            rank_features[exact_edge_baseline_top1_index].source_user or
+            rank_features[exact_edge_baseline_top1_index].complete_user then
+        begin
+            Exit;
+        end;
+
+        exact_edge_auditor_source_kind :=
+            rank_features[exact_edge_current_top_index].
+            complete_pool_source_kind;
+        case exact_edge_auditor_source_kind of
+            Ord(lcps_visible):
+                exact_edge_auditor_threshold := -0.021090963316034224;
+            Ord(lcps_local_repair):
+                exact_edge_auditor_threshold := -0.27598497892068496;
+            Ord(lcps_exact_lattice):
+                exact_edge_auditor_threshold := 0.5126426148990523;
+            Ord(lcps_exact_edge_chain):
+                exact_edge_auditor_threshold := 0.3203492695358477;
+        else
+            Exit;
+        end;
+        build_exact_edge_auditor_features(exact_edge_current_top_index,
+            exact_edge_baseline_top1_index, exact_edge_auditor_features);
+        exact_edge_auditor_score := long_exact_edge_auditor_score(
+            exact_edge_auditor_features);
+        if exact_edge_auditor_score >= exact_edge_auditor_threshold then
+        begin
+            exact_edge_auditor_decision := 1;
+            apply_ranker := True;
+            Exit;
+        end;
+
+        exact_edge_auditor_decision := 0;
+        if c_long_exact_edge_fallback_auditor_enabled and
+            (exact_edge_auditor_source_kind = Ord(lcps_exact_lattice)) then
+        begin
+            build_exact_edge_fallback_auditor_features(
+                exact_edge_current_top_index,
+                exact_edge_baseline_top1_index,
+                exact_edge_fallback_auditor_features);
+            exact_edge_fallback_auditor_score :=
+                long_exact_edge_fallback_auditor_score(
+                exact_edge_fallback_auditor_features);
+            exact_edge_fallback_auditor_threshold :=
+                c_long_exact_edge_fallback_auditor_threshold;
+            if exact_edge_fallback_auditor_score >=
+                exact_edge_fallback_auditor_threshold then
+            begin
+                exact_edge_fallback_auditor_decision := 1;
+                exact_edge_auditor_decision := 2;
+                apply_ranker := True;
+                Exit;
+            end;
+            exact_edge_fallback_auditor_decision := 0;
+        end;
+
+        move_ordered_candidate_to_position(
+            exact_edge_baseline_top1_index, 0);
+        exact_edge_baseline_top2_index := find_legacy_candidate_index(
+            exact_edge_baseline_top2);
+        if (exact_edge_baseline_top2_index >= 0) and
+            (exact_edge_baseline_top2_index <>
+            exact_edge_baseline_top1_index) and
+            (Length(ordered_indices) > 1) then
+        begin
+            move_ordered_candidate_to_position(
+                exact_edge_baseline_top2_index, 1);
+        end;
     end;
 
     function get_top2_cached_span_lm_scores(const top_text: string;
@@ -133403,6 +136519,22 @@ var
             features.complete_pool_consensus_changed_top_match;
         debug_item.complete_pool_local_pairwise_score :=
             features.complete_pool_local_pairwise_score;
+        debug_item.complete_pool_edge_model_anchor_count :=
+            features.complete_pool_edge_model_anchor_count;
+        debug_item.complete_pool_edge_model_score_total :=
+            features.complete_pool_edge_model_score_total;
+        debug_item.complete_pool_edge_model_score_max :=
+            features.complete_pool_edge_model_score_max;
+        debug_item.complete_pool_edge_model_word_count :=
+            features.complete_pool_edge_model_word_count;
+        debug_item.complete_pool_edge_model_word_score_total :=
+            features.complete_pool_edge_model_word_score_total;
+        debug_item.complete_pool_edge_model_word_score_min :=
+            features.complete_pool_edge_model_word_score_min;
+        debug_item.complete_pool_edge_model_word_score_max :=
+            features.complete_pool_edge_model_word_score_max;
+        debug_item.complete_pool_edge_model_word_score_mean :=
+            features.complete_pool_edge_model_word_score_mean;
     end;
 
 begin
@@ -133418,6 +136550,14 @@ begin
         c_long_unified_top2_family_other;
     unified_top2_arbiter_swapped := False;
     SetLength(unified_top2_arbiter_feature_values, 0);
+    exact_edge_auditor_score := -MaxDouble;
+    exact_edge_auditor_threshold := MaxDouble;
+    exact_edge_auditor_decision := -1;
+    exact_edge_fallback_auditor_score := -MaxDouble;
+    exact_edge_fallback_auditor_threshold := MaxDouble;
+    exact_edge_fallback_auditor_decision := -1;
+    exact_edge_baseline_top1_index := -1;
+    exact_edge_baseline_top2_index := -1;
     if unified_pool_final then
     begin
         profile := c_long_complete_pool_ranker_default_profile;
@@ -133821,6 +136961,30 @@ begin
                     m_runtime_long_complete_pool_candidates[pool_idx].consensus_changed_top_match > 0;
                 complete_pool_local_pairwise_score :=
                     m_runtime_long_complete_pool_candidates[pool_idx].local_pairwise_score;
+                complete_pool_edge_model_anchor_count :=
+                    m_runtime_long_complete_pool_candidates[pool_idx].
+                    edge_model_anchor_count;
+                complete_pool_edge_model_score_total :=
+                    m_runtime_long_complete_pool_candidates[pool_idx].
+                    edge_model_score_total;
+                complete_pool_edge_model_score_max :=
+                    m_runtime_long_complete_pool_candidates[pool_idx].
+                    edge_model_score_max;
+                complete_pool_edge_model_word_count :=
+                    m_runtime_long_complete_pool_candidates[pool_idx].
+                    edge_model_word_count;
+                complete_pool_edge_model_word_score_total :=
+                    m_runtime_long_complete_pool_candidates[pool_idx].
+                    edge_model_word_score_total;
+                complete_pool_edge_model_word_score_min :=
+                    m_runtime_long_complete_pool_candidates[pool_idx].
+                    edge_model_word_score_min;
+                complete_pool_edge_model_word_score_max :=
+                    m_runtime_long_complete_pool_candidates[pool_idx].
+                    edge_model_word_score_max;
+                complete_pool_edge_model_word_score_mean :=
+                    m_runtime_long_complete_pool_candidates[pool_idx].
+                    edge_model_word_score_mean;
                 word_lm_bonus :=
                     m_runtime_long_complete_pool_candidates[pool_idx].word_lm_bonus;
                 word_lm_boundary_count :=
@@ -133990,6 +137154,48 @@ begin
                 rank_features[top_idx].complete_pool_local_pairwise_score;
             abstain_features.legacy_top_local_pairwise_score :=
                 rank_features[0].complete_pool_local_pairwise_score;
+            abstain_features.ranker_top_edge_model_anchor_count :=
+                rank_features[top_idx].complete_pool_edge_model_anchor_count;
+            abstain_features.legacy_top_edge_model_anchor_count :=
+                rank_features[0].complete_pool_edge_model_anchor_count;
+            abstain_features.ranker_top_edge_model_anchor_gain :=
+                rank_features[top_idx].complete_pool_edge_model_anchor_count -
+                rank_features[0].complete_pool_edge_model_anchor_count;
+            abstain_features.ranker_top_edge_model_score_total :=
+                rank_features[top_idx].complete_pool_edge_model_score_total;
+            abstain_features.legacy_top_edge_model_score_total :=
+                rank_features[0].complete_pool_edge_model_score_total;
+            abstain_features.ranker_top_edge_model_score_total_gain :=
+                rank_features[top_idx].complete_pool_edge_model_score_total -
+                rank_features[0].complete_pool_edge_model_score_total;
+            abstain_features.ranker_top_edge_model_score_max :=
+                rank_features[top_idx].complete_pool_edge_model_score_max;
+            abstain_features.legacy_top_edge_model_score_max :=
+                rank_features[0].complete_pool_edge_model_score_max;
+            abstain_features.ranker_top_edge_model_score_max_gain :=
+                rank_features[top_idx].complete_pool_edge_model_score_max -
+                rank_features[0].complete_pool_edge_model_score_max;
+            abstain_features.ranker_top_edge_model_word_count :=
+                rank_features[top_idx].complete_pool_edge_model_word_count;
+            abstain_features.legacy_top_edge_model_word_count :=
+                rank_features[0].complete_pool_edge_model_word_count;
+            abstain_features.ranker_top_edge_model_word_count_gain :=
+                rank_features[top_idx].complete_pool_edge_model_word_count -
+                rank_features[0].complete_pool_edge_model_word_count;
+            abstain_features.ranker_top_edge_model_word_score_mean :=
+                rank_features[top_idx].complete_pool_edge_model_word_score_mean;
+            abstain_features.legacy_top_edge_model_word_score_mean :=
+                rank_features[0].complete_pool_edge_model_word_score_mean;
+            abstain_features.ranker_top_edge_model_word_score_mean_gain :=
+                rank_features[top_idx].complete_pool_edge_model_word_score_mean -
+                rank_features[0].complete_pool_edge_model_word_score_mean;
+            abstain_features.ranker_top_edge_model_word_score_min :=
+                rank_features[top_idx].complete_pool_edge_model_word_score_min;
+            abstain_features.legacy_top_edge_model_word_score_min :=
+                rank_features[0].complete_pool_edge_model_word_score_min;
+            abstain_features.ranker_top_edge_model_word_score_min_gain :=
+                rank_features[top_idx].complete_pool_edge_model_word_score_min -
+                rank_features[0].complete_pool_edge_model_word_score_min;
             if unified_pool_final then
             begin
                 abstain_score := long_complete_pool_abstain_score(
@@ -134528,6 +137734,16 @@ begin
     capture_ranking_stage(c_ranking_stage_unified_top2_arbiter);
     apply_deep_local_repair_fallback;
     capture_ranking_stage(c_ranking_stage_deep_local_repair);
+    { The exact-edge lane may change the settled Top1 only when its
+      independent-corpus auditor prefers it to the shadow baseline. }
+    SetLength(exact_edge_pre_auditor_ranks, candidate_count);
+    for candidate_idx := 0 to candidate_count - 1 do
+    begin
+        exact_edge_pre_auditor_ranks[ordered_indices[candidate_idx]] :=
+            candidate_idx + 1;
+    end;
+    exact_edge_current_top_index := ordered_indices[0];
+    apply_exact_edge_final_auditor;
 
     if apply_ranker then
     begin
@@ -134573,6 +137789,36 @@ begin
             final_ranks[candidate_idx];
         copy_features_to_debug(rank_features[candidate_idx],
             m_debug_long_final_candidates[candidate_idx]);
+        if SameText(Trim(legacy_candidates[candidate_idx].text),
+            Trim(exact_edge_baseline_top1)) then
+        begin
+            m_debug_long_final_candidates[candidate_idx].exact_edge_shadow_rank := 1;
+        end
+        else if SameText(Trim(legacy_candidates[candidate_idx].text),
+            Trim(exact_edge_baseline_top2)) then
+        begin
+            m_debug_long_final_candidates[candidate_idx].exact_edge_shadow_rank := 2;
+        end;
+        m_debug_long_final_candidates[candidate_idx].exact_edge_auditor_decision :=
+            exact_edge_auditor_decision;
+        m_debug_long_final_candidates[candidate_idx].exact_edge_fallback_auditor_decision :=
+            exact_edge_fallback_auditor_decision;
+        m_debug_long_final_candidates[candidate_idx].exact_edge_pre_auditor_rank :=
+            exact_edge_pre_auditor_ranks[candidate_idx];
+        if exact_edge_auditor_decision >= 0 then
+        begin
+            m_debug_long_final_candidates[candidate_idx].exact_edge_auditor_score :=
+                Round(exact_edge_auditor_score * 1000000.0);
+            m_debug_long_final_candidates[candidate_idx].exact_edge_auditor_threshold :=
+                Round(exact_edge_auditor_threshold * 1000000.0);
+        end;
+        if exact_edge_fallback_auditor_decision >= 0 then
+        begin
+            m_debug_long_final_candidates[candidate_idx].exact_edge_fallback_auditor_score :=
+                Round(exact_edge_fallback_auditor_score * 1000000.0);
+            m_debug_long_final_candidates[candidate_idx].exact_edge_fallback_auditor_threshold :=
+                Round(exact_edge_fallback_auditor_threshold * 1000000.0);
+        end;
         m_debug_long_final_candidates[candidate_idx].ranker_score :=
             rank_scores[candidate_idx];
         m_debug_long_final_candidates[candidate_idx].abstain_score :=
@@ -154944,7 +158190,7 @@ var
                     Exit;
                 end;
                 if (not get_cached_char_lm_scores(candidate_texts_local,
-                    candidate_lm_scores_local, clsm_context,
+                    candidate_lm_scores_local, clsm_short_context,
                     context_value_local)) or
                     (Length(candidate_lm_scores_local) <>
                     Length(candidate_texts_local)) then
@@ -155093,7 +158339,7 @@ var
                         Copy(candidate_texts_local[candidate_idx_local], 1, 2);
                 end;
                 if get_cached_char_lm_scores(boundary_prefix_texts_local,
-                    boundary_prefix_scores_local, clsm_context,
+                    boundary_prefix_scores_local, clsm_short_context,
                     context_value_local) and
                     (Length(boundary_prefix_scores_local) =
                     Length(boundary_prefix_texts_local)) then
@@ -184545,6 +187791,18 @@ end;
 function TncEngine.get_debug_long_beam_states: TncLongBeamStateDebugArray;
 begin
     Result := Copy(m_debug_long_beam_states);
+end;
+
+function TncEngine.get_debug_long_exact_edge_stages:
+    TncLongExactEdgeStageDebugArray;
+begin
+    Result := Copy(m_debug_long_exact_edge_stages);
+end;
+
+function TncEngine.get_debug_long_retained_exact_edges:
+    TncLongRetainedExactEdgeArray;
+begin
+    Result := Copy(m_runtime_long_retained_exact_edges);
 end;
 
 function TncEngine.get_debug_long_chain_candidates:

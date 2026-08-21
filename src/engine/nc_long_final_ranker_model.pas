@@ -85,6 +85,14 @@ type
         complete_pool_consensus_changed_support: Integer;
         complete_pool_consensus_changed_top_match: Boolean;
         complete_pool_local_pairwise_score: Integer;
+        complete_pool_edge_model_anchor_count: Integer;
+        complete_pool_edge_model_score_total: Integer;
+        complete_pool_edge_model_score_max: Integer;
+        complete_pool_edge_model_word_count: Integer;
+        complete_pool_edge_model_word_score_total: Integer;
+        complete_pool_edge_model_word_score_min: Integer;
+        complete_pool_edge_model_word_score_max: Integer;
+        complete_pool_edge_model_word_score_mean: Integer;
     end;
 
 const

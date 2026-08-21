@@ -1,12 +1,12 @@
 # Cassotis Corpus Benchmarks
 
-Cassotis publishes three fixed corpus benchmarks for tracking decoding quality and engine performance across releases: the Long Sentence Benchmark-16300, the Short-word Context Benchmark-65000, and the One-key Completion Context Benchmark-12831. They turn release quality into reproducible measurements instead of relying only on hand-picked examples.
+Cassotis publishes four fixed corpus benchmarks for tracking decoding quality and engine performance across releases: the Long Sentence Benchmark-16300, the Short-word Context Benchmark-65000, the One-key Completion Context Benchmark-12831, and the Long-sentence One-key Completion Benchmark-16300. They turn release quality into reproducible measurements instead of relying only on hand-picked examples.
 
 ## Shared Corpus Source
 
-All three benchmarks are derived from the developer's own novel, [**Elegance in Timelessness**](https://www.qidian.com/book/1037259117/) (Chinese title: [**永恒的舞动**](https://www.qidian.com/book/1037259117/)).
+All four benchmarks are derived from the developer's own novel, [**Elegance in Timelessness**](https://www.qidian.com/book/1037259117/) (Chinese title: [**永恒的舞动**](https://www.qidian.com/book/1037259117/)).
 
-Benchmark-16300 fixes 16,300 eligible sentences, while Benchmark-65000 fixes 65,000 short-word occurrences. The completion benchmark derives 12,831 incremental completion opportunities from the same short-word cases. Benchmark cases are kept separate from the corresponding model-training data.
+Benchmark-16300 fixes 16,300 eligible sentences, while Benchmark-65000 fixes 65,000 short-word occurrences. The short-word completion benchmark derives 12,831 incremental completion opportunities from the same short-word cases. The long-sentence completion benchmark derives one fixed near-tail completion opportunity from each of the 16,300 long-sentence cases. Benchmark cases are kept separate from the corresponding model-training data.
 
 ## Shared Accuracy Equivalence Rule
 
@@ -110,6 +110,25 @@ Because each corpus position has only one reference target, a different but ling
 
 Latency covers dictionary lookup, context/language-model scoring, completion selection, and hysteresis only. It excludes process and dictionary cold start, TSF/host communication, candidate-window rendering, real inter-key timing, and learning writes after acceptance. The engine is reset before each source case; adjacent prefixes of the same target are processed consecutively, while the dictionary connection and runtime caches remain open for the complete run.
 
+## Long-sentence One-key Completion Benchmark-16300
+
+### Case Construction and Scoring
+
+This benchmark measures whether one-key completion can extend a partially decoded long sentence, instead of inferring completion quality from the unrelated long-sentence candidate-ranking score:
+
+- Reuse all 16,300 fixed long-sentence cases and their reviewed full Pinyin queries.
+- Leave the final four complete Pinyin syllables untyped while retaining at least the first four syllables as the visible composition prefix.
+- Decode that prefix in deterministic-work mode, then read only the single completion that the UI would display.
+- Count a hit only when accepting the displayed completion would produce the complete reference sentence exactly. Alternative plausible continuations remain misses because the corpus supplies one reference.
+- Disable the user dictionary and external document context, and use a snapshot of the simplified base dictionary selected for the tested release.
+- Query the immediately preceding syllable boundary before the scored query to measure whether a compatible completion remains stable as typing continues.
+
+The report uses the same four primary metrics as Benchmark-12831: completion hit rate, average keys saved by correct completions, incremental stability, and `P95` latency. Coverage and wrong-prompt counts are also retained for diagnosis.
+
+### Latency Protocol
+
+Latency starts immediately before assigning the scored Pinyin prefix and ends after candidate decoding and completion selection. It includes the underlying long-sentence decode, exact/transition completion lookup, language-model scoring, and hysteresis. It excludes process and dictionary cold start, the preceding stability probe, report output, TSF/host communication, rendering, real inter-key timing, and learning writes. The engine is reset before every source sentence while the dictionary connection and runtime caches remain open for the complete run.
+
 ## Latency Statistics
 
 Latency columns are reported in milliseconds:
@@ -123,7 +142,7 @@ These values quantify complete-query engine performance and long-tail cost. They
 
 ## Result Publication
 
-Version-specific results are published in `README.md`. Completion results begin with `v1.15.0`, the earliest release reproduced with the same corpus, dictionary snapshot rules, and runner behavior; earlier versions are not backfilled. This document defines their shared source, case construction, accuracy scoring, and latency protocols.
+Version-specific results are published in `README.md`. The short-word completion benchmark begins with `v1.15.0`; the long-sentence completion benchmark begins with the first release formally evaluated under this protocol. Neither completion suite is backfilled for earlier releases. This document defines their shared source, case construction, accuracy scoring, and latency protocols.
 
 ## Notes
 

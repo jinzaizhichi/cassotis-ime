@@ -53,6 +53,24 @@ type
         legacy_top_proper_name_confidence: Integer;
         ranker_top_local_pairwise_score: Integer;
         legacy_top_local_pairwise_score: Integer;
+        ranker_top_edge_model_anchor_count: Integer;
+        legacy_top_edge_model_anchor_count: Integer;
+        ranker_top_edge_model_anchor_gain: Integer;
+        ranker_top_edge_model_score_total: Integer;
+        legacy_top_edge_model_score_total: Integer;
+        ranker_top_edge_model_score_total_gain: Integer;
+        ranker_top_edge_model_score_max: Integer;
+        legacy_top_edge_model_score_max: Integer;
+        ranker_top_edge_model_score_max_gain: Integer;
+        ranker_top_edge_model_word_count: Integer;
+        legacy_top_edge_model_word_count: Integer;
+        ranker_top_edge_model_word_count_gain: Integer;
+        ranker_top_edge_model_word_score_mean: Integer;
+        legacy_top_edge_model_word_score_mean: Integer;
+        ranker_top_edge_model_word_score_mean_gain: Integer;
+        ranker_top_edge_model_word_score_min: Integer;
+        legacy_top_edge_model_word_score_min: Integer;
+        ranker_top_edge_model_word_score_min_gain: Integer;
     end;
 
 const

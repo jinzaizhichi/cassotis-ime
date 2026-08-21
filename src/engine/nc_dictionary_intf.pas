@@ -91,6 +91,8 @@ type
             out scores: TArray<Integer>): Boolean; virtual;
         function get_char_lm_continuation_scores(const left_context: string;
             const texts: TArray<string>; out scores: TArray<Integer>): Boolean; virtual;
+        function get_char_lm_short_context_scores(const left_context: string;
+            const texts: TArray<string>; out scores: TArray<Integer>): Boolean; virtual;
         function get_query_segment_path_penalty(const query_key: string; const encoded_path: string): Integer; virtual;
         function get_compound_tail_support(const tail_text: string): Integer; virtual;
         function get_base_text_prefix_bonus(const prefix_text: string): Integer; virtual;
@@ -402,6 +404,13 @@ begin
         combined_texts[idx] := Trim(left_context) + Trim(texts[idx]);
     end;
     Result := get_char_lm_suffix_scores(combined_texts, scores);
+end;
+
+function TncDictionaryProvider.get_char_lm_short_context_scores(
+    const left_context: string; const texts: TArray<string>;
+    out scores: TArray<Integer>): Boolean;
+begin
+    Result := get_char_lm_continuation_scores(left_context, texts, scores);
 end;
 
 function TncDictionaryProvider.get_query_segment_path_penalty(const query_key: string;
