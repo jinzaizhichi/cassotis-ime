@@ -132,6 +132,7 @@ Corpus: 16,300 eligible Chinese sentences from the developer's own novel [**Eleg
 
 | Version | Top1 | Top2 | Mean (ms) | P50 (ms) | P95 (ms) | Max (ms) |
 |---|---:|---:|---:|---:|---:|---:|
+| `v1.17.0` | 10595/16300 (65.00%) | 12023/16300 (73.76%) | 42.68 | 32 | 78 | 406 |
 | `v1.16.0` / `v1.15.0` | 10553/16300 (64.74%) | 11921/16300 (73.13%) | 41.5 | 32 | 78 | 484 |
 | `v1.14.0` | 10345/16300 (63.47%) | 11903/16300 (73.02%) | 58.78 | 47 | 172 | 766 |
 | `v1.13.0` | 10131/16300 (62.15%) | 11320/16300 (69.45%) | 65.94 | 47 | 203 | 1047 |
@@ -169,7 +170,7 @@ See [BENCHMARK.md](BENCHMARK.md) for the shared corpus source, short-word case c
 
 | Version | Top1 | Top2 | Contested Top1 | Contested Top2 | Mean (ms) | P50 (ms) | P95 (ms) | Max (ms) |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|
-| `v1.16.0` / `v1.15.0` | 61827/65000 (95.12%) | 63516/65000 (97.72%) | 9596/11728 (81.82%) | 10775/11728 (91.87%) | 3.817 | 3.239 | 8.376 | 39.881 |
+| `v1.17.0`<br>`v1.16.0`<br>`v1.15.0` | 61827/65000 (95.12%) | 63516/65000 (97.72%) | 9596/11728 (81.82%) | 10775/11728 (91.87%) | 3.817 | 3.239 | 8.376 | 39.881 |
 | `v1.14.0` | 61782/65000 (95.05%) | 63516/65000 (97.72%) | 9560/11728 (81.51%) | 10775/11728 (91.87%) | 3.998 | 3.132 | 8.665 | 68.147 |
 | `v1.13.0` | 61515/65000 (94.64%) | 63516/65000 (97.72%) | 9384/11728 (80.01%) | 10775/11728 (91.87%) | 4.748 | 3.652 | 10.337 | 103.689 |
 | `v1.12.0` | 61343/65000 (94.37%) | 63474/65000 (97.65%) | 9304/11728 (79.33%) | 10745/11728 (91.62%) | 4.400 | 3.417 | 9.462 | 104.316 |
@@ -194,8 +195,19 @@ Public results retain four columns only: `Completion Hit`, `Avg Keys Saved`, `St
 
 | Version | Completion Hit | Avg Keys Saved | Stability | P95 (ms) |
 | --- | --- | --- | --- | --- |
+| `v1.17.0` | 9273/12831 (72.27%) | 2.554 | 1652/1718 (96.16%) | 1.880 |
 | `v1.16.0` | 8752/12831 (68.21%) | 2.570 | 1649/1676 (98.39%) | 1.509 |
 | `v1.15.0` | 7265/12831 (56.62%) | 2.542 | 1278/1323 (96.60%) | 0.777 |
+
+## Long-sentence One-key Completion Benchmark-16300
+This benchmark leaves the final four complete Pinyin syllables untyped in the fixed long-sentence corpus and evaluates the single completion actually shown. It uses strict single-reference scoring, so a plausible continuation that differs from the source sentence is still counted as a miss. See [BENCHMARK.md](BENCHMARK.md) for the full protocol.
+
+| Version | Completion Hit | Avg Keys Saved | Stability | P95 (ms) |
+| --- | --- | --- | --- | --- |
+| `v1.17.0` | 20/16300 (0.12%) | 6.200 | 1/224 (0.45%) | 37.357 |
+| `v1.16.0` | 10/16300 (0.06%) | 7.100 | 1/13 (7.69%) | 38.831 |
+
+`v1.16.0` predates the dedicated long-sentence completion path and is retained as a historical baseline.
 
 ## Configuration
 Default config file:
