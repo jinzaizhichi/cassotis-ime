@@ -54,6 +54,7 @@ type
         m_context_query_choice_bonus_cache: TDictionary<string, Integer>;
         m_query_latest_choice_text_cache: TDictionary<string, string>;
         m_query_path_bonus_cache: TDictionary<string, Integer>;
+        m_query_path_bonus_cache_loaded: Boolean;
         m_base_query_path_pinyin_cache: TDictionary<string, Boolean>;
         m_base_query_path_pinyin_cache_loaded: Boolean;
         m_lm_transition_bonus_cache: TDictionary<string, Integer>;
@@ -217,6 +218,7 @@ type
         procedure load_base_exact_pinyin_bloom;
         function base_exact_pinyin_may_exist(const pinyin: string): Boolean;
         procedure load_base_query_path_pinyin_cache;
+        procedure load_query_path_bonus_cache;
         function base_query_path_pinyin_may_exist(
             const query_key: string): Boolean;
         procedure load_lm_transition_bonus_cache;
@@ -237,6 +239,10 @@ type
             const cache_only: Boolean = False;
             const reverse_model: Boolean = False;
             const short_context_cache: Boolean = False): Boolean;
+        function get_char_lm_cached_scores_internal(
+            const texts: TArray<string>; out scores: TArray<Integer>;
+            const include_end_marker: Boolean;
+            const reverse_model: Boolean): Boolean;
         procedure purge_user_entry_internal(const pinyin: string; const text: string;
             const apply_penalty: Boolean; const purge_all_by_text: Boolean);
         procedure prune_user_entries_existing_in_base;
@@ -2476,6 +2482,7 @@ begin
     m_context_query_choice_bonus_cache := TDictionary<string, Integer>.Create;
     m_query_latest_choice_text_cache := TDictionary<string, string>.Create;
     m_query_path_bonus_cache := TDictionary<string, Integer>.Create;
+    m_query_path_bonus_cache_loaded := False;
     m_base_query_path_pinyin_cache := TDictionary<string, Boolean>.Create;
     m_base_query_path_pinyin_cache_loaded := False;
     m_lm_transition_bonus_cache := TDictionary<string, Integer>.Create;
@@ -5007,6 +5014,76 @@ begin
             if query_key <> '' then
             begin
                 m_base_query_path_pinyin_cache.AddOrSetValue(query_key, True);
+            end;
+            step_result := m_base_connection.step(stmt);
+        end;
+    finally
+        if stmt <> nil then
+        begin
+            m_base_connection.finalize(stmt);
+        end;
+    end;
+end;
+
+procedure TncSqliteDictionary.load_query_path_bonus_cache;
+const
+    query_sql =
+        'SELECT query_pinyin, path_text, weight FROM dict_base_query_path';
+var
+    stmt: Psqlite3_stmt;
+    step_result: Integer;
+    normalized_query: string;
+    normalized_path: string;
+    cache_key: string;
+    weight: Integer;
+begin
+    if m_query_path_bonus_cache_loaded then
+    begin
+        Exit;
+    end;
+
+    m_query_path_bonus_cache_loaded := True;
+    if m_query_path_bonus_cache <> nil then
+    begin
+        m_query_path_bonus_cache.Clear;
+    end;
+    if m_base_query_path_pinyin_cache <> nil then
+    begin
+        m_base_query_path_pinyin_cache.Clear;
+    end;
+    m_base_query_path_pinyin_cache_loaded := True;
+    if (not m_base_ready) or (m_base_connection = nil) or
+        (m_query_path_bonus_cache = nil) or
+        (m_base_query_path_pinyin_cache = nil) then
+    begin
+        Exit;
+    end;
+
+    stmt := nil;
+    try
+        // The table is optional for compatibility with older dictionaries.
+        if not m_base_connection.prepare(query_sql, stmt) then
+        begin
+            Exit;
+        end;
+        step_result := m_base_connection.step(stmt);
+        while step_result = SQLITE_ROW do
+        begin
+            normalized_query := LowerCase(Trim(
+                m_base_connection.column_text(stmt, 0)));
+            normalized_path := Trim(m_base_connection.column_text(stmt, 1));
+            weight := m_base_connection.column_int(stmt, 2);
+            if normalized_query <> '' then
+            begin
+                m_base_query_path_pinyin_cache.AddOrSetValue(
+                    normalized_query, True);
+            end;
+            if (normalized_query <> '') and (normalized_path <> '') and
+                (weight > 0) then
+            begin
+                cache_key := normalized_query + #1 + normalized_path;
+                m_query_path_bonus_cache.AddOrSetValue(cache_key,
+                    calc_base_query_segment_path_bonus(weight));
             end;
             step_result := m_base_connection.step(stmt);
         end;
@@ -9444,6 +9521,7 @@ begin
             if not m_defer_optional_model_loads then
             begin
                 load_base_exact_pinyin_bloom;
+                load_query_path_bonus_cache;
                 load_lm_transition_bonus_cache;
             end;
         end;
@@ -9745,6 +9823,7 @@ begin
     begin
         m_query_path_bonus_cache.Clear;
     end;
+    m_query_path_bonus_cache_loaded := False;
     if m_base_query_path_pinyin_cache <> nil then
     begin
         m_base_query_path_pinyin_cache.Clear;
@@ -9933,10 +10012,6 @@ begin
     if m_query_latest_choice_text_cache <> nil then
     begin
         m_query_latest_choice_text_cache.Clear;
-    end;
-    if m_query_path_bonus_cache <> nil then
-    begin
-        m_query_path_bonus_cache.Clear;
     end;
     if m_query_path_penalty_cache <> nil then
     begin
@@ -14519,11 +14594,6 @@ begin
     begin
         m_query_path_penalty_cache.Clear;
     end;
-    if m_query_path_bonus_cache <> nil then
-    begin
-        m_query_path_bonus_cache.Clear;
-    end;
-
     stmt := nil;
     try
         if m_user_connection.prepare(update_sql, stmt) and
@@ -15077,17 +15147,10 @@ begin
 end;
 
 function TncSqliteDictionary.get_query_segment_path_bonus(const query_key: string; const encoded_path: string): Integer;
-const
-    base_query_sql =
-        'SELECT weight FROM dict_base_query_path ' +
-        'WHERE query_pinyin = ?1 AND path_text = ?2 LIMIT 1';
 var
-    step_result: Integer;
     normalized_query: string;
     normalized_path: string;
     cache_key: string;
-    base_weight: Integer;
-    can_query_base: Boolean;
 begin
     Result := 0;
     if m_defer_optional_model_loads then
@@ -15104,56 +15167,13 @@ begin
     end;
 
     cache_key := normalized_query + #1 + normalized_path;
-    if (m_query_path_bonus_cache <> nil) and
-        m_query_path_bonus_cache.TryGetValue(cache_key, Result) then
+    if not m_query_path_bonus_cache_loaded then
     begin
-        Exit;
+        load_query_path_bonus_cache;
     end;
-    try
-        can_query_base := False;
-        if m_stmt_base_query_path_bonus = nil then
-        begin
-            if not m_base_connection.prepare(base_query_sql, m_stmt_base_query_path_bonus) then
-            begin
-                m_stmt_base_query_path_bonus := nil;
-            end;
-        end;
-        if m_stmt_base_query_path_bonus <> nil then
-        begin
-            can_query_base := m_base_connection.reset(m_stmt_base_query_path_bonus) and
-                m_base_connection.clear_bindings(m_stmt_base_query_path_bonus) and
-                m_base_connection.bind_text(m_stmt_base_query_path_bonus, 1, normalized_query) and
-                m_base_connection.bind_text(m_stmt_base_query_path_bonus, 2, normalized_path);
-            if not can_query_base then
-            begin
-                m_base_connection.reset(m_stmt_base_query_path_bonus);
-                m_base_connection.clear_bindings(m_stmt_base_query_path_bonus);
-            end;
-        end;
-
-        if can_query_base and (m_stmt_base_query_path_bonus <> nil) then
-        begin
-            step_result := m_base_connection.step(m_stmt_base_query_path_bonus);
-            if step_result = SQLITE_ROW then
-            begin
-                base_weight := m_base_connection.column_int(m_stmt_base_query_path_bonus, 0);
-                if base_weight > 0 then
-                begin
-                    Result := calc_base_query_segment_path_bonus(base_weight);
-                end;
-            end;
-        end;
-    finally
-        if m_stmt_base_query_path_bonus <> nil then
-        begin
-            m_base_connection.reset(m_stmt_base_query_path_bonus);
-            m_base_connection.clear_bindings(m_stmt_base_query_path_bonus);
-        end;
-    end;
-
     if m_query_path_bonus_cache <> nil then
     begin
-        m_query_path_bonus_cache.AddOrSetValue(cache_key, Result);
+        m_query_path_bonus_cache.TryGetValue(cache_key, Result);
     end;
 end;
 
@@ -15670,6 +15690,7 @@ begin
 
     missing := TList<string>.Create;
     try
+        missing.Capacity := Length(ngrams);
         for ngram in ngrams do
         begin
             if ngram = '' then
@@ -15679,7 +15700,7 @@ begin
             if (entry_cache <> nil) and
                 entry_cache.TryGetValue(ngram, entry) then
             begin
-                entries.AddOrSetValue(ngram, entry);
+                entries.Add(ngram, entry);
             end
             else
             begin
@@ -15728,7 +15749,7 @@ begin
                     entry.found := True;
                     entry.score := m_base_connection.column_int(stmt, 1);
                     entry.backoff := m_base_connection.column_int(stmt, 2);
-                    entries.AddOrSetValue(row_ngram, entry);
+                    entries.Add(row_ngram, entry);
                     cache_char_lm_entry(row_ngram, entry, reverse_model);
                     step_result := m_base_connection.step(stmt);
                 end;
@@ -15924,6 +15945,7 @@ begin
     try
         wanted := TDictionary<string, Boolean>.Create;
         try
+            wanted.Capacity := Min(16384, Max(64, Length(texts) * 32));
             for text_idx := 0 to High(texts) do
             begin
             if score_cached[text_idx] then
@@ -16024,6 +16046,7 @@ begin
             end;
 
             wanted_keys := wanted.Keys.ToArray;
+            loaded_entries.Capacity := Length(wanted_keys);
             if cache_only then
             begin
                 if entry_cache = nil then
@@ -16195,11 +16218,215 @@ begin
     Result := get_char_lm_text_scores_internal(texts, scores, False, '', True);
 end;
 
+function TncSqliteDictionary.get_char_lm_cached_scores_internal(
+    const texts: TArray<string>; out scores: TArray<Integer>;
+    const include_end_marker: Boolean;
+    const reverse_model: Boolean): Boolean;
+const
+    c_unknown_score = -30000;
+    c_end_marker = #3;
+var
+    normalized_text: string;
+    cache_key: string;
+    cache_prefix: string;
+    text_units: TArray<string>;
+    text_idx: Integer;
+    unit_idx: Integer;
+    predicted: Integer;
+    current_score: Integer;
+    total_score: Int64;
+    unigram: string;
+    bigram: string;
+    trigram: string;
+    fourgram: string;
+    unigram_entry: TncCharLmCacheEntry;
+    bigram_entry: TncCharLmCacheEntry;
+    trigram_entry: TncCharLmCacheEntry;
+    fourgram_entry: TncCharLmCacheEntry;
+    previous_unigram_entry: TncCharLmCacheEntry;
+    previous_bigram_entry: TncCharLmCacheEntry;
+    previous_trigram_entry: TncCharLmCacheEntry;
+    entry_cache: TDictionary<string, TncCharLmCacheEntry>;
+    score_cache: TDictionary<string, Integer>;
+
+    function get_cached_entry(const ngram: string;
+        out entry: TncCharLmCacheEntry): Boolean;
+    begin
+        entry := Default(TncCharLmCacheEntry);
+        Result := (entry_cache <> nil) and
+            entry_cache.TryGetValue(ngram, entry);
+    end;
+begin
+    SetLength(scores, Length(texts));
+    Result := False;
+    if reverse_model then
+    begin
+        entry_cache := m_char_reverse_lm_entry_cache;
+        score_cache := m_char_reverse_lm_text_score_cache;
+    end
+    else
+    begin
+        entry_cache := m_char_lm_entry_cache;
+        score_cache := m_char_lm_text_score_cache;
+    end;
+    if include_end_marker then
+    begin
+        cache_prefix := 'S' + #1;
+    end
+    else
+    begin
+        cache_prefix := 'N' + #1;
+    end;
+    if (Length(texts) <= 0) or (entry_cache = nil) or
+        (not ensure_char_lm_available(reverse_model)) then
+    begin
+        Exit;
+    end;
+
+    for text_idx := 0 to High(texts) do
+    begin
+        normalized_text := Trim(texts[text_idx]);
+        cache_key := cache_prefix + normalized_text;
+        if (score_cache <> nil) and score_cache.TryGetValue(cache_key,
+            scores[text_idx]) then
+        begin
+            Continue;
+        end;
+
+        text_units := split_text_units_local(normalized_text);
+        if Length(text_units) <= 0 then
+        begin
+            scores[text_idx] := c_unknown_score;
+            Continue;
+        end;
+        if include_end_marker then
+        begin
+            SetLength(text_units, Length(text_units) + 1);
+            text_units[High(text_units)] := c_end_marker;
+        end;
+
+        total_score := 0;
+        predicted := 0;
+        previous_unigram_entry := Default(TncCharLmCacheEntry);
+        previous_bigram_entry := Default(TncCharLmCacheEntry);
+        previous_trigram_entry := Default(TncCharLmCacheEntry);
+        for unit_idx := 0 to High(text_units) do
+        begin
+            unigram := text_units[unit_idx];
+            if not get_cached_entry(unigram, unigram_entry) then
+            begin
+                Exit;
+            end;
+
+            bigram := '';
+            bigram_entry := Default(TncCharLmCacheEntry);
+            if unit_idx >= 1 then
+            begin
+                bigram := text_units[unit_idx - 1] + unigram;
+                if not get_cached_entry(bigram, bigram_entry) then
+                begin
+                    Exit;
+                end;
+            end;
+
+            trigram := '';
+            trigram_entry := Default(TncCharLmCacheEntry);
+            if unit_idx >= 2 then
+            begin
+                trigram := text_units[unit_idx - 2] +
+                    text_units[unit_idx - 1] + unigram;
+                if not get_cached_entry(trigram, trigram_entry) then
+                begin
+                    Exit;
+                end;
+            end;
+
+            fourgram := '';
+            fourgram_entry := Default(TncCharLmCacheEntry);
+            if unit_idx >= 3 then
+            begin
+                fourgram := text_units[unit_idx - 3] +
+                    text_units[unit_idx - 2] +
+                    text_units[unit_idx - 1] + unigram;
+                if not get_cached_entry(fourgram, fourgram_entry) then
+                begin
+                    Exit;
+                end;
+            end;
+
+            if (fourgram <> '') and fourgram_entry.found then
+            begin
+                current_score := fourgram_entry.score;
+            end
+            else
+            begin
+                if (trigram <> '') and trigram_entry.found then
+                begin
+                    current_score := trigram_entry.score;
+                end
+                else
+                begin
+                    if (bigram <> '') and bigram_entry.found then
+                    begin
+                        current_score := bigram_entry.score;
+                    end
+                    else
+                    begin
+                        if unigram_entry.found then
+                        begin
+                            current_score := unigram_entry.score;
+                        end
+                        else
+                        begin
+                            current_score := c_unknown_score;
+                        end;
+                        if (unit_idx >= 1) and
+                            previous_unigram_entry.found then
+                        begin
+                            Inc(current_score,
+                                previous_unigram_entry.backoff);
+                        end;
+                    end;
+                    if (unit_idx >= 2) and previous_bigram_entry.found then
+                    begin
+                        Inc(current_score, previous_bigram_entry.backoff);
+                    end;
+                end;
+                if (unit_idx >= 3) and previous_trigram_entry.found then
+                begin
+                    Inc(current_score, previous_trigram_entry.backoff);
+                end;
+            end;
+
+            Inc(total_score, current_score);
+            Inc(predicted);
+            previous_unigram_entry := unigram_entry;
+            previous_bigram_entry := bigram_entry;
+            previous_trigram_entry := trigram_entry;
+        end;
+
+        if predicted <= 0 then
+        begin
+            scores[text_idx] := c_unknown_score;
+        end
+        else if total_score >= 0 then
+        begin
+            scores[text_idx] := total_score div predicted;
+        end
+        else
+        begin
+            scores[text_idx] :=
+                -((-total_score + predicted - 1) div predicted);
+        end;
+    end;
+    Result := True;
+end;
+
 function TncSqliteDictionary.get_char_lm_cached_span_scores(
     const texts: TArray<string>; out scores: TArray<Integer>): Boolean;
 begin
-    Result := get_char_lm_text_scores_internal(texts, scores, False, '',
-        False, True);
+    Result := get_char_lm_cached_scores_internal(texts, scores, False,
+        False);
 end;
 
 function TncSqliteDictionary.get_char_lm_continuation_scores(
@@ -16610,10 +16837,6 @@ begin
     begin
         m_context_bonus_cache.Clear;
     end;
-    if m_query_path_bonus_cache <> nil then
-    begin
-        m_query_path_bonus_cache.Clear;
-    end;
     if m_query_choice_bonus_cache <> nil then
     begin
         m_query_choice_bonus_cache.Remove(pinyin_key + #1 + text_key);
@@ -16722,10 +16945,6 @@ begin
     if m_context_bonus_cache <> nil then
     begin
         m_context_bonus_cache.Clear;
-    end;
-    if m_query_path_bonus_cache <> nil then
-    begin
-        m_query_path_bonus_cache.Clear;
     end;
     if m_query_choice_bonus_cache <> nil then
     begin

@@ -46,7 +46,7 @@ type
     end;
 
     TncCharLmScoreMode = (clsm_full, clsm_suffix, clsm_context,
-        clsm_short_context);
+        clsm_short_context, clsm_span, clsm_reverse);
 
     TncSearchBudgetMode = (
         sbm_production,
@@ -605,6 +605,8 @@ type
         m_lookup_char_lm_full_score_cache: TDictionary<string, Integer>;
         m_lookup_char_lm_suffix_score_cache: TDictionary<string, Integer>;
         m_lookup_char_lm_context_score_cache: TDictionary<string, Integer>;
+        m_lookup_char_lm_span_score_cache: TDictionary<string, Integer>;
+        m_lookup_char_lm_reverse_score_cache: TDictionary<string, Integer>;
         m_lookup_long_path_structure_cache: TDictionary<string, TncLongPathStructureCacheValue>;
         m_lookup_exact_lexical_feature_cache: TDictionary<string, TncExactLexicalFeatureCacheValue>;
         m_lookup_display_feature_cache: TDictionary<string, Integer>;
@@ -1584,6 +1586,8 @@ begin
     m_lookup_char_lm_full_score_cache := TDictionary<string, Integer>.Create;
     m_lookup_char_lm_suffix_score_cache := TDictionary<string, Integer>.Create;
     m_lookup_char_lm_context_score_cache := TDictionary<string, Integer>.Create;
+    m_lookup_char_lm_span_score_cache := TDictionary<string, Integer>.Create;
+    m_lookup_char_lm_reverse_score_cache := TDictionary<string, Integer>.Create;
     m_lookup_long_path_structure_cache :=
         TDictionary<string, TncLongPathStructureCacheValue>.Create;
     m_lookup_exact_lexical_feature_cache :=
@@ -1844,6 +1848,16 @@ begin
         m_lookup_char_lm_context_score_cache.Free;
         m_lookup_char_lm_context_score_cache := nil;
     end;
+    if m_lookup_char_lm_span_score_cache <> nil then
+    begin
+        m_lookup_char_lm_span_score_cache.Free;
+        m_lookup_char_lm_span_score_cache := nil;
+    end;
+    if m_lookup_char_lm_reverse_score_cache <> nil then
+    begin
+        m_lookup_char_lm_reverse_score_cache.Free;
+        m_lookup_char_lm_reverse_score_cache := nil;
+    end;
     if m_lookup_long_path_structure_cache <> nil then
     begin
         m_lookup_long_path_structure_cache.Free;
@@ -2021,6 +2035,14 @@ begin
     begin
         m_lookup_char_lm_context_score_cache.Clear;
     end;
+    if m_lookup_char_lm_span_score_cache <> nil then
+    begin
+        m_lookup_char_lm_span_score_cache.Clear;
+    end;
+    if m_lookup_char_lm_reverse_score_cache <> nil then
+    begin
+        m_lookup_char_lm_reverse_score_cache.Clear;
+    end;
     if m_lookup_long_path_structure_cache <> nil then
     begin
         m_lookup_long_path_structure_cache.Clear;
@@ -2074,9 +2096,12 @@ var
     context_key: string;
     idx: Integer;
     missing_count: Integer;
-    missing_indices: TArray<Integer>;
     missing_texts: TArray<string>;
+    missing_score_index_by_input: TArray<Integer>;
     missing_scores: TArray<Integer>;
+    missing_idx: Integer;
+    missing_slot: Integer;
+    normalized_missing_text: string;
     provider_ok: Boolean;
 begin
     SetLength(scores, Length(texts));
@@ -2093,6 +2118,10 @@ begin
             cache := m_lookup_char_lm_suffix_score_cache;
         clsm_context, clsm_short_context:
             cache := m_lookup_char_lm_context_score_cache;
+        clsm_span:
+            cache := m_lookup_char_lm_span_score_cache;
+        clsm_reverse:
+            cache := m_lookup_char_lm_reverse_score_cache;
     else
         cache := nil;
     end;
@@ -2111,6 +2140,12 @@ begin
             clsm_short_context:
                 provider_ok := m_dictionary.get_char_lm_short_context_scores(
                     left_context, texts, scores);
+            clsm_span:
+                provider_ok := m_dictionary.get_char_lm_cached_span_scores(
+                    texts, scores);
+            clsm_reverse:
+                provider_ok := m_dictionary.get_char_reverse_lm_suffix_scores(
+                    texts, scores);
         else
             provider_ok := False;
         end;
@@ -2122,8 +2157,8 @@ begin
     begin
         context_key := Trim(left_context) + #1;
     end;
-    SetLength(missing_indices, 0);
     SetLength(missing_texts, 0);
+    SetLength(missing_score_index_by_input, 0);
     missing_count := 0;
     for idx := 0 to High(texts) do
     begin
@@ -2132,12 +2167,26 @@ begin
         begin
             if missing_count = 0 then
             begin
-                SetLength(missing_indices, Length(texts));
                 SetLength(missing_texts, Length(texts));
+                SetLength(missing_score_index_by_input, Length(texts));
             end;
-            missing_indices[missing_count] := idx;
-            missing_texts[missing_count] := texts[idx];
-            Inc(missing_count);
+            normalized_missing_text := Trim(texts[idx]);
+            missing_slot := -1;
+            for missing_idx := 0 to missing_count - 1 do
+            begin
+                if missing_texts[missing_idx] = normalized_missing_text then
+                begin
+                    missing_slot := missing_idx;
+                    Break;
+                end;
+            end;
+            if missing_slot < 0 then
+            begin
+                missing_slot := missing_count;
+                missing_texts[missing_count] := normalized_missing_text;
+                Inc(missing_count);
+            end;
+            missing_score_index_by_input[idx] := missing_slot + 1;
         end;
     end;
     if missing_count = 0 then
@@ -2145,7 +2194,6 @@ begin
         Exit(True);
     end;
 
-    SetLength(missing_indices, missing_count);
     SetLength(missing_texts, missing_count);
     case score_mode of
         clsm_full:
@@ -2160,6 +2208,12 @@ begin
         clsm_short_context:
             provider_ok := m_dictionary.get_char_lm_short_context_scores(
                 left_context, missing_texts, missing_scores);
+        clsm_span:
+            provider_ok := m_dictionary.get_char_lm_cached_span_scores(
+                missing_texts, missing_scores);
+        clsm_reverse:
+            provider_ok := m_dictionary.get_char_reverse_lm_suffix_scores(
+                missing_texts, missing_scores);
     else
         provider_ok := False;
     end;
@@ -2168,9 +2222,16 @@ begin
         Exit(False);
     end;
 
+    for idx := 0 to High(texts) do
+    begin
+        missing_slot := missing_score_index_by_input[idx] - 1;
+        if missing_slot >= 0 then
+        begin
+            scores[idx] := missing_scores[missing_slot];
+        end;
+    end;
     for idx := 0 to missing_count - 1 do
     begin
-        scores[missing_indices[idx]] := missing_scores[idx];
         cache_key := context_key + Trim(missing_texts[idx]);
         cache.AddOrSetValue(cache_key, missing_scores[idx]);
     end;
@@ -4547,8 +4608,8 @@ begin
     begin
         SetLength(char_lm_scores, Length(completions));
     end;
-    if not m_dictionary.get_char_reverse_lm_suffix_scores(completion_texts,
-        reverse_char_lm_scores) then
+    if not get_cached_char_lm_scores(completion_texts,
+        reverse_char_lm_scores, clsm_reverse, '') then
     begin
         SetLength(reverse_char_lm_scores, Length(completions));
     end;
@@ -56918,9 +56979,6 @@ var
                 existing_idx_local: Integer;
                 existing_option_local: TExactChunkChainOption;
                 duplicate_found_local: Boolean;
-                exact_edge_features_local:
-                    TncLongExactEdgeLatticeFeatures;
-                exact_edge_score_local: Integer;
             begin
                 if local_option.text = '' then
                 begin
@@ -57110,33 +57168,43 @@ var
                             existing_option_local;
                     end;
                 end;
-                for option_idx_local := 0 to
-                    High(rebuilt_options_local) do
+                local_options := rebuilt_options_local;
+            end;
+
+            procedure score_fast_options_local(
+                var local_options: TExactChunkChainOptionArray);
+            var
+                option_idx_local: Integer;
+                option_value_local: TExactChunkChainOption;
+                exact_edge_features_local:
+                    TncLongExactEdgeLatticeFeatures;
+                exact_edge_score_local: Integer;
+            begin
+                for option_idx_local := 0 to High(local_options) do
                 begin
-                    existing_option_local :=
-                        rebuilt_options_local[option_idx_local];
-                    if existing_option_local.direct_exact and
-                        (existing_option_local.exact_rank > 0) and
-                        (not existing_option_local.source_user) and
+                    option_value_local := local_options[option_idx_local];
+                    if option_value_local.direct_exact and
+                        (option_value_local.exact_rank > 0) and
+                        (not option_value_local.source_user) and
                         (get_candidate_text_unit_count(
-                        existing_option_local.text) >=
+                        option_value_local.text) >=
                         c_chain_lattice_exact_edge_min_units) then
                     begin
-                        existing_option_local.edge_retention_score :=
+                        option_value_local.edge_retention_score :=
                             long_edge_retention_score(
-                            existing_option_local.exact_rank,
-                            existing_option_local.raw_weight,
-                            existing_option_local.top_weight,
-                            existing_option_local.score,
+                            option_value_local.exact_rank,
+                            option_value_local.raw_weight,
+                            option_value_local.top_weight,
+                            option_value_local.score,
                             get_candidate_text_unit_count(
-                            existing_option_local.text),
+                            option_value_local.text),
                             pos_local, syllable_count_local, False);
-                        if existing_option_local.edge_retention_score >
+                        if option_value_local.edge_retention_score >
                             High(Integer) then
                         begin
                             exact_edge_score_local := High(Integer);
                         end
-                        else if existing_option_local.edge_retention_score <
+                        else if option_value_local.edge_retention_score <
                             Low(Integer) then
                         begin
                             exact_edge_score_local := Low(Integer);
@@ -57144,29 +57212,27 @@ var
                         else
                         begin
                             exact_edge_score_local :=
-                                existing_option_local.edge_retention_score;
+                                option_value_local.edge_retention_score;
                         end;
                         build_long_exact_edge_lattice_features(
-                            existing_option_local.query_key,
-                            existing_option_local.text,
+                            option_value_local.query_key,
+                            option_value_local.text,
                             get_candidate_text_unit_count(
-                            existing_option_local.text),
-                            existing_option_local.exact_rank,
-                            existing_option_local.raw_weight,
-                            existing_option_local.top_weight,
-                            existing_option_local.score,
+                            option_value_local.text),
+                            option_value_local.exact_rank,
+                            option_value_local.raw_weight,
+                            option_value_local.top_weight,
+                            option_value_local.score,
                             exact_edge_score_local,
                             pos_local, syllable_count_local,
-                            existing_option_local.baseline_option,
+                            option_value_local.baseline_option,
                             exact_edge_features_local);
-                        existing_option_local.exact_edge_model_score :=
+                        option_value_local.exact_edge_model_score :=
                             long_exact_edge_lattice_ranker_score(
                             exact_edge_features_local);
-                        rebuilt_options_local[option_idx_local] :=
-                            existing_option_local;
+                        local_options[option_idx_local] := option_value_local;
                     end;
                 end;
-                local_options := rebuilt_options_local;
             end;
 
             function is_splittable_function_tail_fast_local(
@@ -60229,6 +60295,12 @@ var
                 normalized_single_key_inner: string;
                 legacy_options_inner: TExactChunkChainOptionArray;
 
+                function finish_options_inner: Boolean;
+                begin
+                    score_fast_options_local(out_options_local);
+                    Result := Length(out_options_local) > 0;
+                end;
+
                 function is_place_noun_unit_for_fast_context_inner(
                     const unit_value_inner: string): Boolean;
                 begin
@@ -61001,7 +61073,7 @@ var
                         begin
                             add_single_exact_edge_candidates_inner(text_inner);
                         end;
-                        Exit(Length(out_options_local) > 0);
+                        Exit(finish_options_inner);
                     end;
 
                     add_fixed_single_option_inner(text_inner, 0);
@@ -61027,7 +61099,7 @@ var
                     begin
                         add_single_exact_edge_candidates_inner(text_inner);
                     end;
-                    Exit(Length(out_options_local) > 0);
+                    Exit(finish_options_inner);
                 end;
 
                 if (input_syllable_count <= 6) and (m_dictionary <> nil) and
@@ -61404,7 +61476,7 @@ var
                 if not lookup_exact_full_pinyin_cached_local(query_key_inner,
                     lookup_results_inner) then
                 begin
-                    Exit(Length(out_options_local) > 0);
+                    Exit(finish_options_inner);
                 end;
 
                 for lookup_idx_inner := 0 to High(lookup_results_inner) do
@@ -61502,7 +61574,7 @@ var
                     add_fast_option_local(out_options_local,
                         legacy_options_inner, option_inner);
                 end;
-                Result := Length(out_options_local) > 0;
+                Result := finish_options_inner;
             end;
 
             procedure consider_generated_fast_state_local(
@@ -128287,10 +128359,15 @@ type
     TncCompletePoolLatticeState = record
         score: Int64;
         text: string;
-        path: string;
-        signature: string;
+        signature_low: UInt64;
+        signature_high: UInt64;
+        predecessor_position: Integer;
+        predecessor_state_index: Integer;
+        segment_text: string;
         previous_previous_text: string;
         previous_text: string;
+        previous_previous_edge_id: UInt32;
+        previous_edge_id: UInt32;
         previous_previous_units: Integer;
         previous_units: Integer;
         segment_count: Integer;
@@ -128362,7 +128439,9 @@ var
     signature_totals: TDictionary<string, Integer>;
     exact_cache: TDictionary<string, TncCandidateList>;
     word_lm_cache: TDictionary<string, Integer>;
-    exact_edge_model_score_cache: TDictionary<string, Double>;
+    lattice_pair_transition_cache: TDictionary<UInt64, Integer>;
+    lattice_trigram_transition_cache: TDictionary<UInt64, Integer>;
+    exact_edge_model_score_cache: TDictionary<UInt64, Double>;
     span_key_cache: TArray<TArray<string>>;
     original_candidates: TncCandidateList;
     original_source_indices: TArray<Integer>;
@@ -128405,20 +128484,24 @@ var
     pairwise_best_idx: Integer;
     pairwise_best_score: Double;
     pairwise_insert_rank: Integer;
-    pool_phase_tick: UInt64;
+    pool_phase_tick: Int64;
+    pool_phase_frequency: Int64;
     chain_source_kind: TncLongCompletePoolSource;
 
     procedure note_pool_phase(const phase_name: string);
     var
-        elapsed_ms: UInt64;
+        current_tick: Int64;
+        elapsed_us: Int64;
     begin
         if not m_config.debug_mode then
         begin
             Exit;
         end;
-        elapsed_ms := GetTickCount64 - pool_phase_tick;
-        pool_phase_tick := GetTickCount64;
-        if elapsed_ms = 0 then
+        QueryPerformanceCounter(current_tick);
+        elapsed_us := ((current_tick - pool_phase_tick) * 1000000) div
+            pool_phase_frequency;
+        pool_phase_tick := current_tick;
+        if elapsed_us <= 0 then
         begin
             Exit;
         end;
@@ -128427,7 +128510,7 @@ var
             m_last_lookup_debug_extra := m_last_lookup_debug_extra + ' ';
         end;
         m_last_lookup_debug_extra := m_last_lookup_debug_extra +
-            Format('lcp_%s=%d', [phase_name, elapsed_ms]);
+            Format('lcpus_%s=%d', [phase_name, elapsed_us]);
     end;
 
     function clamp_int64_to_integer(const value: Int64): Integer;
@@ -128500,19 +128583,34 @@ var
         out values: TncCandidateList): Boolean;
     var
         cache_key: string;
+        shared_cache_key: string;
+        cached_values: TncCandidateList;
     begin
         SetLength(values, 0);
-        cache_key := '#longpool_exact#' + query_key;
+        cache_key := query_key;
         if exact_cache.TryGetValue(cache_key, values) then
         begin
             Exit(Length(values) > 0);
         end;
-        if not m_dictionary.lookup_exact_full_pinyin(query_key, values) then
+        shared_cache_key := '#exact#' + query_key;
+        if (m_build_lookup_cache <> nil) and
+            m_build_lookup_cache.TryGetValue(shared_cache_key,
+            cached_values) then
+        begin
+            values := cached_values;
+        end
+        else if not m_dictionary.lookup_exact_full_pinyin(query_key, values) then
         begin
             SetLength(values, 0);
         end;
+        if (m_build_lookup_cache <> nil) and
+            (not m_build_lookup_cache.ContainsKey(shared_cache_key)) then
+        begin
+            m_build_lookup_cache.Add(shared_cache_key,
+                values);
+        end;
         exact_cache.AddOrSetValue(cache_key,
-            Copy(values, 0, Length(values)));
+            values);
         Result := Length(values) > 0;
     end;
 
@@ -128897,12 +128995,11 @@ var
     end;
 
     function exact_edge_model_cache_key(const position_value,
-        span_units_value, exact_rank_value: Integer;
-        const text_value: string): string;
+        span_units_value, exact_rank_value: Integer): UInt64;
     begin
-        Result := IntToStr(position_value) + #1 +
-            IntToStr(span_units_value) + #1 +
-            IntToStr(exact_rank_value) + #1 + Trim(text_value);
+        Result := (UInt64(Cardinal(position_value)) shl 32) or
+            (UInt64(Cardinal(span_units_value)) shl 24) or
+            UInt64(Cardinal(exact_rank_value));
     end;
 
     procedure collect_model_retained_exact_edges;
@@ -128939,7 +129036,7 @@ var
         model_score: Double;
         proposal_idx: Integer;
         insert_idx: Integer;
-        model_cache_key: string;
+        model_cache_key: UInt64;
     begin
         SetLength(proposals, 0);
         for position := 0 to expected_units - 2 do
@@ -128997,7 +129094,7 @@ var
                     model_score := long_exact_edge_lattice_ranker_score(
                         features);
                     model_cache_key := exact_edge_model_cache_key(position,
-                        span_units, option_count, candidate_text_local);
+                        span_units, option_count);
                     exact_edge_model_score_cache.AddOrSetValue(
                         model_cache_key, model_score);
                     if model_score > best.model_score then
@@ -129062,6 +129159,7 @@ var
         const use_edge_model: Boolean);
     var
         states_by_position: TArray<TncCompletePoolLatticeStateArray>;
+        state_counts_by_position: TArray<Integer>;
         source_states: TncCompletePoolLatticeStateArray;
         destination_states: TncCompletePoolLatticeStateArray;
         retained_states: TncCompletePoolLatticeStateArray;
@@ -129102,7 +129200,80 @@ var
         edge_model_raw_weight: Integer;
         edge_model_top_weight: Integer;
         edge_model_retention_score: Int64;
-        edge_model_cache_key: string;
+        edge_model_cache_key: UInt64;
+        current_edge_id: UInt32;
+        transition_cache_key: UInt64;
+        sorted_state_indices: TArray<Integer>;
+        sort_buffer: TArray<Integer>;
+
+        function lattice_edge_id(const position_value, span_value,
+            option_value: Integer): UInt32;
+        begin
+            Result := 0;
+            if (position_value < 0) or (position_value >= 255) or
+                (span_value <= 0) or (span_value > 7) or
+                (option_value <= 0) or (option_value > 31) then
+            begin
+                Exit;
+            end;
+            Result := (UInt32(position_value + 1) shl 8) or
+                (UInt32(span_value) shl 5) or UInt32(option_value);
+        end;
+
+        function rebuild_state_path(const final_position,
+            final_state_index: Integer): string;
+        var
+            path_segments: TArray<string>;
+            current_position: Integer;
+            current_state_index: Integer;
+            path_segment_index: Integer;
+            path_state: TncCompletePoolLatticeState;
+        begin
+            Result := '';
+            if (final_position <= 0) or
+                (final_state_index < 0) or
+                (final_state_index >= Length(
+                states_by_position[final_position])) then
+            begin
+                Exit;
+            end;
+            path_state := states_by_position[final_position][
+                final_state_index];
+            if path_state.segment_count <= 0 then
+            begin
+                Exit;
+            end;
+            SetLength(path_segments, path_state.segment_count);
+            current_position := final_position;
+            current_state_index := final_state_index;
+            for path_segment_index := High(path_segments) downto 0 do
+            begin
+                if (current_position <= 0) or
+                    (current_state_index < 0) or
+                    (current_state_index >= Length(
+                    states_by_position[current_position])) then
+                begin
+                    Exit('');
+                end;
+                path_state := states_by_position[current_position][
+                    current_state_index];
+                path_segments[path_segment_index] :=
+                    path_state.segment_text;
+                current_state_index :=
+                    path_state.predecessor_state_index;
+                current_position := path_state.predecessor_position;
+            end;
+            if current_position <> 0 then
+            begin
+                Exit('');
+            end;
+            Result := path_segments[0];
+            for path_segment_index := 1 to High(path_segments) do
+            begin
+                Result := Result + c_segment_path_separator +
+                    path_segments[path_segment_index];
+            end;
+        end;
 
         function find_retained_edge(const position_value: Integer;
             const span_value: Integer; const query_value: string;
@@ -129136,104 +129307,182 @@ var
             end;
         end;
 
-        procedure append_state(var values: TncCompletePoolLatticeStateArray;
-            const value: TncCompletePoolLatticeState);
-        var
-            append_index: Integer;
-        begin
-            append_index := Length(values);
-            SetLength(values, append_index + 1);
-            values[append_index] := value;
-        end;
-
-        function state_is_better(const left_value:
-            TncCompletePoolLatticeState; const right_value:
-            TncCompletePoolLatticeState): Boolean;
-        begin
-            if left_value.score <> right_value.score then
-            begin
-                Exit(left_value.score > right_value.score);
-            end;
-            if left_value.segment_count <> right_value.segment_count then
-            begin
-                Exit(left_value.segment_count < right_value.segment_count);
-            end;
-            Result := CompareText(left_value.text, right_value.text) < 0;
-        end;
-
         procedure prune_position(const position_value: Integer);
         var
             state_idx_local: Integer;
-            best_idx: Integer;
+            sorted_pos: Integer;
             pass: Integer;
             retained_idx: Integer;
+            retained_count_local: Integer;
             signature_count: Integer;
             duplicate_text: Boolean;
+
+            function state_index_is_better(const left_idx,
+                right_idx: Integer): Boolean;
+            var
+                text_compare: Integer;
+            begin
+                if destination_states[left_idx].score <>
+                    destination_states[right_idx].score then
+                begin
+                    Exit(destination_states[left_idx].score >
+                        destination_states[right_idx].score);
+                end;
+                if destination_states[left_idx].segment_count <>
+                    destination_states[right_idx].segment_count then
+                begin
+                    Exit(destination_states[left_idx].segment_count <
+                        destination_states[right_idx].segment_count);
+                end;
+                text_compare := CompareText(destination_states[left_idx].text,
+                    destination_states[right_idx].text);
+                if text_compare <> 0 then
+                begin
+                    Exit(text_compare < 0);
+                end;
+                Result := left_idx < right_idx;
+            end;
+
+            procedure stable_sort_state_indices(const left_pos,
+                right_pos: Integer);
+            var
+                middle_pos: Integer;
+                left_cursor: Integer;
+                right_cursor: Integer;
+                output_cursor: Integer;
+                copy_cursor: Integer;
+            begin
+                if left_pos >= right_pos then
+                begin
+                    Exit;
+                end;
+                middle_pos := (left_pos + right_pos) div 2;
+                stable_sort_state_indices(left_pos, middle_pos);
+                stable_sort_state_indices(middle_pos + 1, right_pos);
+                left_cursor := left_pos;
+                right_cursor := middle_pos + 1;
+                output_cursor := left_pos;
+                while (left_cursor <= middle_pos) and
+                    (right_cursor <= right_pos) do
+                begin
+                    if state_index_is_better(
+                        sorted_state_indices[left_cursor],
+                        sorted_state_indices[right_cursor]) then
+                    begin
+                        sort_buffer[output_cursor] :=
+                            sorted_state_indices[left_cursor];
+                        Inc(left_cursor);
+                    end
+                    else
+                    begin
+                        sort_buffer[output_cursor] :=
+                            sorted_state_indices[right_cursor];
+                        Inc(right_cursor);
+                    end;
+                    Inc(output_cursor);
+                end;
+                while left_cursor <= middle_pos do
+                begin
+                    sort_buffer[output_cursor] :=
+                        sorted_state_indices[left_cursor];
+                    Inc(left_cursor);
+                    Inc(output_cursor);
+                end;
+                while right_cursor <= right_pos do
+                begin
+                    sort_buffer[output_cursor] :=
+                        sorted_state_indices[right_cursor];
+                    Inc(right_cursor);
+                    Inc(output_cursor);
+                end;
+                for copy_cursor := left_pos to right_pos do
+                begin
+                    sorted_state_indices[copy_cursor] :=
+                        sort_buffer[copy_cursor];
+                end;
+            end;
         begin
             destination_states := states_by_position[position_value];
-            if Length(destination_states) <= 1 then
+            if Length(destination_states) <
+                state_counts_by_position[position_value] then
             begin
                 Exit;
             end;
-            SetLength(retained_states, 0);
+            SetLength(destination_states,
+                state_counts_by_position[position_value]);
+            states_by_position[position_value] := destination_states;
+            if state_counts_by_position[position_value] <= 1 then
+            begin
+                Exit;
+            end;
+            if Length(sorted_state_indices) < Length(destination_states) then
+            begin
+                SetLength(sorted_state_indices, Max(
+                    Length(destination_states),
+                    Length(sorted_state_indices) * 2));
+                SetLength(sort_buffer, Length(sorted_state_indices));
+            end;
+            for state_idx_local := 0 to High(destination_states) do
+            begin
+                sorted_state_indices[state_idx_local] := state_idx_local;
+            end;
+            stable_sort_state_indices(0, High(destination_states));
+            SetLength(retained_states, Min(lattice_beam_width,
+                Length(destination_states)));
+            retained_count_local := 0;
             for pass := 0 to 1 do
             begin
-                while Length(retained_states) < lattice_beam_width do
+                for sorted_pos := 0 to High(destination_states) do
                 begin
-                    best_idx := -1;
-                    for state_idx_local := 0 to High(destination_states) do
-                    begin
-                        candidate_key := LowerCase(Trim(
-                            destination_states[state_idx_local].text));
-                        if candidate_key = '' then
-                        begin
-                            Continue;
-                        end;
-                        duplicate_text := False;
-                        signature_count := 0;
-                        for retained_idx := 0 to High(retained_states) do
-                        begin
-                            if SameText(Trim(
-                                retained_states[retained_idx].text),
-                                candidate_key) then
-                            begin
-                                duplicate_text := True;
-                                Break;
-                            end;
-                            if SameText(
-                                retained_states[retained_idx].signature,
-                                destination_states[
-                                state_idx_local].signature) then
-                            begin
-                                Inc(signature_count);
-                            end;
-                        end;
-                        if duplicate_text or ((pass = 0) and
-                            (signature_count >=
-                            c_exact_lattice_signature_limit)) then
-                        begin
-                            Continue;
-                        end;
-                        if (best_idx < 0) or state_is_better(
-                            destination_states[state_idx_local],
-                            destination_states[best_idx]) then
-                        begin
-                            best_idx := state_idx_local;
-                        end;
-                    end;
-                    if best_idx < 0 then
+                    if retained_count_local >= lattice_beam_width then
                     begin
                         Break;
                     end;
-                    append_state(retained_states,
-                        destination_states[best_idx]);
+                    state_idx_local := sorted_state_indices[sorted_pos];
+                    candidate_key := destination_states[
+                        state_idx_local].text;
+                    if candidate_key = '' then
+                    begin
+                        Continue;
+                    end;
+                    duplicate_text := False;
+                    signature_count := 0;
+                    for retained_idx := 0 to retained_count_local - 1 do
+                    begin
+                        if SameText(retained_states[retained_idx].text,
+                            candidate_key) then
+                        begin
+                            duplicate_text := True;
+                            Break;
+                        end;
+                        if (retained_states[retained_idx].signature_low =
+                            destination_states[
+                            state_idx_local].signature_low) and
+                            (retained_states[retained_idx].signature_high =
+                            destination_states[
+                            state_idx_local].signature_high) then
+                        begin
+                            Inc(signature_count);
+                        end;
+                    end;
+                    if duplicate_text or ((pass = 0) and
+                        (signature_count >=
+                        c_exact_lattice_signature_limit)) then
+                    begin
+                        Continue;
+                    end;
+                    retained_states[retained_count_local] :=
+                        destination_states[state_idx_local];
+                    Inc(retained_count_local);
                 end;
-                if Length(retained_states) >= lattice_beam_width then
+                if retained_count_local >= lattice_beam_width then
                 begin
                     Break;
                 end;
             end;
+            SetLength(retained_states, retained_count_local);
             states_by_position[position_value] := retained_states;
+            state_counts_by_position[position_value] := retained_count_local;
         end;
     begin
         if use_retained_exact_edges and use_edge_model then
@@ -129254,8 +129503,12 @@ var
                 c_exact_edge_model_lattice_candidate_limit;
         end;
         SetLength(states_by_position, expected_units + 1);
+        SetLength(state_counts_by_position, expected_units + 1);
         SetLength(states_by_position[0], 1);
+        state_counts_by_position[0] := 1;
         states_by_position[0][0] := Default(TncCompletePoolLatticeState);
+        states_by_position[0][0].predecessor_position := -1;
+        states_by_position[0][0].predecessor_state_index := -1;
         for position := 0 to expected_units - 1 do
         begin
             { All predecessor positions have contributed by this point.  Prune
@@ -129307,8 +129560,8 @@ var
                 option_count := 0;
                 edge_model_top_weight := 0;
                 destination := position + span_units;
-                destination_count := Length(
-                    states_by_position[destination]);
+                destination_count :=
+                    state_counts_by_position[destination];
                 capacity_option_limit := option_limit;
                 if use_retained_exact_edges then
                 begin
@@ -129318,8 +129571,13 @@ var
                 destination_capacity := destination_count +
                     Length(source_states) * Min(capacity_option_limit,
                     Length(exact_candidates));
-                SetLength(states_by_position[destination],
-                    destination_capacity);
+                if Length(states_by_position[destination]) <
+                    destination_capacity then
+                begin
+                    SetLength(states_by_position[destination], Max(
+                        destination_capacity,
+                        Length(states_by_position[destination]) * 2));
+                end;
                 for candidate_idx := 0 to High(exact_candidates) do
                 begin
                     candidate_value_local := exact_candidates[candidate_idx];
@@ -129376,8 +129634,7 @@ var
                             position, expected_units,
                             candidate_value_local.source = cs_user);
                         edge_model_cache_key := exact_edge_model_cache_key(
-                            position, span_units, option_count,
-                            candidate_text_local);
+                            position, span_units, option_count);
                         if not exact_edge_model_score_cache.TryGetValue(
                             edge_model_cache_key, edge_model_score) then
                         begin
@@ -129408,6 +129665,8 @@ var
                             (edge_model_score >=
                             c_exact_edge_model_min_anchor_score);
                     end;
+                    current_edge_id := lattice_edge_id(position,
+                        span_units, option_count);
                     for state_idx := 0 to High(source_states) do
                     begin
                         state_value := source_states[state_idx];
@@ -129415,37 +129674,72 @@ var
                         if (state_value.previous_text <> '') and
                             (state_value.previous_units > 0) then
                         begin
-                            transition_query := build_span_key(position -
-                                state_value.previous_units,
-                                state_value.previous_units + span_units);
-                            transition_path := state_value.previous_text +
-                                c_segment_path_separator +
-                                candidate_text_local;
-                            transition_bonus := cached_path_transition_bonus(
-                                transition_query, transition_path);
+                            transition_cache_key :=
+                                (UInt64(state_value.previous_edge_id) shl 32) or
+                                UInt64(current_edge_id);
+                            if (state_value.previous_edge_id = 0) or
+                                (current_edge_id = 0) or
+                                (not lattice_pair_transition_cache.TryGetValue(
+                                transition_cache_key, transition_bonus)) then
+                            begin
+                                transition_query := build_span_key(position -
+                                    state_value.previous_units,
+                                    state_value.previous_units + span_units);
+                                transition_path := state_value.previous_text +
+                                    c_segment_path_separator +
+                                    candidate_text_local;
+                                transition_bonus := cached_path_transition_bonus(
+                                    transition_query, transition_path);
+                                if (state_value.previous_edge_id <> 0) and
+                                    (current_edge_id <> 0) then
+                                begin
+                                    lattice_pair_transition_cache.AddOrSetValue(
+                                        transition_cache_key,
+                                        transition_bonus);
+                                end;
+                            end;
                         end;
                         if (state_value.previous_previous_text <> '') and
                             (state_value.previous_previous_units > 0) and
                             (state_value.previous_units > 0) then
                         begin
-                            transition_query := build_span_key(position -
-                                state_value.previous_previous_units -
-                                state_value.previous_units,
-                                state_value.previous_previous_units +
-                                state_value.previous_units + span_units);
-                            transition_path :=
-                                state_value.previous_previous_text +
-                                c_segment_path_separator +
-                                state_value.previous_text +
-                                c_segment_path_separator +
-                                candidate_text_local;
-                            trigram_bonus := cached_path_transition_bonus(
-                                transition_query, transition_path);
+                            transition_cache_key :=
+                                (UInt64(state_value.
+                                previous_previous_edge_id) shl 32) or
+                                (UInt64(state_value.previous_edge_id) shl 16) or
+                                UInt64(current_edge_id);
+                            if (state_value.previous_previous_edge_id = 0) or
+                                (state_value.previous_edge_id = 0) or
+                                (current_edge_id = 0) or
+                                (not lattice_trigram_transition_cache.TryGetValue(
+                                transition_cache_key, trigram_bonus)) then
+                            begin
+                                transition_query := build_span_key(position -
+                                    state_value.previous_previous_units -
+                                    state_value.previous_units,
+                                    state_value.previous_previous_units +
+                                    state_value.previous_units + span_units);
+                                transition_path :=
+                                    state_value.previous_previous_text +
+                                    c_segment_path_separator +
+                                    state_value.previous_text +
+                                    c_segment_path_separator +
+                                    candidate_text_local;
+                                trigram_bonus := cached_path_transition_bonus(
+                                    transition_query, transition_path);
+                                if (state_value.previous_previous_edge_id <> 0) and
+                                    (state_value.previous_edge_id <> 0) and
+                                    (current_edge_id <> 0) then
+                                begin
+                                    lattice_trigram_transition_cache.
+                                        AddOrSetValue(transition_cache_key,
+                                        trigram_bonus);
+                                end;
+                            end;
                             transition_bonus := Max(transition_bonus,
                                 trigram_bonus);
                         end;
 
-                        next_state := state_value;
                         next_state.score := state_value.score +
                             edge_model_raw_weight +
                             Int64(span_units * span_units) * 1200 +
@@ -129454,30 +129748,53 @@ var
                             edge_model_adjustment;
                         next_state.text := state_value.text +
                             candidate_text_local;
-                        if state_value.path = '' then
+                        next_state.signature_low :=
+                            state_value.signature_low;
+                        next_state.signature_high :=
+                            state_value.signature_high;
+                        next_state.predecessor_position := position;
+                        next_state.predecessor_state_index := state_idx;
+                        next_state.segment_text := candidate_text_local;
+                        if state_value.segment_count < 21 then
                         begin
-                            next_state.path := candidate_text_local;
-                            next_state.signature := IntToStr(span_units);
+                            next_state.signature_low :=
+                                state_value.signature_low or
+                                (UInt64(span_units) shl
+                                (state_value.segment_count * 3));
                         end
                         else
                         begin
-                            next_state.path := state_value.path +
-                                c_segment_path_separator +
-                                candidate_text_local;
-                            next_state.signature := state_value.signature +
-                                '-' + IntToStr(span_units);
+                            next_state.signature_high :=
+                                state_value.signature_high or
+                                (UInt64(span_units) shl
+                                ((state_value.segment_count - 21) * 3));
                         end;
                         next_state.previous_previous_text :=
                             state_value.previous_text;
+                        next_state.previous_previous_edge_id :=
+                            state_value.previous_edge_id;
                         next_state.previous_previous_units :=
                             state_value.previous_units;
                         next_state.previous_text := candidate_text_local;
+                        next_state.previous_edge_id := current_edge_id;
                         next_state.previous_units := span_units;
                         next_state.segment_count :=
                             state_value.segment_count + 1;
                         next_state.transition_support :=
                             state_value.transition_support +
                             transition_bonus;
+                        next_state.retained_edge_count :=
+                            state_value.retained_edge_count;
+                        next_state.retained_bonus_total :=
+                            state_value.retained_bonus_total;
+                        next_state.retained_anchor_start :=
+                            state_value.retained_anchor_start;
+                        next_state.retained_anchor_units :=
+                            state_value.retained_anchor_units;
+                        next_state.retained_anchor_exact_rank :=
+                            state_value.retained_anchor_exact_rank;
+                        next_state.retained_anchor_top_weight :=
+                            state_value.retained_anchor_top_weight;
                         if retained_edge_match then
                         begin
                             next_state.retained_edge_count :=
@@ -129492,6 +129809,12 @@ var
                             next_state.retained_anchor_top_weight :=
                                 retained_edge.top_weight;
                         end;
+                        next_state.model_anchor_count :=
+                            state_value.model_anchor_count;
+                        next_state.model_anchor_score_total :=
+                            state_value.model_anchor_score_total;
+                        next_state.model_anchor_score_max :=
+                            state_value.model_anchor_score_max;
                         if edge_model_anchor then
                         begin
                             next_state.model_anchor_count :=
@@ -129503,6 +129826,14 @@ var
                                 state_value.model_anchor_score_max,
                                 edge_model_score);
                         end;
+                        next_state.model_word_count :=
+                            state_value.model_word_count;
+                        next_state.model_word_score_total :=
+                            state_value.model_word_score_total;
+                        next_state.model_word_score_min :=
+                            state_value.model_word_score_min;
+                        next_state.model_word_score_max :=
+                            state_value.model_word_score_max;
                         if use_edge_model and (span_units >= 2) then
                         begin
                             next_state.model_word_count :=
@@ -129532,7 +129863,7 @@ var
                         Inc(destination_count);
                     end;
                 end;
-                SetLength(states_by_position[destination], destination_count);
+                state_counts_by_position[destination] := destination_count;
             end;
         end;
 
@@ -129559,7 +129890,7 @@ var
             if use_retained_exact_edges then
             begin
                 add_candidate(generated, -1,
-                    source_states[state_idx].path,
+                    rebuild_state_path(expected_units, state_idx),
                     lcps_exact_edge_chain, state_idx + 1, -1, False, 0, -1,
                     0, 0, source_states[state_idx].transition_support,
                     source_states[state_idx].retained_anchor_start,
@@ -129571,7 +129902,7 @@ var
             else
             begin
                 add_candidate(generated, -1,
-                    source_states[state_idx].path,
+                    rebuild_state_path(expected_units, state_idx),
                     lcps_exact_lattice, state_idx + 1, -1, False, 0, -1,
                     0, 0, source_states[state_idx].transition_support,
                     IfThen(use_edge_model, -2, -1), 0, 0, 0,
@@ -132922,9 +133253,11 @@ var
 
 begin
     pool_phase_tick := 0;
+    pool_phase_frequency := 0;
     if m_config.debug_mode then
     begin
-        pool_phase_tick := GetTickCount64;
+        QueryPerformanceFrequency(pool_phase_frequency);
+        QueryPerformanceCounter(pool_phase_tick);
     end;
     SetLength(m_runtime_long_complete_pool_candidates, 0);
     m_long_complete_pool_pairwise_text := '';
@@ -132961,14 +133294,27 @@ begin
     SetLength(raw_pool, 0);
     SetLength(baseline_raw_pool, 0);
     raw_index_by_text := TDictionary<string, Integer>.Create;
+    raw_index_by_text.Capacity := 128;
     baseline_index_by_text := TDictionary<string, Integer>.Create;
+    baseline_index_by_text.Capacity := 64;
     selected_texts := TDictionary<string, Boolean>.Create;
+    selected_texts.Capacity := 64;
     selected_signature_counts := TDictionary<string, Integer>.Create;
+    selected_signature_counts.Capacity := 32;
     signature_totals := TDictionary<string, Integer>.Create;
+    signature_totals.Capacity := 64;
     exact_cache := TDictionary<string, TncCandidateList>.Create;
+    exact_cache.Capacity := 128;
     word_lm_cache := TDictionary<string, Integer>.Create;
-    exact_edge_model_score_cache := TDictionary<string, Double>.Create;
+    word_lm_cache.Capacity := 256;
+    lattice_pair_transition_cache := TDictionary<UInt64, Integer>.Create;
+    lattice_pair_transition_cache.Capacity := 512;
+    lattice_trigram_transition_cache := TDictionary<UInt64, Integer>.Create;
+    lattice_trigram_transition_cache.Capacity := 512;
+    exact_edge_model_score_cache := TDictionary<UInt64, Double>.Create;
+    exact_edge_model_score_cache.Capacity := 128;
     emitted_candidate_identities := TDictionary<string, Boolean>.Create;
+    emitted_candidate_identities.Capacity := 32;
     try
         for idx := 0 to High(original_candidates) do
         begin
@@ -133038,10 +133384,13 @@ begin
         end;
 
         collect_model_retained_exact_edges;
+        note_pool_phase('edge_collect');
         generate_exact_lattice_candidates(False, False);
+        note_pool_phase('lattice_base');
         generate_exact_lattice_candidates(True, False);
+        note_pool_phase('lattice_retained');
         generate_exact_lattice_candidates(False, True);
-        note_pool_phase('lattice');
+        note_pool_phase('lattice_model');
         generate_exact_anchor_candidates(False,
             c_exact_anchor_candidate_limit);
         generate_exact_anchor_candidates(True,
@@ -133295,6 +133644,8 @@ begin
     finally
         emitted_candidate_identities.Free;
         exact_edge_model_score_cache.Free;
+        lattice_trigram_transition_cache.Free;
+        lattice_pair_transition_cache.Free;
         word_lm_cache.Free;
         exact_cache.Free;
         signature_totals.Free;
@@ -133495,6 +133846,67 @@ var
     unified_top2_arbiter_family_value: Integer;
     unified_top2_arbiter_swapped: Boolean;
     unified_top2_arbiter_feature_values: TArray<Double>;
+    ranking_phase_tick: Int64;
+    ranking_phase_frequency: Int64;
+
+    function build_text_unit_window(const units: TArray<string>;
+        const start_index, end_index: Integer;
+        const reverse_units: Boolean): string;
+    var
+        first_index: Integer;
+        after_last_index: Integer;
+        unit_index: Integer;
+        unit_length: Integer;
+        result_length: Integer;
+        write_position: Integer;
+    begin
+        Result := '';
+        first_index := Max(0, start_index);
+        after_last_index := Min(Length(units), end_index);
+        if first_index >= after_last_index then
+        begin
+            Exit;
+        end;
+        result_length := 0;
+        for unit_index := first_index to after_last_index - 1 do
+        begin
+            Inc(result_length, Length(units[unit_index]));
+        end;
+        if result_length <= 0 then
+        begin
+            Exit;
+        end;
+        SetLength(Result, result_length);
+        write_position := 1;
+        if reverse_units then
+        begin
+            for unit_index := after_last_index - 1 downto first_index do
+            begin
+                unit_length := Length(units[unit_index]);
+                if unit_length <= 0 then
+                begin
+                    Continue;
+                end;
+                Move(units[unit_index][1], Result[write_position],
+                    unit_length * SizeOf(Char));
+                Inc(write_position, unit_length);
+            end;
+        end
+        else
+        begin
+            for unit_index := first_index to after_last_index - 1 do
+            begin
+                unit_length := Length(units[unit_index]);
+                if unit_length <= 0 then
+                begin
+                    Continue;
+                end;
+                Move(units[unit_index][1], Result[write_position],
+                    unit_length * SizeOf(Char));
+                Inc(write_position, unit_length);
+            end;
+        end;
+    end;
 
     function find_chain_candidate_index(const candidate_text: string): Integer;
     var
@@ -133554,8 +133966,8 @@ var
         end;
     end;
 
-    procedure get_text_relation(const candidate_text: string;
-        const top_text: string; out different_units: Integer;
+    procedure get_text_relation(const candidate_index: Integer;
+        const top_index: Integer; out different_units: Integer;
         out different_runs: Integer; out max_different_run: Integer;
         out same_prefix_units: Integer; out same_suffix_units: Integer;
         out difference_span_units: Integer);
@@ -133566,8 +133978,10 @@ var
         unit_idx: Integer;
         current_run: Integer;
     begin
-        candidate_units := split_text_units(Trim(candidate_text));
-        top_units := split_text_units(Trim(top_text));
+        candidate_units := split_text_units(
+            Trim(legacy_candidates[candidate_index].text));
+        top_units := split_text_units(
+            Trim(legacy_candidates[top_index].text));
         shared_units := Min(Length(candidate_units), Length(top_units));
         different_units := 0;
         different_runs := 0;
@@ -133736,8 +134150,7 @@ var
             features[92 + feature_idx] := challenger_values[feature_idx] -
                 baseline_values[feature_idx];
         end;
-        get_text_relation(legacy_candidates[challenger_index].text,
-            legacy_candidates[baseline_index].text, different_units,
+        get_text_relation(challenger_index, baseline_index, different_units,
             different_runs, max_different_run, same_prefix_units,
             same_suffix_units, difference_span_units);
         features[137] := different_units;
@@ -133776,8 +134189,7 @@ var
             features[134 + feature_idx] := challenger_values[feature_idx] -
                 baseline_values[feature_idx];
         end;
-        get_text_relation(legacy_candidates[challenger_index].text,
-            legacy_candidates[baseline_index].text, different_units,
+        get_text_relation(challenger_index, baseline_index, different_units,
             different_runs, max_different_run, same_prefix_units,
             same_suffix_units, difference_span_units);
         features[200] := different_units;
@@ -133931,8 +134343,8 @@ var
         end;
     end;
 
-    function get_top2_cached_span_lm_scores(const top_text: string;
-        const candidate_text: string; out top_scores: TArray<Integer>;
+    function get_top2_cached_span_lm_scores(const top_index: Integer;
+        const candidate_index: Integer; out top_scores: TArray<Integer>;
         out candidate_scores: TArray<Integer>): Boolean;
     var
         top_units: TArray<string>;
@@ -133951,8 +134363,10 @@ var
         Result := False;
         SetLength(top_scores, 4);
         SetLength(candidate_scores, 4);
-        top_units := split_text_units(Trim(top_text));
-        candidate_units := split_text_units(Trim(candidate_text));
+        top_units := split_text_units(
+            Trim(legacy_candidates[top_index].text));
+        candidate_units := split_text_units(
+            Trim(legacy_candidates[candidate_index].text));
         if (Length(top_units) = 0) or
             (Length(top_units) <> Length(candidate_units)) then
         begin
@@ -133996,8 +134410,8 @@ var
         end;
 
         Result := (m_dictionary <> nil) and
-            m_dictionary.get_char_lm_cached_span_scores(window_texts,
-            window_scores) and (Length(window_scores) = 8);
+            get_cached_char_lm_scores(window_texts, window_scores,
+            clsm_span, '') and (Length(window_scores) = 8);
         if not Result then
         begin
             Exit;
@@ -134036,7 +134450,6 @@ var
         window_start_local: Integer;
         window_end_local: Integer;
         radius_local: Integer;
-        unit_index_local: Integer;
         top_window_local: string;
         candidate_window_local: string;
         features_local: TncLongExactAnchorPairwiseFeatures;
@@ -134242,9 +134655,7 @@ var
             begin
                 Continue;
             end;
-            get_text_relation(
-                legacy_candidates[candidate_index_local].text,
-                legacy_candidates[top_index_local].text,
+            get_text_relation(candidate_index_local, top_index_local,
                 relation_local.different_units,
                 relation_local.different_runs,
                 relation_local.max_different_run,
@@ -134266,16 +134677,12 @@ var
                 window_end_local := Min(Length(top_units_local),
                     Length(top_units_local) -
                     relation_local.same_suffix_units + radius_local);
-                top_window_local := '';
-                candidate_window_local := '';
-                for unit_index_local := window_start_local to
-                    window_end_local - 1 do
-                begin
-                    top_window_local := top_window_local +
-                        top_units_local[unit_index_local];
-                    candidate_window_local := candidate_window_local +
-                        candidate_units_local[unit_index_local];
-                end;
+                top_window_local := build_text_unit_window(
+                    top_units_local, window_start_local,
+                    window_end_local, False);
+                candidate_window_local := build_text_unit_window(
+                    candidate_units_local, window_start_local,
+                    window_end_local, False);
                 window_texts_local[window_count_local] :=
                     top_window_local;
                 Inc(window_count_local);
@@ -134394,7 +134801,6 @@ var
         window_start_local: Integer;
         window_end_local: Integer;
         radius_index_local: Integer;
-        unit_index_local: Integer;
         top_window_local: string;
         candidate_window_local: string;
         score_local: Double;
@@ -134432,8 +134838,7 @@ var
         begin
             Exit;
         end;
-        get_text_relation(legacy_candidates[candidate_index_local].text,
-            legacy_candidates[top_index_local].text,
+        get_text_relation(candidate_index_local, top_index_local,
             relation_local.different_units,
             relation_local.different_runs,
             relation_local.max_different_run,
@@ -134445,8 +134850,7 @@ var
             Exit;
         end;
         if not get_top2_cached_span_lm_scores(
-            legacy_candidates[top_index_local].text,
-            legacy_candidates[candidate_index_local].text,
+            top_index_local, candidate_index_local,
             forward_top_scores_local, forward_candidate_scores_local) then
         begin
             Exit;
@@ -134462,27 +134866,18 @@ var
             window_end_local := Min(Length(top_units_local),
                 Length(top_units_local) - relation_local.same_suffix_units +
                 c_reverse_radii[radius_index_local]);
-            top_window_local := '';
-            candidate_window_local := '';
-            for unit_index_local := window_start_local to
-                window_end_local - 1 do
-            begin
-                { The model was trained on reversed sentences. Prefixing each
-                  unit reverses the local window without splitting surrogate
-                  pairs. }
-                top_window_local := top_units_local[unit_index_local] +
-                    top_window_local;
-                candidate_window_local :=
-                    candidate_units_local[unit_index_local] +
-                    candidate_window_local;
-            end;
+            top_window_local := build_text_unit_window(top_units_local,
+                window_start_local, window_end_local, True);
+            candidate_window_local := build_text_unit_window(
+                candidate_units_local, window_start_local,
+                window_end_local, True);
             reverse_window_texts_local[radius_index_local * 2] :=
                 top_window_local;
             reverse_window_texts_local[radius_index_local * 2 + 1] :=
                 candidate_window_local;
         end;
-        if (not m_dictionary.get_char_reverse_lm_suffix_scores(
-            reverse_window_texts_local, reverse_window_scores_local)) or
+        if (not get_cached_char_lm_scores(reverse_window_texts_local,
+            reverse_window_scores_local, clsm_reverse, '')) or
             (Length(reverse_window_scores_local) <
             Length(reverse_window_texts_local)) then
         begin
@@ -134546,7 +134941,6 @@ var
         window_start_local: Integer;
         window_end_local: Integer;
         radius_index_local: Integer;
-        unit_index_local: Integer;
         baseline_window_local: string;
         candidate_window_local: string;
         score_local: Double;
@@ -134586,8 +134980,7 @@ var
         begin
             Exit;
         end;
-        get_text_relation(legacy_candidates[candidate_index_local].text,
-            legacy_candidates[baseline_index_local].text,
+        get_text_relation(candidate_index_local, baseline_index_local,
             relation_local.different_units,
             relation_local.different_runs,
             relation_local.max_different_run,
@@ -134599,8 +134992,7 @@ var
             Exit;
         end;
         if not get_top2_cached_span_lm_scores(
-            legacy_candidates[baseline_index_local].text,
-            legacy_candidates[candidate_index_local].text,
+            baseline_index_local, candidate_index_local,
             forward_baseline_scores_local,
             forward_candidate_scores_local) then
         begin
@@ -134617,25 +135009,19 @@ var
             window_end_local := Min(Length(baseline_units_local),
                 Length(baseline_units_local) - relation_local.same_suffix_units +
                 c_reverse_radii[radius_index_local]);
-            baseline_window_local := '';
-            candidate_window_local := '';
-            for unit_index_local := window_start_local to
-                window_end_local - 1 do
-            begin
-                baseline_window_local :=
-                    baseline_units_local[unit_index_local] +
-                    baseline_window_local;
-                candidate_window_local :=
-                    candidate_units_local[unit_index_local] +
-                    candidate_window_local;
-            end;
+            baseline_window_local := build_text_unit_window(
+                baseline_units_local, window_start_local,
+                window_end_local, True);
+            candidate_window_local := build_text_unit_window(
+                candidate_units_local, window_start_local,
+                window_end_local, True);
             reverse_window_texts_local[radius_index_local * 2] :=
                 baseline_window_local;
             reverse_window_texts_local[radius_index_local * 2 + 1] :=
                 candidate_window_local;
         end;
-        if (not m_dictionary.get_char_reverse_lm_suffix_scores(
-            reverse_window_texts_local, reverse_window_scores_local)) or
+        if (not get_cached_char_lm_scores(reverse_window_texts_local,
+            reverse_window_scores_local, clsm_reverse, '')) or
             (Length(reverse_window_scores_local) <
             Length(reverse_window_texts_local)) then
         begin
@@ -134867,24 +135253,19 @@ var
                 rank_features[candidate_index_local].complete_user or
                 rank_features[candidate_index_local].latest_query_choice or
                 (rank_features[candidate_index_local].query_choice_bonus > 0) or
-                (get_candidate_text_unit_count(
-                legacy_candidates[candidate_index_local].text) <>
-                get_candidate_text_unit_count(
-                legacy_candidates[top_index_local].text)) then
+                (rank_features[candidate_index_local].text_units <>
+                rank_features[top_index_local].text_units) then
             begin
                 Continue;
             end;
 
-            get_text_relation(
-                legacy_candidates[candidate_index_local].text,
-                legacy_candidates[top_index_local].text,
+            get_text_relation(candidate_index_local, top_index_local,
                 different_units_local, different_runs_local,
                 max_different_run_local, same_prefix_units_local,
                 same_suffix_units_local, difference_span_units_local);
             if (different_units_local <= 0) or
                 (not get_top2_cached_span_lm_scores(
-                legacy_candidates[top_index_local].text,
-                legacy_candidates[candidate_index_local].text,
+                top_index_local, candidate_index_local,
                 top_local_lm_scores_local,
                 candidate_local_lm_scores_local)) then
             begin
@@ -134981,10 +135362,8 @@ var
                 rank_features[candidate_index_local].complete_user or
                 rank_features[candidate_index_local].latest_query_choice or
                 (rank_features[candidate_index_local].query_choice_bonus > 0) or
-                (get_candidate_text_unit_count(
-                legacy_candidates[candidate_index_local].text) <>
-                get_candidate_text_unit_count(
-                legacy_candidates[top_index_local].text)) or
+                (rank_features[candidate_index_local].text_units <>
+                rank_features[top_index_local].text_units) or
                 SameText(Trim(legacy_candidates[candidate_index_local].text),
                 Trim(legacy_candidates[second_index_local].text)) then
             begin
@@ -135004,8 +135383,7 @@ var
         end;
 
         promoted_index_local := ordered_indices[best_position_local];
-        get_text_relation(legacy_candidates[promoted_index_local].text,
-            legacy_candidates[second_index_local].text,
+        get_text_relation(promoted_index_local, second_index_local,
             different_units_local, different_runs_local,
             max_different_run_local, same_prefix_units_local,
             same_suffix_units_local, difference_span_units_local);
@@ -135077,7 +135455,6 @@ var
         window_start_local: Integer;
         window_end_local: Integer;
         radius_index_local: Integer;
-        unit_index_local: Integer;
         text_offset_local: Integer;
         current_window_local: string;
         candidate_window_local: string;
@@ -135086,6 +135463,7 @@ var
         baseline_score_local: Double;
         best_score_local: Double;
         score_local: Double;
+
     begin
         if (not unified_pool_final) or (candidate_count < 3) or
             (m_dictionary = nil) or
@@ -135141,10 +135519,8 @@ var
                 rank_features[candidate_index_local].complete_user or
                 rank_features[candidate_index_local].latest_query_choice or
                 (rank_features[candidate_index_local].query_choice_bonus > 0) or
-                (get_candidate_text_unit_count(
-                legacy_candidates[candidate_index_local].text) <>
-                get_candidate_text_unit_count(
-                legacy_candidates[top_index_local].text)) or
+                (rank_features[candidate_index_local].text_units <>
+                rank_features[top_index_local].text_units) or
                 SameText(Trim(legacy_candidates[candidate_index_local].text),
                 Trim(legacy_candidates[original_second_index_local].text)) then
             begin
@@ -135236,8 +135612,8 @@ var
             candidate_index_local := option_indices_local[option_index_local];
             candidate_units_local := split_text_units(
                 Trim(legacy_candidates[candidate_index_local].text));
-            get_text_relation(legacy_candidates[candidate_index_local].text,
-                legacy_candidates[current_second_index_local].text,
+            get_text_relation(candidate_index_local,
+                current_second_index_local,
                 relation_local.different_units,
                 relation_local.different_runs,
                 relation_local.max_different_run,
@@ -135254,16 +135630,12 @@ var
                     Length(current_units_local) -
                     relation_local.same_suffix_units +
                     c_forward_radii[radius_index_local]);
-                current_window_local := '';
-                candidate_window_local := '';
-                for unit_index_local := window_start_local to
-                    window_end_local - 1 do
-                begin
-                    current_window_local := current_window_local +
-                        current_units_local[unit_index_local];
-                    candidate_window_local := candidate_window_local +
-                        candidate_units_local[unit_index_local];
-                end;
+                current_window_local := build_text_unit_window(
+                    current_units_local, window_start_local,
+                    window_end_local, False);
+                candidate_window_local := build_text_unit_window(
+                    candidate_units_local, window_start_local,
+                    window_end_local, False);
                 text_offset_local := (option_index_local - 1) *
                     Length(c_forward_radii) * 2 + radius_index_local * 2;
                 forward_window_texts_local[text_offset_local] :=
@@ -135280,17 +135652,12 @@ var
                     Length(current_units_local) -
                     relation_local.same_suffix_units +
                     c_reverse_radii[radius_index_local]);
-                current_window_local := '';
-                candidate_window_local := '';
-                for unit_index_local := window_start_local to
-                    window_end_local - 1 do
-                begin
-                    current_window_local := current_units_local[unit_index_local] +
-                        current_window_local;
-                    candidate_window_local :=
-                        candidate_units_local[unit_index_local] +
-                        candidate_window_local;
-                end;
+                current_window_local := build_text_unit_window(
+                    current_units_local, window_start_local,
+                    window_end_local, True);
+                candidate_window_local := build_text_unit_window(
+                    candidate_units_local, window_start_local,
+                    window_end_local, True);
                 text_offset_local := (option_index_local - 1) *
                     Length(c_reverse_radii) * 2 + radius_index_local * 2;
                 reverse_window_texts_local[text_offset_local] :=
@@ -135299,12 +135666,12 @@ var
                     candidate_window_local;
             end;
         end;
-        if (not m_dictionary.get_char_lm_cached_span_scores(
-            forward_window_texts_local, forward_window_scores_local)) or
+        if (not get_cached_char_lm_scores(forward_window_texts_local,
+            forward_window_scores_local, clsm_span, '')) or
             (Length(forward_window_scores_local) <
             Length(forward_window_texts_local)) or
-            (not m_dictionary.get_char_reverse_lm_suffix_scores(
-            reverse_window_texts_local, reverse_window_scores_local)) or
+            (not get_cached_char_lm_scores(reverse_window_texts_local,
+            reverse_window_scores_local, clsm_reverse, '')) or
             (Length(reverse_window_scores_local) <
             Length(reverse_window_texts_local)) then
         begin
@@ -135448,7 +135815,6 @@ var
         window_start_local: Integer;
         window_end_local: Integer;
         radius_index_local: Integer;
-        unit_index_local: Integer;
         text_offset_local: Integer;
         top_window_local: string;
         candidate_window_local: string;
@@ -135505,9 +135871,7 @@ var
                 Continue;
             end;
 
-            get_text_relation(
-                legacy_candidates[candidate_index_local].text,
-                legacy_candidates[top_index_local].text,
+            get_text_relation(candidate_index_local, top_index_local,
                 relation_local.different_units,
                 relation_local.different_runs,
                 relation_local.max_different_run,
@@ -135534,16 +135898,12 @@ var
                     Length(top_units_local) -
                     relation_local.same_suffix_units +
                     c_forward_radii[radius_index_local]);
-                top_window_local := '';
-                candidate_window_local := '';
-                for unit_index_local := window_start_local to
-                    window_end_local - 1 do
-                begin
-                    top_window_local := top_window_local +
-                        top_units_local[unit_index_local];
-                    candidate_window_local := candidate_window_local +
-                        candidate_units_local[unit_index_local];
-                end;
+                top_window_local := build_text_unit_window(
+                    top_units_local, window_start_local,
+                    window_end_local, False);
+                candidate_window_local := build_text_unit_window(
+                    candidate_units_local, window_start_local,
+                    window_end_local, False);
                 text_offset_local := eligible_count_local *
                     Length(c_forward_radii) * 2 + radius_index_local * 2;
                 forward_window_texts_local[text_offset_local] :=
@@ -135561,17 +135921,12 @@ var
                     Length(top_units_local) -
                     relation_local.same_suffix_units +
                     c_reverse_radii[radius_index_local]);
-                top_window_local := '';
-                candidate_window_local := '';
-                for unit_index_local := window_start_local to
-                    window_end_local - 1 do
-                begin
-                    top_window_local := top_units_local[unit_index_local] +
-                        top_window_local;
-                    candidate_window_local :=
-                        candidate_units_local[unit_index_local] +
-                        candidate_window_local;
-                end;
+                top_window_local := build_text_unit_window(
+                    top_units_local, window_start_local,
+                    window_end_local, True);
+                candidate_window_local := build_text_unit_window(
+                    candidate_units_local, window_start_local,
+                    window_end_local, True);
                 text_offset_local := eligible_count_local *
                     Length(c_reverse_radii) * 2 + radius_index_local * 2;
                 reverse_window_texts_local[text_offset_local] :=
@@ -135593,8 +135948,8 @@ var
             Length(c_forward_radii) * 2);
         SetLength(reverse_window_texts_local, eligible_count_local *
             Length(c_reverse_radii) * 2);
-        if (not m_dictionary.get_char_lm_cached_span_scores(
-            forward_window_texts_local, forward_window_scores_local)) or
+        if (not get_cached_char_lm_scores(forward_window_texts_local,
+            forward_window_scores_local, clsm_span, '')) or
             (Length(forward_window_scores_local) <
             Length(forward_window_texts_local)) then
         begin
@@ -135648,8 +136003,8 @@ var
             Exit;
         end;
 
-        if (not m_dictionary.get_char_reverse_lm_suffix_scores(
-            reverse_window_texts_local, reverse_window_scores_local)) or
+        if (not get_cached_char_lm_scores(reverse_window_texts_local,
+            reverse_window_scores_local, clsm_reverse, '')) or
             (Length(reverse_window_scores_local) <
             Length(reverse_window_texts_local)) then
         begin
@@ -135747,7 +136102,6 @@ var
         window_start_local: Integer;
         window_end_local: Integer;
         radius_index_local: Integer;
-        unit_index_local: Integer;
         top_window_local: string;
         second_window_local: string;
         base_features_local: TncLongCompletePoolDifferenceFeatures;
@@ -135775,23 +136129,19 @@ var
             rank_features[second_index_local].complete_user or
             rank_features[second_index_local].latest_query_choice or
             (rank_features[second_index_local].query_choice_bonus > 0) or
-            (get_candidate_text_unit_count(
-            legacy_candidates[top_index_local].text) <>
-            get_candidate_text_unit_count(
-            legacy_candidates[second_index_local].text)) then
+            (rank_features[top_index_local].text_units <>
+            rank_features[second_index_local].text_units) then
         begin
             Exit;
         end;
 
-        get_text_relation(legacy_candidates[second_index_local].text,
-            legacy_candidates[top_index_local].text,
+        get_text_relation(second_index_local, top_index_local,
             different_units_local, different_runs_local,
             max_different_run_local, same_prefix_units_local,
             same_suffix_units_local, difference_span_units_local);
         if (different_units_local <= 0) or
             (not get_top2_cached_span_lm_scores(
-            legacy_candidates[top_index_local].text,
-            legacy_candidates[second_index_local].text,
+            top_index_local, second_index_local,
             forward_top_scores_local, forward_second_scores_local)) then
         begin
             Exit;
@@ -135809,23 +136159,18 @@ var
             window_end_local := Min(Length(top_units_local),
                 Length(top_units_local) - same_suffix_units_local +
                 c_reverse_radii[radius_index_local]);
-            top_window_local := '';
-            second_window_local := '';
-            for unit_index_local := window_start_local to
-                window_end_local - 1 do
-            begin
-                top_window_local := top_units_local[unit_index_local] +
-                    top_window_local;
-                second_window_local := second_units_local[unit_index_local] +
-                    second_window_local;
-            end;
+            top_window_local := build_text_unit_window(top_units_local,
+                window_start_local, window_end_local, True);
+            second_window_local := build_text_unit_window(
+                second_units_local, window_start_local,
+                window_end_local, True);
             reverse_window_texts_local[radius_index_local * 2] :=
                 top_window_local;
             reverse_window_texts_local[radius_index_local * 2 + 1] :=
                 second_window_local;
         end;
-        if (not m_dictionary.get_char_reverse_lm_suffix_scores(
-            reverse_window_texts_local, reverse_window_scores_local)) or
+        if (not get_cached_char_lm_scores(reverse_window_texts_local,
+            reverse_window_scores_local, clsm_reverse, '')) or
             (Length(reverse_window_scores_local) <
             Length(reverse_window_texts_local)) then
         begin
@@ -136024,8 +136369,8 @@ var
             Exit;
         end;
 
-        get_text_relation(legacy_candidates[second_index_local].text,
-            legacy_candidates[top_index_local].text, different_units_local,
+        get_text_relation(second_index_local, top_index_local,
+            different_units_local,
             different_runs_local, max_different_run_local,
             same_prefix_units_local, same_suffix_units_local,
             difference_span_units_local);
@@ -136167,7 +136512,7 @@ var
             rank_features[top_index_local].complete_user or
             rank_features[top_index_local].latest_query_choice or
             (rank_features[top_index_local].query_choice_bonus > 0) or
-            (get_candidate_text_unit_count(top_text_local) <>
+            (rank_features[top_index_local].text_units <>
             m_last_lookup_syllable_count) then
         begin
             Exit;
@@ -136294,7 +136639,27 @@ var
     procedure capture_ranking_stage(const stage_id: Integer);
     var
         stage_index_local: Integer;
+        current_tick_local: Int64;
+        elapsed_us_local: Int64;
     begin
+        if m_config.debug_mode and (ranking_phase_frequency > 0) then
+        begin
+            QueryPerformanceCounter(current_tick_local);
+            elapsed_us_local := ((current_tick_local - ranking_phase_tick) *
+                1000000) div ranking_phase_frequency;
+            ranking_phase_tick := current_tick_local;
+            if elapsed_us_local > 0 then
+            begin
+                if m_last_lookup_debug_extra <> '' then
+                begin
+                    m_last_lookup_debug_extra :=
+                        m_last_lookup_debug_extra + ' ';
+                end;
+                m_last_lookup_debug_extra := m_last_lookup_debug_extra +
+                    Format('lrkus_%s=%d', [ranking_stage_name(stage_id),
+                    elapsed_us_local]);
+            end;
+        end;
         if (not unified_pool_final) or (candidate_count <= 0) or
             (Length(ordered_indices) < candidate_count) or
             (ranking_stage_capture_count >= c_ranking_stage_count) then
@@ -136565,6 +136930,13 @@ var
     end;
 
 begin
+    ranking_phase_tick := 0;
+    ranking_phase_frequency := 0;
+    if m_config.debug_mode then
+    begin
+        QueryPerformanceFrequency(ranking_phase_frequency);
+        QueryPerformanceCounter(ranking_phase_tick);
+    end;
     SetLength(m_debug_long_final_candidates, 0);
     SetLength(m_debug_long_ranking_stages, 0);
     ranking_stage_capture_count := 0;
@@ -136670,8 +137042,21 @@ begin
     begin
         candidate_texts[candidate_idx] :=
             Trim(legacy_candidates[candidate_idx].text);
-        pool_idx := find_complete_pool_candidate_index(
-            candidate_texts[candidate_idx]);
+        if unified_pool_final and
+            (candidate_idx < Length(
+            m_runtime_long_complete_pool_candidates)) and
+            SameText(candidate_texts[candidate_idx], Trim(
+            m_runtime_long_complete_pool_candidates[
+            candidate_idx].candidate.text)) then
+        begin
+            { copy_runtime_pool_to_internal preserves this index mapping. }
+            pool_idx := candidate_idx;
+        end
+        else
+        begin
+            pool_idx := find_complete_pool_candidate_index(
+                candidate_texts[candidate_idx]);
+        end;
         candidate_pool_indices[candidate_idx] := pool_idx;
         chain_idx := find_chain_candidate_index(candidate_texts[candidate_idx]);
         candidate_chain_indices[candidate_idx] := chain_idx;
@@ -137338,9 +137723,7 @@ begin
     local_window_count := 0;
     SetLength(local_window_texts,
         local_difference_challenger_count * 8);
-    if (Trim(legacy_candidates[top_idx].comment) = '') and
-        (get_candidate_text_unit_count(local_top_text) =
-        m_last_lookup_syllable_count) then
+    if rank_features[top_idx].complete_match then
     begin
         for candidate_idx := 1 to local_difference_challenger_count do
         begin
@@ -137348,10 +137731,8 @@ begin
             local_difference_current_rank_debug[current_idx] :=
                 candidate_idx + 1;
             local_candidate_text := Trim(legacy_candidates[current_idx].text);
-            if (Trim(legacy_candidates[current_idx].comment) <> '') or
-                (Length(local_candidate_text) <> Length(local_top_text)) or
-                (get_candidate_text_unit_count(local_candidate_text) <>
-                m_last_lookup_syllable_count) then
+            if (not rank_features[current_idx].complete_match) or
+                (Length(local_candidate_text) <> Length(local_top_text)) then
             begin
                 Continue;
             end;
@@ -137640,14 +138021,12 @@ begin
                 Trim(legacy_candidates[current_idx].text)));
             if top2_pairwise_eligible then
             begin
-                get_text_relation(legacy_candidates[current_idx].text,
-                    legacy_candidates[top_idx].text,
+                get_text_relation(current_idx, top_idx,
                     top2_different_units, top2_different_runs,
                     top2_max_different_run, top2_same_prefix_units,
                     top2_same_suffix_units, top2_difference_span_units);
                 top2_pairwise_eligible := get_top2_cached_span_lm_scores(
-                    legacy_candidates[top_idx].text,
-                    legacy_candidates[current_idx].text,
+                    top_idx, current_idx,
                     top2_top_local_lm_scores,
                     top2_candidate_local_lm_scores);
             end;
@@ -137804,6 +138183,16 @@ begin
     end;
 
     flush_ranking_stages;
+
+    { Final-state snapshots are an audit/training surface only. Building the
+      large per-candidate records in normal input duplicates both the shadow
+      and final ranking work without affecting candidate order. }
+    if (not m_config.debug_mode) and
+        (not m_debug_capture_long_ranking_stages) and
+        (not m_debug_capture_long_beam_states) then
+    begin
+        Exit;
+    end;
 
     SetLength(m_debug_long_final_candidates, candidate_count);
     for candidate_idx := 0 to candidate_count - 1 do

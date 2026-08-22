@@ -30320,6 +30320,34 @@ begin
     end;
 end;
 
+function hash_text_pair(const namespace_value: UInt64;
+    const left_value: string; const separator_value: Char;
+    const right_value: string): UInt64;
+const
+    c_offset: UInt64 = $14650FB0739D0383;
+    c_prime: UInt64 = $00000100000001B3;
+var
+    idx: Integer;
+    unit_value: Cardinal;
+begin
+    Result := c_offset xor namespace_value;
+    for idx := 1 to Length(left_value) do
+    begin
+        unit_value := Ord(left_value[idx]);
+        Result := (Result xor (unit_value and $FF)) * c_prime;
+        Result := (Result xor ((unit_value shr 8) and $FF)) * c_prime;
+    end;
+    unit_value := Ord(separator_value);
+    Result := (Result xor (unit_value and $FF)) * c_prime;
+    Result := (Result xor ((unit_value shr 8) and $FF)) * c_prime;
+    for idx := 1 to Length(right_value) do
+    begin
+        unit_value := Ord(right_value[idx]);
+        Result := (Result xor (unit_value and $FF)) * c_prime;
+        Result := (Result xor ((unit_value shr 8) and $FF)) * c_prime;
+    end;
+end;
+
 function find_key(const keys: array of UInt64;
     const key: UInt64): Integer;
 var
@@ -30368,8 +30396,8 @@ var
     safe_input_units: Integer;
 begin
     features := Default(TncLongExactEdgeLatticeFeatures);
-    pair_idx := find_key(c_pair_keys, hash_text($6A09E667F3BCC909,
-        query_key + #31 + text));
+    pair_idx := find_key(c_pair_keys, hash_text_pair($6A09E667F3BCC909,
+        query_key, #31, text));
     query_idx := find_key(c_query_keys, hash_text($BB67AE8584CAA73B,
         query_key));
     text_idx := find_key(c_text_keys, hash_text($3C6EF372FE94F82B, text));
