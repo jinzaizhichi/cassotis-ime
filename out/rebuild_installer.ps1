@@ -77,7 +77,12 @@ $requiredFiles = @(
     'out\cassotis_ime_svr.dll',
     'out\cassotis_ime_svr32.dll',
     'out\cassotis_ime_profile_reg.exe',
-    'out\sqlite3_64.dll'
+    'out\sqlite3_64.dll',
+    'out\nc_pinyin_transformer_ort.dll',
+    'out\onnxruntime.dll',
+    'out\onnxruntime_providers_shared.dll',
+    'out\pinyin_transformer\pinyin_difference_reranker_int8.onnx',
+    'out\pinyin_transformer\vocab.json'
 )
 
 foreach ($relativePath in $requiredFiles) {
@@ -90,7 +95,12 @@ $runtimeFingerprintFiles = @(
     'out\cassotis_ime_svr.dll',
     'out\cassotis_ime_svr32.dll',
     'out\cassotis_ime_profile_reg.exe',
-    'out\sqlite3_64.dll'
+    'out\sqlite3_64.dll',
+    'out\nc_pinyin_transformer_ort.dll',
+    'out\onnxruntime.dll',
+    'out\onnxruntime_providers_shared.dll',
+    'out\pinyin_transformer\pinyin_difference_reranker_int8.onnx',
+    'out\pinyin_transformer\vocab.json'
 )
 $fingerprintSource = ($runtimeFingerprintFiles | ForEach-Object {
     (Get-FileHash -LiteralPath (Join-Path $resolvedSourceRoot $_) -Algorithm SHA256).Hash

@@ -941,8 +941,42 @@ function copy_sqlite_binaries
     }
 }
 
+function build_and_copy_pinyin_transformer_runtime
+{
+    $native_build = Join-Path $root_dir 'tools\build_pinyin_transformer_ort.ps1'
+    $runtime_source = Join-Path $root_dir 'third_party\onnxruntime\win64'
+    $model_source = Join-Path $root_dir 'data\models\pinyin_transformer'
+    $model_target = Join-Path $script_dir 'pinyin_transformer'
+    $required_sources = @(
+        $native_build,
+        (Join-Path $runtime_source 'onnxruntime.dll'),
+        (Join-Path $runtime_source 'onnxruntime_providers_shared.dll'),
+        (Join-Path $model_source 'pinyin_difference_reranker_int8.onnx'),
+        (Join-Path $model_source 'vocab.json')
+    )
+    foreach ($required_source in $required_sources)
+    {
+        if (-not (Test-Path -LiteralPath $required_source))
+        {
+            throw "Missing pinyin Transformer runtime source: $required_source"
+        }
+    }
+
+    & $native_build -Configuration Release
+    if ($LASTEXITCODE -ne 0)
+    {
+        throw "Pinyin Transformer native wrapper build failed with exit code $LASTEXITCODE"
+    }
+    Copy-Item -Force -LiteralPath (Join-Path $runtime_source 'onnxruntime.dll') -Destination $script_dir
+    Copy-Item -Force -LiteralPath (Join-Path $runtime_source 'onnxruntime_providers_shared.dll') -Destination $script_dir
+    New-Item -ItemType Directory -Force -Path $model_target | Out-Null
+    Copy-Item -Force -LiteralPath (Join-Path $model_source 'pinyin_difference_reranker_int8.onnx') -Destination $model_target
+    Copy-Item -Force -LiteralPath (Join-Path $model_source 'vocab.json') -Destination $model_target
+}
+
 stop_engine_host
 Write-Host ("[{0}] Start rebuild_all.ps1" -f (Get-Date -Format 'HH:mm:ss'))
+build_and_copy_pinyin_transformer_runtime
 
 if (-not $SkipTsf)
 {

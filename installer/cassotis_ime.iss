@@ -57,6 +57,11 @@ Source: "{#RuntimeDir}\cassotis_ime_svr32.dll"; DestDir: "{#InstallRuntimeDir}";
 Source: "{#RuntimeDir}\cassotis_ime_profile_reg.exe"; DestDir: "{#InstallRuntimeDir}"; Flags: ignoreversion onlyifdoesntexist
 Source: "{#RuntimeDir}\cassotis_ime_profile_reg.exe"; Flags: dontcopy
 Source: "{#RuntimeDir}\sqlite3_64.dll"; DestDir: "{#InstallRuntimeDir}"; Flags: ignoreversion onlyifdoesntexist
+Source: "{#RuntimeDir}\nc_pinyin_transformer_ort.dll"; DestDir: "{#InstallRuntimeDir}"; Flags: ignoreversion onlyifdoesntexist
+Source: "{#RuntimeDir}\onnxruntime.dll"; DestDir: "{#InstallRuntimeDir}"; Flags: ignoreversion onlyifdoesntexist
+Source: "{#RuntimeDir}\onnxruntime_providers_shared.dll"; DestDir: "{#InstallRuntimeDir}"; Flags: ignoreversion onlyifdoesntexist
+Source: "{#RuntimeDir}\pinyin_transformer\pinyin_difference_reranker_int8.onnx"; DestDir: "{#InstallRuntimeDir}\pinyin_transformer"; Flags: ignoreversion onlyifdoesntexist
+Source: "{#RuntimeDir}\pinyin_transformer\vocab.json"; DestDir: "{#InstallRuntimeDir}\pinyin_transformer"; Flags: ignoreversion onlyifdoesntexist
 
 Source: "{#RuntimeDataSourceDir}\dict_sc.db"; DestDir: "{localappdata}\CassotisIme\data"; DestName: "dict_sc.db"; Flags: ignoreversion
 Source: "{#RuntimeDataSourceDir}\dict_tc.db"; DestDir: "{localappdata}\CassotisIme\data"; DestName: "dict_tc.db"; Flags: ignoreversion

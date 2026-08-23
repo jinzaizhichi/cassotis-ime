@@ -124,6 +124,7 @@ type
         m_last_user_dict_checkpoint_activity_tick: UInt64;
         m_next_session_instance_id: UInt64;
         m_config: TncEngineConfig;
+        m_long_neural_reranker: IncLongNeuralReranker;
         m_last_lookup_perf_info: string;
         function get_config_write_time: TDateTime;
         procedure maybe_checkpoint_user_dictionary;
@@ -198,7 +199,8 @@ implementation
 uses
     nc_dictionary_intf,
     nc_sqlite,
-    nc_log;
+    nc_log,
+    nc_pinyin_transformer_host;
 
 type
     TncHostSessionRef = record
@@ -672,6 +674,10 @@ begin
     m_last_activity_tick := GetTickCount64;
     m_release_requested := False;
     m_engine := TncEngine.create(config, defer_optional_dictionary_models);
+    if owner <> nil then
+    begin
+        m_engine.set_long_neural_reranker(owner.m_long_neural_reranker);
+    end;
     m_candidate_window := nil;
     m_last_caret := Point(0, 0);
     m_has_caret := False;
@@ -1199,6 +1205,8 @@ begin
     m_last_user_dict_checkpoint_attempt_tick := 0;
     m_last_user_dict_checkpoint_activity_tick := 0;
     m_next_session_instance_id := 0;
+    m_long_neural_reranker := TncPinyinTransformerHostReranker.create(
+        ExtractFileDir(ParamStr(0)), True);
     with TncConfigManager.create(m_config_path) do
     try
         m_config := load_engine_config;
@@ -1269,6 +1277,7 @@ begin
         m_sessions.Free;
         m_sessions := nil;
     end;
+    m_long_neural_reranker := nil;
     if m_session_prewarm_queue <> nil then
     begin
         m_session_prewarm_queue.Free;

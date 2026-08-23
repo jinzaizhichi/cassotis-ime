@@ -391,6 +391,13 @@ type
 
     TncLongFinalCandidateDebugArray = TArray<TncLongFinalCandidateDebug>;
 
+    IncLongNeuralReranker = interface
+        ['{B4FC23F4-4F65-4F8B-A3E8-A69442BA57A1}']
+        function try_select(const query_text: string;
+            const candidates: TncLongFinalCandidateDebugArray;
+            out selected_index: Integer): Boolean;
+    end;
+
     TncLongRankingStageDebug = record
         stage_name: string;
         top1_text: string;
@@ -691,6 +698,7 @@ type
         m_debug_target_candidate_stage_mask: Integer;
         m_debug_target_full_path_budget_exhausted: Boolean;
         m_debug_capture_long_beam_states: Boolean;
+        m_debug_capture_long_final_candidates: Boolean;
         m_debug_expand_long_beam_states: Boolean;
         m_debug_long_beam_states: TncLongBeamStateDebugArray;
         m_debug_long_exact_edge_stages: TncLongExactEdgeStageDebugArray;
@@ -703,6 +711,7 @@ type
         m_runtime_long_complete_pool_candidates:
             TncLongCompletePoolRuntimeCandidateArray;
         m_runtime_long_retained_exact_edges: TncLongRetainedExactEdgeArray;
+        m_long_neural_reranker: IncLongNeuralReranker;
         m_long_complete_pool_pairwise_text: string;
         m_long_complete_pool_pairwise_insert_rank: Integer;
         m_debug_long_chain_beam_width: Integer;
@@ -910,7 +919,8 @@ type
             var source_indices: TArray<Integer>;
             const unified_pool_final: Boolean = False;
             const exact_edge_baseline_top1: string = '';
-            const exact_edge_baseline_top2: string = '');
+            const exact_edge_baseline_top2: string = '';
+            const run_host_neural_reranker: Boolean = False);
         function build_segment_candidates(out out_candidates: TncCandidateList;
             const include_full_path: Boolean; out out_path_search_elapsed_ms: Int64;
             const allow_relaxed_missing_apostrophe: Boolean = False): Boolean;
@@ -972,6 +982,8 @@ type
         procedure reset;
         procedure update_config(const config: TncEngineConfig);
         procedure set_dictionary_provider(const dictionary: TncDictionaryProvider);
+        procedure set_long_neural_reranker(
+            const reranker: IncLongNeuralReranker);
         function detach_dictionary_provider: TncDictionaryProvider;
         procedure adopt_ready_dictionary_provider(
             const dictionary: TncDictionaryProvider);
@@ -994,6 +1006,10 @@ type
             out prefix2_lm_scores: TArray<Integer>): Boolean;
         procedure debug_set_target_recall_text(const text: string);
         procedure debug_enable_long_beam_state_capture(const enabled: Boolean);
+        procedure debug_enable_long_final_candidate_capture(
+            const enabled: Boolean);
+        procedure debug_enable_long_beam_state_expansion(
+            const enabled: Boolean);
         procedure debug_enable_long_ranking_stage_capture(
             const enabled: Boolean);
         procedure debug_set_long_chain_beam_widths(const beam_width: Integer;
@@ -1418,6 +1434,7 @@ constructor TncEngine.create(const config: TncEngineConfig;
     const allow_one_key_completion_lookup: Boolean = True);
 begin
     inherited create;
+    m_long_neural_reranker := nil;
     m_config := config;
     m_defer_optional_dictionary_models :=
         defer_optional_dictionary_models;
@@ -1487,6 +1504,7 @@ begin
     m_runtime_redup_text := '';
     m_debug_target_recall_text := '';
     m_debug_capture_long_beam_states := False;
+    m_debug_capture_long_final_candidates := False;
     m_debug_capture_long_ranking_stages := False;
     m_debug_expand_long_beam_states := False;
     SetLength(m_debug_long_beam_states, 0);
@@ -1639,6 +1657,7 @@ end;
 
 destructor TncEngine.Destroy;
 begin
+    m_long_neural_reranker := nil;
     if m_dictionary <> nil then
     begin
         m_dictionary.Free;
@@ -4371,6 +4390,21 @@ begin
     end;
 end;
 
+procedure TncEngine.debug_enable_long_beam_state_expansion(
+    const enabled: Boolean);
+begin
+    m_debug_expand_long_beam_states := enabled;
+end;
+
+procedure TncEngine.debug_enable_long_final_candidate_capture(
+    const enabled: Boolean);
+begin
+    // Copy the already-ranked runtime pool without expanding search or
+    // retaining every beam state. This keeps Oracle/training data faithful to
+    // production candidate generation.
+    m_debug_capture_long_final_candidates := enabled;
+end;
+
 procedure TncEngine.debug_enable_long_ranking_stage_capture(
     const enabled: Boolean);
 begin
@@ -4739,6 +4773,12 @@ begin
     clear_lookup_bonus_caches;
     m_last_dictionary_reload_check_tick := 0;
     update_dictionary_state;
+end;
+
+procedure TncEngine.set_long_neural_reranker(
+    const reranker: IncLongNeuralReranker);
+begin
+    m_long_neural_reranker := reranker;
 end;
 
 function TncEngine.detach_dictionary_provider: TncDictionaryProvider;
@@ -133569,7 +133609,8 @@ begin
         copy_runtime_pool_to_internal(internal_candidates,
             internal_source_indices);
         apply_long_final_visible_candidate_ranking(internal_candidates,
-            internal_source_indices, True, baseline_top1, baseline_top2);
+            internal_source_indices, True, baseline_top1, baseline_top2,
+            True);
         note_pool_phase('rank');
 
         SetLength(merged_candidates, original_visible_count);
@@ -133661,7 +133702,8 @@ procedure TncEngine.apply_long_final_visible_candidate_ranking(
     var source_indices: TArray<Integer>;
     const unified_pool_final: Boolean;
     const exact_edge_baseline_top1: string;
-    const exact_edge_baseline_top2: string);
+    const exact_edge_baseline_top2: string;
+    const run_host_neural_reranker: Boolean);
 const
     c_ranking_stage_legacy_input = 0;
     c_ranking_stage_unified_ranker = 1;
@@ -133721,6 +133763,9 @@ var
     ordered_candidates: TncCandidateList;
     legacy_source_indices: TArray<Integer>;
     ordered_source_indices: TArray<Integer>;
+    neural_candidates: TncLongFinalCandidateDebugArray;
+    neural_candidate_indices: TArray<Integer>;
+    neural_selected_index: Integer;
     path_structure: TncLongPathStructureCacheValue;
     top_chain_score: Int64;
     abstain_features: TncLongFinalAbstainFeatures;
@@ -136929,6 +136974,157 @@ var
             features.complete_pool_edge_model_word_score_mean;
     end;
 
+    procedure apply_host_neural_reranker;
+    const
+        c_neural_candidate_limit = 16;
+    var
+        ordered_position_local: Integer;
+        candidate_index_local: Integer;
+        neural_index_local: Integer;
+        duplicate_index_local: Integer;
+        selected_candidate_index_local: Integer;
+        candidate_text_local: string;
+        duplicate_local: Boolean;
+    begin
+        if (not run_host_neural_reranker) or
+            (m_long_neural_reranker = nil) or (not unified_pool_final) or
+            (candidate_count < 2) or (m_last_lookup_syllable_count < 6) or
+            (m_last_lookup_syllable_count > 40) then
+        begin
+            Exit;
+        end;
+
+        SetLength(neural_candidates, Min(candidate_count,
+            c_neural_candidate_limit));
+        SetLength(neural_candidate_indices, Length(neural_candidates));
+        neural_index_local := 0;
+        for ordered_position_local := 0 to candidate_count - 1 do
+        begin
+            candidate_index_local := ordered_indices[ordered_position_local];
+            if (not rank_features[candidate_index_local].complete_match) or
+                (Trim(legacy_candidates[candidate_index_local].comment) <> '') or
+                (rank_features[candidate_index_local].text_units <>
+                m_last_lookup_syllable_count) then
+            begin
+                Continue;
+            end;
+            if rank_features[candidate_index_local].source_user or
+                rank_features[candidate_index_local].complete_user then
+            begin
+                { User choices remain authoritative and are never submitted to
+                  the corpus-trained model. }
+                SetLength(neural_candidates, 0);
+                SetLength(neural_candidate_indices, 0);
+                Exit;
+            end;
+            candidate_text_local := Trim(
+                legacy_candidates[candidate_index_local].text);
+            if candidate_text_local = '' then
+            begin
+                Continue;
+            end;
+            duplicate_local := False;
+            for duplicate_index_local := 0 to neural_index_local - 1 do
+            begin
+                if SameText(neural_candidates[duplicate_index_local].text,
+                    candidate_text_local) then
+                begin
+                    duplicate_local := True;
+                    Break;
+                end;
+            end;
+            if duplicate_local then
+            begin
+                Continue;
+            end;
+
+            neural_candidates[neural_index_local] :=
+                Default(TncLongFinalCandidateDebug);
+            neural_candidates[neural_index_local].legacy_rank :=
+                candidate_index_local + 1;
+            neural_candidates[neural_index_local].final_rank :=
+                neural_index_local + 1;
+            copy_features_to_debug(rank_features[candidate_index_local],
+                neural_candidates[neural_index_local]);
+            if SameText(candidate_text_local,
+                Trim(exact_edge_baseline_top1)) then
+            begin
+                neural_candidates[neural_index_local].exact_edge_shadow_rank := 1;
+            end
+            else if SameText(candidate_text_local,
+                Trim(exact_edge_baseline_top2)) then
+            begin
+                neural_candidates[neural_index_local].exact_edge_shadow_rank := 2;
+            end;
+            neural_candidates[neural_index_local].exact_edge_auditor_decision :=
+                exact_edge_auditor_decision;
+            neural_candidates[neural_index_local].exact_edge_pre_auditor_rank :=
+                exact_edge_pre_auditor_ranks[candidate_index_local];
+            if exact_edge_auditor_decision >= 0 then
+            begin
+                neural_candidates[neural_index_local].exact_edge_auditor_score :=
+                    Round(exact_edge_auditor_score * 1000000.0);
+                neural_candidates[neural_index_local].exact_edge_auditor_threshold :=
+                    Round(exact_edge_auditor_threshold * 1000000.0);
+            end;
+            neural_candidates[neural_index_local].ranker_score :=
+                rank_scores[candidate_index_local];
+            neural_candidates[neural_index_local].abstain_score := abstain_score;
+            neural_candidates[neural_index_local].ranker_applied := apply_ranker;
+            neural_candidates[neural_index_local].text :=
+                legacy_candidates[candidate_index_local].text;
+            neural_candidates[neural_index_local].comment :=
+                legacy_candidates[candidate_index_local].comment;
+            neural_candidates[neural_index_local].segment_path :=
+                legacy_paths[candidate_index_local];
+            neural_candidate_indices[neural_index_local] :=
+                candidate_index_local;
+            Inc(neural_index_local);
+            if neural_index_local >= c_neural_candidate_limit then
+            begin
+                Break;
+            end;
+        end;
+        SetLength(neural_candidates, neural_index_local);
+        SetLength(neural_candidate_indices, neural_index_local);
+        if neural_index_local < 2 then
+        begin
+            Exit;
+        end;
+
+        neural_selected_index := 0;
+        try
+            if (not m_long_neural_reranker.try_select(normalized_query,
+                neural_candidates, neural_selected_index)) or
+                (neural_selected_index <= 0) or
+                (neural_selected_index >= neural_index_local) then
+            begin
+                Exit;
+            end;
+        except
+            { A missing or unhealthy optional model must never break input. }
+            Exit;
+        end;
+
+        selected_candidate_index_local :=
+            neural_candidate_indices[neural_selected_index];
+        for ordered_position_local := 0 to candidate_count - 1 do
+        begin
+            if ordered_indices[ordered_position_local] =
+                selected_candidate_index_local then
+            begin
+                for candidate_index_local := ordered_position_local downto 1 do
+                begin
+                    ordered_indices[candidate_index_local] :=
+                        ordered_indices[candidate_index_local - 1];
+                end;
+                ordered_indices[0] := selected_candidate_index_local;
+                apply_ranker := True;
+                Break;
+            end;
+        end;
+    end;
+
 begin
     ranking_phase_tick := 0;
     ranking_phase_frequency := 0;
@@ -138150,6 +138346,10 @@ begin
     end;
     exact_edge_current_top_index := ordered_indices[0];
     apply_exact_edge_final_auditor;
+    { The optional host-only Transformer sees the settled complete Top16 and
+      may make one confidence-gated promotion. A nil/not-ready model is an
+      exact no-op, so TSF and cold-start paths retain the native ordering. }
+    apply_host_neural_reranker;
 
     if apply_ranker then
     begin
@@ -138189,7 +138389,8 @@ begin
       and final ranking work without affecting candidate order. }
     if (not m_config.debug_mode) and
         (not m_debug_capture_long_ranking_stages) and
-        (not m_debug_capture_long_beam_states) then
+        (not m_debug_capture_long_beam_states) and
+        (not m_debug_capture_long_final_candidates) then
     begin
         Exit;
     end;
