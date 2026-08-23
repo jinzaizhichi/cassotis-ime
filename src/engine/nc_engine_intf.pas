@@ -527,6 +527,8 @@ type
         m_composition_display_text: string;
         m_candidates: TncCandidateList;
         m_one_key_completion: TncOneKeyCompletion;
+        m_debug_long_one_key_completion_pool: TncOneKeyCompletionList;
+        m_debug_capture_long_one_key_completion_pool: Boolean;
         m_one_key_completion_query_prefix: string;
         m_one_key_completion_score: Integer;
         m_completion_feedback_origin_prefix: string;
@@ -997,6 +999,12 @@ type
         function debug_query_one_key_completion_candidates(
             const query_text: string;
             out completions: TncOneKeyCompletionList): Boolean;
+        function debug_get_long_one_key_completion_pool(
+            out completions: TncOneKeyCompletionList): Boolean;
+        procedure debug_enable_long_one_key_completion_pool_capture(
+            const enabled: Boolean);
+        function debug_get_ranked_candidates(
+            out candidates: TncCandidateList): Boolean;
         function debug_score_one_key_completion_candidates(
             const query_text: string; const left_context: string;
             out completions: TncOneKeyCompletionList;
@@ -1136,7 +1144,8 @@ uses
     nc_short_nocontext_residual_model,
     nc_one_key_completion_ranker_model,
     nc_one_key_completion_difference_model,
-    nc_one_key_completion_topk_model;
+    nc_one_key_completion_topk_model,
+    nc_one_key_completion_ncgpt_model;
 
 const
     c_suppress_nonlexicon_complete_long_candidates = True;
@@ -4603,6 +4612,30 @@ begin
         m_dictionary.lookup_one_key_completions(query_text, completions);
 end;
 
+function TncEngine.debug_get_long_one_key_completion_pool(
+    out completions: TncOneKeyCompletionList): Boolean;
+begin
+    completions := Copy(m_debug_long_one_key_completion_pool);
+    Result := Length(completions) > 0;
+end;
+
+procedure TncEngine.debug_enable_long_one_key_completion_pool_capture(
+    const enabled: Boolean);
+begin
+    m_debug_capture_long_one_key_completion_pool := enabled;
+    if not enabled then
+    begin
+        SetLength(m_debug_long_one_key_completion_pool, 0);
+    end;
+end;
+
+function TncEngine.debug_get_ranked_candidates(
+    out candidates: TncCandidateList): Boolean;
+begin
+    candidates := Copy(m_candidates);
+    Result := Length(candidates) > 0;
+end;
+
 function TncEngine.debug_score_one_key_completion_candidates(
     const query_text: string; const left_context: string;
     out completions: TncOneKeyCompletionList;
@@ -5405,6 +5438,7 @@ end;
 procedure TncEngine.clear_one_key_completion;
 begin
     m_one_key_completion := Default(TncOneKeyCompletion);
+    SetLength(m_debug_long_one_key_completion_pool, 0);
     m_one_key_completion_query_prefix := '';
     m_one_key_completion_score := Low(Integer);
 end;
@@ -5466,6 +5500,10 @@ type
     TncLongCompletionScoredItem = record
         value: TncLongOneKeyCompletion;
         anchor: TncLongCompletionAnchor;
+        score: Integer;
+    end;
+    TncLongCompletionDebugItem = record
+        completion: TncOneKeyCompletion;
         score: Integer;
     end;
 var
@@ -5664,6 +5702,156 @@ var
             SameText(normalize_pinyin_text(left_item.value.suffix_pinyin),
             normalize_pinyin_text(right_value.suffix_pinyin));
     end;
+
+    procedure capture_debug_completion_pool;
+    var
+        debug_items: TArray<TncLongCompletionDebugItem>;
+        debug_used: TArray<Boolean>;
+        candidate_analysis: TncLongCompletionPathAnalysis;
+        candidate_path: string;
+        candidate_anchor: string;
+        candidate_results: TncLongOneKeyCompletionList;
+        candidate_idx: Integer;
+        segment_count: Integer;
+        completion_idx: Integer;
+        existing_idx: Integer;
+        debug_idx: Integer;
+        debug_rank: Integer;
+        debug_best_idx: Integer;
+        debug_item: TncLongCompletionDebugItem;
+        suffix_key: string;
+    begin
+        SetLength(m_debug_long_one_key_completion_pool, 0);
+        SetLength(debug_items, 0);
+        for candidate_idx := 0 to Min(High(m_candidates),
+            c_max_visible_scan - 1) do
+        begin
+            if not analyze_candidate_path(candidate_idx,
+                candidate_analysis) then
+            begin
+                Continue;
+            end;
+            candidate_path := Trim(get_segment_path_for_candidate(
+                m_candidates[candidate_idx], candidate_idx));
+            if candidate_path = '' then
+            begin
+                Continue;
+            end;
+            for segment_count := Min(c_max_anchor_segments,
+                Length(candidate_analysis.segments)) downto 1 do
+            begin
+                if not exact_suffix_path(candidate_analysis, segment_count,
+                    candidate_anchor) then
+                begin
+                    Continue;
+                end;
+                SetLength(candidate_results, 0);
+                if not m_dictionary.lookup_long_one_key_completions(
+                    candidate_anchor, candidate_results) then
+                begin
+                    Continue;
+                end;
+                for completion_idx := 0 to High(candidate_results) do
+                begin
+                    if (candidate_results[completion_idx].evidence <
+                        c_min_evidence) or
+                        (candidate_results[completion_idx].source_count <
+                        c_min_source_count) or
+                        (Trim(candidate_results[completion_idx].suffix_text) =
+                        '') then
+                    begin
+                        Continue;
+                    end;
+                    suffix_key := normalize_pinyin_text(
+                        candidate_results[completion_idx].suffix_pinyin);
+                    if suffix_key = '' then
+                    begin
+                        Continue;
+                    end;
+                    debug_item := Default(TncLongCompletionDebugItem);
+                    debug_item.completion.anchor_text :=
+                        Trim(m_candidates[candidate_idx].text);
+                    debug_item.completion.suffix_text :=
+                        candidate_results[completion_idx].suffix_text;
+                    debug_item.completion.anchor_path := candidate_anchor;
+                    debug_item.completion.text :=
+                        debug_item.completion.anchor_text +
+                        debug_item.completion.suffix_text;
+                    debug_item.completion.full_pinyin := compact_query +
+                        suffix_key;
+                    debug_item.completion.path_text := candidate_path + #3 +
+                        candidate_results[completion_idx].suffix_path;
+                    debug_item.completion.source_count :=
+                        candidate_results[completion_idx].source_count;
+                    debug_item.completion.feedback_count :=
+                        candidate_results[completion_idx].feedback_count;
+                    debug_item.completion.feedback_reject_count :=
+                        candidate_results[completion_idx].feedback_reject_count;
+                    debug_item.completion.prefix_anchored := True;
+                    debug_item.completion.source := okcs_long_transition;
+                    debug_item.score :=
+                        (candidate_results[completion_idx].evidence * 8) +
+                        (Min(candidate_results[completion_idx].source_count,
+                        64) * 3) + (segment_count * 24) -
+                        (candidate_idx * 96);
+                    debug_item.completion.weight := debug_item.score;
+                    existing_idx := -1;
+                    for debug_idx := 0 to High(debug_items) do
+                    begin
+                        if SameText(debug_items[debug_idx].completion.text,
+                            debug_item.completion.text) and
+                            SameText(debug_items[debug_idx].completion.full_pinyin,
+                            debug_item.completion.full_pinyin) then
+                        begin
+                            existing_idx := debug_idx;
+                            Break;
+                        end;
+                    end;
+                    if existing_idx < 0 then
+                    begin
+                        SetLength(debug_items, Length(debug_items) + 1);
+                        debug_items[High(debug_items)] := debug_item;
+                    end
+                    else if debug_item.score > debug_items[existing_idx].score then
+                    begin
+                        debug_items[existing_idx] := debug_item;
+                    end;
+                end;
+            end;
+        end;
+
+        SetLength(m_debug_long_one_key_completion_pool,
+            Length(debug_items));
+        SetLength(debug_used, Length(debug_items));
+        for debug_rank := 0 to High(debug_items) do
+        begin
+            debug_best_idx := -1;
+            for debug_idx := 0 to High(debug_items) do
+            begin
+                if debug_used[debug_idx] then
+                begin
+                    Continue;
+                end;
+                if (debug_best_idx < 0) or
+                    (debug_items[debug_idx].score >
+                    debug_items[debug_best_idx].score) or
+                    ((debug_items[debug_idx].score =
+                    debug_items[debug_best_idx].score) and
+                    (CompareText(debug_items[debug_idx].completion.text,
+                    debug_items[debug_best_idx].completion.text) < 0)) then
+                begin
+                    debug_best_idx := debug_idx;
+                end;
+            end;
+            if debug_best_idx < 0 then
+            begin
+                Break;
+            end;
+            debug_used[debug_best_idx] := True;
+            m_debug_long_one_key_completion_pool[debug_rank] :=
+                debug_items[debug_best_idx].completion;
+        end;
+    end;
 begin
     Result := False;
     if (m_dictionary = nil) or
@@ -5847,6 +6035,11 @@ begin
             second_best_idx := item_idx;
             second_best_score := items[item_idx].score;
         end;
+    end;
+
+    if m_debug_capture_long_one_key_completion_pool then
+    begin
+        capture_debug_completion_pool;
     end;
     if (best_idx < 0) or ((second_best_idx >= 0) and
         (best_score - second_best_score < c_min_winner_margin)) then
@@ -6041,6 +6234,19 @@ var
     pair_best_observations: Integer;
     pair_confidence: Integer;
     pair_observations: Integer;
+    ncgpt_candidate_features:
+        array of TncOneKeyCompletionNcgptCandidateFeatures;
+    ncgpt_pair_features: TncOneKeyCompletionNcgptPairFeatures;
+    ncgpt_needed_indices: TArray<Integer>;
+    ncgpt_stage1_features: TncShortContextDifferenceFeatures;
+    ncgpt_best_idx: Integer;
+    ncgpt_candidate_idx: Integer;
+    ncgpt_best_score: Double;
+    ncgpt_candidate_score: Double;
+    ncgpt_threshold: Double;
+    ncgpt_category: TncOneKeyCompletionDifferenceCategory;
+    ncgpt_common_prefix: Integer;
+    ncgpt_common_suffix: Integer;
     has_completion_lookup: Boolean;
 
     function competition_score_for_candidate(const candidate_idx: Integer;
@@ -6143,6 +6349,135 @@ var
                 Result := candidate_idx;
             end;
         end;
+    end;
+
+    procedure get_common_completion_fragment_units(const left_text,
+        right_text: string; out common_prefix, common_suffix: Integer);
+    var
+        left_units: TArray<string>;
+        right_units: TArray<string>;
+        compare_limit: Integer;
+    begin
+        common_prefix := 0;
+        common_suffix := 0;
+        left_units := split_text_units(left_text);
+        right_units := split_text_units(right_text);
+        compare_limit := Min(Length(left_units), Length(right_units));
+        while (common_prefix < compare_limit) and
+            (left_units[common_prefix] = right_units[common_prefix]) do
+        begin
+            Inc(common_prefix);
+        end;
+        compare_limit := compare_limit - common_prefix;
+        while (common_suffix < compare_limit) and
+            (left_units[High(left_units) - common_suffix] =
+            right_units[High(right_units) - common_suffix]) do
+        begin
+            Inc(common_suffix);
+        end;
+    end;
+
+    procedure fill_ncgpt_completion_candidate_features(
+        const candidate_idx: Integer;
+        out features: TncOneKeyCompletionNcgptCandidateFeatures);
+    var
+        item: TncOneKeyCompletion;
+    begin
+        FillChar(features, SizeOf(features), 0);
+        item := completions[candidate_idx];
+        features[0] := item.weight;
+        features[1] := item.popularity_prior;
+        features[2] := item.corpus_score;
+        features[3] := item.document_score;
+        features[4] := item.source_count;
+        features[5] := item.path_score;
+        features[6] := item.vertical_penalty;
+        features[7] := item.vertical_layer_kind;
+        features[8] := Ord(item.prefix_anchored);
+        features[9] := item.feedback_count;
+        features[10] := item.feedback_reject_count;
+        features[11] := char_lm_scores[candidate_idx];
+
+        ncgpt_stage1_features := Default(TncShortContextDifferenceFeatures);
+        short_context_difference_fill_stage1_evidence(context_value,
+            completions[0].text, item.text, ncgpt_stage1_features);
+        features[12] := ncgpt_stage1_features.pair_log_odds;
+        features[13] := ncgpt_stage1_features.pair_log_total;
+        features[14] := ncgpt_stage1_features.pair_context_log_odds;
+        features[15] := ncgpt_stage1_features.pair_context_log_total;
+        features[16] := ncgpt_stage1_features.pair_context_width;
+        features[17] := ncgpt_stage1_features.mined_log_odds;
+        features[18] := ncgpt_stage1_features.mined_log_total;
+        features[19] := ncgpt_stage1_features.mined_context_width;
+        features[20] := ncgpt_stage1_features.novel_log_odds;
+        features[21] := ncgpt_stage1_features.chat_log_odds;
+        features[22] := ncgpt_stage1_features.formal_log_odds;
+        features[23] := ncgpt_stage1_features.total_log_odds;
+        features[24] := candidate_idx + 1;
+        features[25] := Ord(item.source = okcs_user_exact);
+        features[26] := Ord(item.source = okcs_base_exact);
+        features[27] := Ord(item.source = okcs_transition);
+        features[28] := get_candidate_text_unit_count(item.text);
+        features[29] := Length(item.full_pinyin);
+        features[30] := Max(0, Length(item.full_pinyin) -
+            Length(compact_query));
+        features[31] := Length(compact_query);
+        features[32] := get_candidate_text_unit_count(context_value);
+        features[33] := Length(syllables);
+    end;
+
+    function prepare_ncgpt_completion_features: Boolean;
+    var
+        feature_idx: Integer;
+        completion_idx: Integer;
+        category: TncOneKeyCompletionDifferenceCategory;
+        threshold: Double;
+    begin
+        Result := False;
+        if (context_value = '') or (not has_char_lm) or
+            (Length(completions) < 2) then
+        begin
+            Exit;
+        end;
+
+        // Only materialize the settled incumbent and categories whose
+        // independently calibrated threshold permits a challenge. Most
+        // completion groups therefore avoid all extra LM/evidence work.
+        SetLength(ncgpt_needed_indices, 1);
+        ncgpt_needed_indices[0] := best_idx;
+        for completion_idx := 0 to High(completions) do
+        begin
+            if (completion_idx = best_idx) or
+                (not eligible[completion_idx]) or
+                (completions[best_idx].feedback_count >
+                completions[completion_idx].feedback_count) then
+            begin
+                Continue;
+            end;
+            category := one_key_completion_difference_category(
+                completions[best_idx], completions[completion_idx]);
+            threshold := one_key_completion_ncgpt_threshold(category);
+            if threshold >= 1.0E29 then
+            begin
+                Continue;
+            end;
+            SetLength(ncgpt_needed_indices,
+                Length(ncgpt_needed_indices) + 1);
+            ncgpt_needed_indices[High(ncgpt_needed_indices)] := completion_idx;
+        end;
+        if Length(ncgpt_needed_indices) < 2 then
+        begin
+            Exit;
+        end;
+
+        SetLength(ncgpt_candidate_features, Length(completions));
+        for feature_idx := 0 to High(ncgpt_needed_indices) do
+        begin
+            completion_idx := ncgpt_needed_indices[feature_idx];
+            fill_ncgpt_completion_candidate_features(completion_idx,
+                ncgpt_candidate_features[completion_idx]);
+        end;
+        Result := True;
     end;
 begin
     previous_completion := m_one_key_completion;
@@ -7207,6 +7542,72 @@ begin
         if pair_best_idx >= 0 then
         begin
             best_idx := pair_best_idx;
+        end;
+    end;
+
+    // nc_gpt is used only offline. The generated trees below are a static
+    // distillation of its hard-pair decisions and may only reorder the
+    // existing completion Top-K when independently calibrated evidence is
+    // strong enough. User completions have already returned above.
+    if (best_idx >= 0) and (eligible_count > 1) and
+        prepare_ncgpt_completion_features then
+    begin
+        ncgpt_best_idx := -1;
+        ncgpt_best_score := -1.0E30;
+        for ncgpt_candidate_idx := 0 to High(completions) do
+        begin
+            if (ncgpt_candidate_idx = best_idx) or
+                (not eligible[ncgpt_candidate_idx]) or
+                (completions[best_idx].feedback_count >
+                completions[ncgpt_candidate_idx].feedback_count) then
+            begin
+                Continue;
+            end;
+            ncgpt_category := one_key_completion_difference_category(
+                completions[best_idx], completions[ncgpt_candidate_idx]);
+            ncgpt_threshold := one_key_completion_ncgpt_threshold(
+                ncgpt_category);
+            if ncgpt_threshold >= 1.0E29 then
+            begin
+                Continue;
+            end;
+            get_common_completion_fragment_units(
+                completions[best_idx].text,
+                completions[ncgpt_candidate_idx].text,
+                ncgpt_common_prefix, ncgpt_common_suffix);
+            build_one_key_completion_ncgpt_pair_features(
+                ncgpt_candidate_features[ncgpt_candidate_idx],
+                ncgpt_candidate_features[best_idx],
+                ncgpt_common_prefix, ncgpt_common_suffix,
+                get_candidate_text_unit_count(
+                completions[ncgpt_candidate_idx].text) -
+                get_candidate_text_unit_count(completions[best_idx].text),
+                Length(completions[ncgpt_candidate_idx].full_pinyin) -
+                Length(completions[best_idx].full_pinyin),
+                completions[ncgpt_candidate_idx].source =
+                completions[best_idx].source,
+                (completions[ncgpt_candidate_idx].source =
+                okcs_base_exact) and
+                (completions[best_idx].source = okcs_transition),
+                (completions[ncgpt_candidate_idx].source =
+                okcs_transition) and
+                (completions[best_idx].source = okcs_base_exact),
+                ncgpt_pair_features);
+            ncgpt_candidate_score := one_key_completion_ncgpt_score(
+                ncgpt_pair_features);
+            if (ncgpt_candidate_score >= ncgpt_threshold) and
+                ((ncgpt_best_idx < 0) or
+                (ncgpt_candidate_score > ncgpt_best_score) or
+                ((ncgpt_candidate_score = ncgpt_best_score) and
+                (ncgpt_candidate_idx < ncgpt_best_idx))) then
+            begin
+                ncgpt_best_idx := ncgpt_candidate_idx;
+                ncgpt_best_score := ncgpt_candidate_score;
+            end;
+        end;
+        if ncgpt_best_idx >= 0 then
+        begin
+            best_idx := ncgpt_best_idx;
         end;
     end;
 
