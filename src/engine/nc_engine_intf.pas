@@ -1145,7 +1145,8 @@ uses
     nc_one_key_completion_ranker_model,
     nc_one_key_completion_difference_model,
     nc_one_key_completion_topk_model,
-    nc_one_key_completion_ncgpt_model;
+    nc_one_key_completion_ncgpt_model,
+    nc_one_key_completion_ncgpt_sparse_audit_model;
 
 const
     c_suppress_nonlexicon_complete_long_candidates = True;
@@ -6240,13 +6241,27 @@ var
     ncgpt_needed_indices: TArray<Integer>;
     ncgpt_stage1_features: TncShortContextDifferenceFeatures;
     ncgpt_best_idx: Integer;
+    ncgpt_incumbent_idx: Integer;
+    ncgpt_primary_idx: Integer;
     ncgpt_candidate_idx: Integer;
     ncgpt_best_score: Double;
+    ncgpt_primary_score: Double;
     ncgpt_candidate_score: Double;
     ncgpt_threshold: Double;
+    ncgpt_primary_threshold: Double;
     ncgpt_category: TncOneKeyCompletionDifferenceCategory;
+    ncgpt_primary_category: TncOneKeyCompletionDifferenceCategory;
     ncgpt_common_prefix: Integer;
     ncgpt_common_suffix: Integer;
+    ncgpt_prior_score: Double;
+    ncgpt_candidate_scores: TArray<Double>;
+    ncgpt_candidate_thresholds: TArray<Double>;
+    ncgpt_candidate_categories:
+        TArray<TncOneKeyCompletionDifferenceCategory>;
+    ncgpt_candidate_scored: TArray<Boolean>;
+    ncgpt_fallback_idx: Integer;
+    ncgpt_fallback_score: Double;
+    ncgpt_fallback_candidate_score: Double;
     has_completion_lookup: Boolean;
 
     function competition_score_for_candidate(const candidate_idx: Integer;
@@ -7545,26 +7560,34 @@ begin
         end;
     end;
 
-    // nc_gpt is used only offline. The generated trees below are a static
-    // distillation of its hard-pair decisions and may only reorder the
-    // existing completion Top-K when independently calibrated evidence is
-    // strong enough. User completions have already returned above.
+    // nc_gpt is used only offline. The generated trees and sparse priors
+    // below are static distillations of its hard-pair decisions. The primary
+    // prior audits the tree choice; a stricter fallback may rescue another
+    // existing Top-K item only when the primary path keeps the incumbent.
     if (best_idx >= 0) and (eligible_count > 1) and
         prepare_ncgpt_completion_features then
     begin
+        ncgpt_incumbent_idx := best_idx;
         ncgpt_best_idx := -1;
         ncgpt_best_score := -1.0E30;
+        ncgpt_primary_idx := -1;
+        ncgpt_primary_score := -1.0E30;
+        SetLength(ncgpt_candidate_scores, Length(completions));
+        SetLength(ncgpt_candidate_thresholds, Length(completions));
+        SetLength(ncgpt_candidate_categories, Length(completions));
+        SetLength(ncgpt_candidate_scored, Length(completions));
         for ncgpt_candidate_idx := 0 to High(completions) do
         begin
-            if (ncgpt_candidate_idx = best_idx) or
+            if (ncgpt_candidate_idx = ncgpt_incumbent_idx) or
                 (not eligible[ncgpt_candidate_idx]) or
-                (completions[best_idx].feedback_count >
+                (completions[ncgpt_incumbent_idx].feedback_count >
                 completions[ncgpt_candidate_idx].feedback_count) then
             begin
                 Continue;
             end;
             ncgpt_category := one_key_completion_difference_category(
-                completions[best_idx], completions[ncgpt_candidate_idx]);
+                completions[ncgpt_incumbent_idx],
+                completions[ncgpt_candidate_idx]);
             ncgpt_threshold := one_key_completion_ncgpt_threshold(
                 ncgpt_category);
             if ncgpt_threshold >= 1.0E29 then
@@ -7572,29 +7595,47 @@ begin
                 Continue;
             end;
             get_common_completion_fragment_units(
-                completions[best_idx].text,
+                completions[ncgpt_incumbent_idx].text,
                 completions[ncgpt_candidate_idx].text,
                 ncgpt_common_prefix, ncgpt_common_suffix);
             build_one_key_completion_ncgpt_pair_features(
                 ncgpt_candidate_features[ncgpt_candidate_idx],
-                ncgpt_candidate_features[best_idx],
+                ncgpt_candidate_features[ncgpt_incumbent_idx],
                 ncgpt_common_prefix, ncgpt_common_suffix,
                 get_candidate_text_unit_count(
                 completions[ncgpt_candidate_idx].text) -
-                get_candidate_text_unit_count(completions[best_idx].text),
+                get_candidate_text_unit_count(
+                completions[ncgpt_incumbent_idx].text),
                 Length(completions[ncgpt_candidate_idx].full_pinyin) -
-                Length(completions[best_idx].full_pinyin),
+                Length(completions[ncgpt_incumbent_idx].full_pinyin),
                 completions[ncgpt_candidate_idx].source =
-                completions[best_idx].source,
+                completions[ncgpt_incumbent_idx].source,
                 (completions[ncgpt_candidate_idx].source =
                 okcs_base_exact) and
-                (completions[best_idx].source = okcs_transition),
+                (completions[ncgpt_incumbent_idx].source = okcs_transition),
                 (completions[ncgpt_candidate_idx].source =
                 okcs_transition) and
-                (completions[best_idx].source = okcs_base_exact),
+                (completions[ncgpt_incumbent_idx].source = okcs_base_exact),
                 ncgpt_pair_features);
             ncgpt_candidate_score := one_key_completion_ncgpt_score(
                 ncgpt_pair_features);
+            ncgpt_candidate_scores[ncgpt_candidate_idx] :=
+                ncgpt_candidate_score;
+            ncgpt_candidate_thresholds[ncgpt_candidate_idx] :=
+                ncgpt_threshold;
+            ncgpt_candidate_categories[ncgpt_candidate_idx] :=
+                ncgpt_category;
+            ncgpt_candidate_scored[ncgpt_candidate_idx] := True;
+            if (ncgpt_primary_idx < 0) or
+                (ncgpt_candidate_score > ncgpt_primary_score) or
+                ((ncgpt_candidate_score = ncgpt_primary_score) and
+                (ncgpt_candidate_idx < ncgpt_primary_idx)) then
+            begin
+                ncgpt_primary_idx := ncgpt_candidate_idx;
+                ncgpt_primary_score := ncgpt_candidate_score;
+                ncgpt_primary_threshold := ncgpt_threshold;
+                ncgpt_primary_category := ncgpt_category;
+            end;
             if (ncgpt_candidate_score >= ncgpt_threshold) and
                 ((ncgpt_best_idx < 0) or
                 (ncgpt_candidate_score > ncgpt_best_score) or
@@ -7608,6 +7649,86 @@ begin
         if ncgpt_best_idx >= 0 then
         begin
             best_idx := ncgpt_best_idx;
+        end
+        else
+        begin
+            best_idx := ncgpt_incumbent_idx;
+        end;
+
+        if (ncgpt_primary_idx >= 0) and
+            lookup_one_key_completion_ncgpt_primary_prior(
+            context_value, compact_query,
+            completions[ncgpt_incumbent_idx],
+            completions[ncgpt_primary_idx], ncgpt_primary_category,
+            ncgpt_primary_score, ncgpt_primary_threshold,
+            ncgpt_prior_score) then
+        begin
+            if (ncgpt_prior_score >=
+                one_key_completion_ncgpt_primary_approve_threshold(
+                ncgpt_primary_category)) and
+                (ncgpt_primary_score >= ncgpt_primary_threshold -
+                c_one_key_completion_ncgpt_primary_expansion_margin) then
+            begin
+                best_idx := ncgpt_primary_idx;
+            end
+            else if (best_idx = ncgpt_primary_idx) and
+                (ncgpt_prior_score <=
+                one_key_completion_ncgpt_primary_veto_threshold(
+                ncgpt_primary_category)) then
+            begin
+                best_idx := ncgpt_incumbent_idx;
+            end;
+        end;
+
+        if best_idx = ncgpt_incumbent_idx then
+        begin
+            ncgpt_fallback_idx := -1;
+            ncgpt_fallback_score := -1.0E30;
+            for ncgpt_candidate_idx := 0 to High(completions) do
+            begin
+                if (not ncgpt_candidate_scored[ncgpt_candidate_idx]) or
+                    (ncgpt_candidate_scores[ncgpt_candidate_idx] <
+                    ncgpt_candidate_thresholds[ncgpt_candidate_idx] -
+                    c_one_key_completion_ncgpt_fallback_expansion_margin) or
+                    (not lookup_one_key_completion_ncgpt_fallback_prior(
+                    context_value, compact_query,
+                    completions[ncgpt_incumbent_idx],
+                    completions[ncgpt_candidate_idx],
+                    ncgpt_candidate_categories[ncgpt_candidate_idx],
+                    ncgpt_candidate_scores[ncgpt_candidate_idx],
+                    ncgpt_candidate_thresholds[ncgpt_candidate_idx],
+                    ncgpt_prior_score)) or (ncgpt_prior_score <= 0.0) then
+                begin
+                    Continue;
+                end;
+                ncgpt_fallback_candidate_score := ncgpt_prior_score +
+                    c_one_key_completion_ncgpt_fallback_tree_weight *
+                    (ncgpt_candidate_scores[ncgpt_candidate_idx] -
+                    ncgpt_candidate_thresholds[ncgpt_candidate_idx]);
+                if (ncgpt_fallback_idx < 0) or
+                    (ncgpt_fallback_candidate_score >
+                    ncgpt_fallback_score) or
+                    ((ncgpt_fallback_candidate_score =
+                    ncgpt_fallback_score) and
+                    (ncgpt_candidate_scores[ncgpt_candidate_idx] >
+                    ncgpt_candidate_scores[ncgpt_fallback_idx])) or
+                    ((ncgpt_fallback_candidate_score =
+                    ncgpt_fallback_score) and
+                    (ncgpt_candidate_scores[ncgpt_candidate_idx] =
+                    ncgpt_candidate_scores[ncgpt_fallback_idx]) and
+                    (ncgpt_candidate_idx < ncgpt_fallback_idx)) then
+                begin
+                    ncgpt_fallback_idx := ncgpt_candidate_idx;
+                    ncgpt_fallback_score :=
+                        ncgpt_fallback_candidate_score;
+                end;
+            end;
+            if (ncgpt_fallback_idx >= 0) and
+                (ncgpt_fallback_score >=
+                c_one_key_completion_ncgpt_fallback_threshold) then
+            begin
+                best_idx := ncgpt_fallback_idx;
+            end;
         end;
     end;
 
