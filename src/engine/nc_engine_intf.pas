@@ -7930,6 +7930,7 @@ var
     supported_complete_encoded_path: string;
     direct_three_syllable_one_plus_two_candidate: TncCandidate;
     direct_three_syllable_one_plus_two_encoded_path: string;
+    direct_three_syllable_one_plus_two_registered: Boolean;
     direct_three_syllable_two_plus_one_candidate: TncCandidate;
     direct_three_syllable_two_plus_one_encoded_path: string;
     fast_chain_seed_candidate: TncCandidate;
@@ -78738,6 +78739,7 @@ var
         c_tail_probe_limit = 24;
         c_preferred_head_bonus = 96;
         c_complete_bonus = 120000;
+        c_strong_char_lm_score = -1200;
     var
         syllables_local: TncPinyinParseResult;
         head_key: string;
@@ -78754,6 +78756,10 @@ var
         best_head_weight: Integer;
         best_tail_weight: Integer;
         is_preferred_head: Boolean;
+        combined_text: string;
+        char_lm_texts: TArray<string>;
+        char_lm_scores: TArray<Integer>;
+        char_lm_supported: Boolean;
 
         function get_candidate_weight_local(
             const candidate: TncCandidate): Integer;
@@ -78784,6 +78790,20 @@ var
                 $771F, $633A, $8F83, $628A, $88AB, $8BA9, $7ED9, $5411,
                 $5BF9, $4ECE, $4E8E, $548C, $4E0E,
                 $7B2C, $6211, $4F60, $60A8, $5148:
+                    Result := True;
+            end;
+        end;
+
+        function is_direct_complete_head_text_local(
+            const text_value: string): Boolean;
+        begin
+            Result := False;
+            if get_candidate_text_unit_count(text_value) <> 1 then
+            begin
+                Exit;
+            end;
+            case Ord(text_value[1]) of
+                $6211, $4F60, $60A8, $6700:
                     Result := True;
             end;
         end;
@@ -78887,12 +78907,30 @@ var
             Exit;
         end;
 
-        out_candidate.text := best_head_text + best_tail_text;
+        combined_text := best_head_text + best_tail_text;
+        char_lm_supported := False;
+        if not is_direct_complete_head_text_local(best_head_text) then
+        begin
+            SetLength(char_lm_texts, 1);
+            char_lm_texts[0] := combined_text;
+            if get_cached_char_lm_scores(char_lm_texts, char_lm_scores,
+                clsm_full, '') and (Length(char_lm_scores) = 1) and
+                (char_lm_scores[0] >= c_strong_char_lm_score) then
+            begin
+                char_lm_supported := True;
+            end;
+        end;
+
+        out_candidate.text := combined_text;
         out_candidate.comment := '';
         out_candidate.score := c_complete_bonus + best_head_weight + best_tail_weight;
         out_candidate.source := cs_rule;
         out_candidate.has_dict_weight := True;
         out_candidate.dict_weight := out_candidate.score;
+        if char_lm_supported then
+        begin
+            out_candidate.display_kind := cdk_lm_compound;
+        end;
         out_encoded_path := best_head_text + c_segment_path_separator +
             best_tail_text;
         remember_segment_path_for_candidate(out_candidate.text, '',
@@ -114295,7 +114333,7 @@ var
         Result := Length(out_candidates) > 0;
     end;
 
-    function try_preserve_short_four_lm_prefix_from_previous_local(
+    function try_preserve_short_lm_prefix_from_previous_local(
         out out_candidate: TncCandidate): Boolean;
     const
         c_previous_probe_limit = 12;
@@ -114306,6 +114344,7 @@ var
         current_tail_local: string;
         previous_tail_local: string;
         previous_idx_local: Integer;
+        syllable_idx_local: Integer;
         appending_local: Boolean;
         deleting_local: Boolean;
 
@@ -114409,7 +114448,7 @@ var
             Length(lookup_text) + 1) and
             SameText(Copy(previous_lookup_key, 1, Length(lookup_text)),
             lookup_text);
-        if (input_syllable_count <> 4) or
+        if (input_syllable_count < 4) or (input_syllable_count > 8) or
             ((Length(previous_candidates) = 0) and
             (Length(previous_visible_candidates) = 0) and
             (Length(previous_short_three_exact_pair_texts) = 0)) or
@@ -114426,15 +114465,25 @@ var
             lookup_text);
         previous_syllables_local := get_effective_compact_pinyin_syllables(
             previous_lookup_key);
-        if (Length(current_syllables_local) <> 4) or
-            ((Length(previous_syllables_local) <> 3) and
-            (Length(previous_syllables_local) <> 4)) then
+        if (Length(current_syllables_local) <> input_syllable_count) or
+            (Length(previous_syllables_local) < 3) or
+            (Length(previous_syllables_local) > 8) or
+            ((Length(current_syllables_local) <>
+            Length(previous_syllables_local) + 1) and
+            (Length(current_syllables_local) <>
+            Length(previous_syllables_local)) and
+            (Length(previous_syllables_local) <>
+            Length(current_syllables_local) + 1)) then
         begin
             Exit;
         end;
 
-        current_tail_local := normalize_pinyin_text(
-            current_syllables_local[3].text);
+        current_tail_local := '';
+        for syllable_idx_local := 3 to High(current_syllables_local) do
+        begin
+            current_tail_local := current_tail_local + normalize_pinyin_text(
+                current_syllables_local[syllable_idx_local].text);
+        end;
         if current_tail_local = '' then
         begin
             Exit;
@@ -114468,8 +114517,12 @@ var
             Exit(try_take_previous_supported_pair_local);
         end;
 
-        previous_tail_local := normalize_pinyin_text(
-            previous_syllables_local[3].text);
+        previous_tail_local := '';
+        for syllable_idx_local := 3 to High(previous_syllables_local) do
+        begin
+            previous_tail_local := previous_tail_local + normalize_pinyin_text(
+                previous_syllables_local[syllable_idx_local].text);
+        end;
         if (previous_tail_local = '') or
             SameText(current_tail_local, previous_tail_local) or
             (appending_local and
@@ -121473,7 +121526,7 @@ begin
         end;
         subspan_oracle_budget_remaining := 0;
         m_last_lookup_syllable_count := input_syllable_count;
-        if try_preserve_short_four_lm_prefix_from_previous_local(
+        if try_preserve_short_lm_prefix_from_previous_local(
             short_four_preserved_prefix_candidate) then
         begin
             m_has_forced_visible_top_candidate := True;
@@ -122637,6 +122690,36 @@ begin
             else
             begin
                 m_candidates[0] := direct_three_syllable_one_plus_two_candidate;
+            end;
+            ensure_short_three_exact_pair_candidates_visible_local(m_candidates);
+            if direct_three_syllable_one_plus_two_candidate.display_kind =
+                cdk_lm_compound then
+            begin
+                if not SameText(m_short_three_exact_pair_query,
+                    normalize_pinyin_text(lookup_text)) then
+                begin
+                    m_short_three_exact_pair_query :=
+                        normalize_pinyin_text(lookup_text);
+                    SetLength(m_short_three_exact_pair_texts, 0);
+                end;
+                direct_three_syllable_one_plus_two_registered := False;
+                for i := 0 to High(m_short_three_exact_pair_texts) do
+                begin
+                    if SameText(Trim(m_short_three_exact_pair_texts[i]),
+                        Trim(direct_three_syllable_one_plus_two_candidate.text)) then
+                    begin
+                        direct_three_syllable_one_plus_two_registered := True;
+                        Break;
+                    end;
+                end;
+                if not direct_three_syllable_one_plus_two_registered then
+                begin
+                    SetLength(m_short_three_exact_pair_texts,
+                        Length(m_short_three_exact_pair_texts) + 1);
+                    m_short_three_exact_pair_texts[
+                        High(m_short_three_exact_pair_texts)] := Trim(
+                        direct_three_syllable_one_plus_two_candidate.text);
+                end;
             end;
             finalize_preserved_candidates_and_prepare_exit(Format(
                 'multi=%d seg=%d dangling=%d head_only=%d runtime=%d redup=%d short312head=1 allinit=%d',
@@ -160625,6 +160708,7 @@ var
             local_full_complete: Boolean;
             local_direct_exact: Boolean;
             local_supported_exact_pair: Boolean;
+            local_preserved_lm_prefix: Boolean;
             local_predictive_prefix: Boolean;
             local_particle_tail_rule: Boolean;
             local_fuzzy_exact: Boolean;
@@ -160739,6 +160823,12 @@ var
                 local_particle_tail_rule or
                 (local_predictive_prefix and
                 predictive_prefix_units_allowed_local(local_units)));
+            local_preserved_lm_prefix := (local_comment <> '') and
+                m_last_lookup_incremental_partial_reuse and
+                (candidate_value.source = cs_rule) and
+                (candidate_value.display_kind = cdk_lm_compound) and
+                (local_units >= 3) and
+                (local_units + local_comment_units = expected_units);
             if local_full_complete then
             begin
                 local_direct_exact := exact_weights.ContainsKey(local_text);
@@ -160909,7 +160999,8 @@ var
             end
             else if (local_comment <> '') and
                 (local_units + local_comment_units = expected_units) and
-                ((local_units = 1) or prefix_candidate_keys.ContainsKey(
+                (local_preserved_lm_prefix or (local_units = 1) or
+                prefix_candidate_keys.ContainsKey(
                 prefix_candidate_cache_key_local(local_text, local_tail_key)) or
                 prefix_candidate_matches_query_local(local_text, local_units,
                 local_tail_key)) then

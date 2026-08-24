@@ -39,7 +39,53 @@ begin
     Result := schema_text <> '';
 end;
 
-function split_line(const line: string; out pinyin: string; out text: string; out weight: Integer): Boolean;
+function table_has_column(const conn: TncSqliteConnection;
+    const table_name, column_name: string): Boolean;
+var
+    stmt: Psqlite3_stmt;
+    step_result: Integer;
+begin
+    Result := False;
+    stmt := nil;
+    try
+        if not conn.prepare('PRAGMA table_info(' + table_name + ')', stmt) then
+        begin
+            Exit;
+        end;
+        step_result := conn.step(stmt);
+        while step_result = SQLITE_ROW do
+        begin
+            if SameText(conn.column_text(stmt, 1), column_name) then
+            begin
+                Result := True;
+                Exit;
+            end;
+            step_result := conn.step(stmt);
+        end;
+    finally
+        if stmt <> nil then
+        begin
+            conn.finalize(stmt);
+        end;
+    end;
+end;
+
+function ensure_base_scope_schema(const conn: TncSqliteConnection): Boolean;
+begin
+    Result := table_has_column(conn, 'dict_base',
+        'contains_popularity_eligible') or conn.exec(
+        'ALTER TABLE dict_base ADD COLUMN ' +
+        'contains_popularity_eligible INTEGER NOT NULL DEFAULT 1;');
+    if Result then
+    begin
+        Result := conn.exec(
+            'INSERT OR REPLACE INTO meta(key, value) ' +
+            'VALUES(''schema_version'', ''23'');');
+    end;
+end;
+
+function split_line(const line: string; out pinyin: string; out text: string;
+    out weight: Integer; out contains_popularity_eligible: Integer): Boolean;
 var
     parts: TArray<string>;
 begin
@@ -47,6 +93,7 @@ begin
     pinyin := '';
     text := '';
     weight := 0;
+    contains_popularity_eligible := 1;
 
     parts := line.Split([#9]);
     if Length(parts) < 2 then
@@ -64,6 +111,12 @@ begin
     if Length(parts) >= 3 then
     begin
         weight := StrToIntDef(Trim(parts[2]), 0);
+    end;
+    if (Length(parts) >= 4) and
+        (SameText(Trim(parts[3]), 'no_contains') or
+        SameText(Trim(parts[3]), '0')) then
+    begin
+        contains_popularity_eligible := 0;
     end;
 
     Result := (pinyin <> '') and (text <> '');
@@ -783,7 +836,9 @@ end;
 function import_data(const conn: TncSqliteConnection; const import_path: string;
     const import_mode: TncImportMode): Boolean;
 const
-    insert_base_sql = 'INSERT INTO dict_base(pinyin, text, weight) VALUES (?1, ?2, ?3);';
+    insert_base_sql =
+        'INSERT INTO dict_base(pinyin, text, weight, contains_popularity_eligible) ' +
+        'VALUES (?1, ?2, ?3, ?4);';
     insert_jianpin_sql = 'INSERT OR IGNORE INTO dict_jianpin(word_id, jianpin, weight) VALUES (?1, ?2, ?3);';
     insert_alias_sql =
         'INSERT OR IGNORE INTO dict_base_pinyin_alias(compact_pinyin, word_id) VALUES (?1, ?2);';
@@ -849,6 +904,7 @@ var
     suffix_text: string;
     suffix_path: string;
     weight: Integer;
+    contains_popularity_eligible: Integer;
     backoff: Integer;
     corpus_score: Integer;
     document_score: Integer;
@@ -1550,7 +1606,8 @@ begin
                 Continue;
             end;
 
-            if not split_line(line, pinyin, text, weight) then
+            if not split_line(line, pinyin, text, weight,
+                contains_popularity_eligible) then
             begin
                 Continue;
             end;
@@ -1574,6 +1631,13 @@ begin
             end;
 
             if not conn.bind_int(stmt_base, 3, weight) then
+            begin
+                has_error := True;
+                Break;
+            end;
+
+            if not conn.bind_int(stmt_base, 4,
+                contains_popularity_eligible) then
             begin
                 has_error := True;
                 Break;
@@ -1786,7 +1850,8 @@ const
         '), spans AS (' +
         'SELECT DISTINCT b.id AS id, substr(b.text, pos.n, len.n) AS token, ' +
         'b.weight AS weight FROM dict_base b, nums pos, nums len ' +
-        'WHERE len.n BETWEEN 2 AND 6 ' +
+        'WHERE b.contains_popularity_eligible <> 0 ' +
+        'AND len.n BETWEEN 2 AND 6 ' +
         'AND pos.n + len.n - 1 <= length(b.text)' +
         ') INSERT INTO dict_base_contains_popularity(token, weight) ' +
         'SELECT token, SUM(weight) FROM spans GROUP BY token;' +
@@ -1858,6 +1923,12 @@ begin
         if not conn.exec(schema_text) then
         begin
             Writeln('Apply schema failed: ' + conn.errmsg);
+            Halt(1);
+        end;
+
+        if not ensure_base_scope_schema(conn) then
+        begin
+            Writeln('Migrate base dictionary schema failed: ' + conn.errmsg);
             Halt(1);
         end;
 

@@ -1,18 +1,19 @@
--- cassotis ime sqlite schema v21
+-- cassotis ime sqlite schema v23
 
 CREATE TABLE IF NOT EXISTS meta (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL
 );
 
-INSERT OR IGNORE INTO meta(key, value) VALUES('schema_version', '22');
+INSERT OR IGNORE INTO meta(key, value) VALUES('schema_version', '23');
 
 CREATE TABLE IF NOT EXISTS dict_base (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     pinyin TEXT NOT NULL,
     text TEXT NOT NULL,
     weight INTEGER DEFAULT 0,
-    comment TEXT DEFAULT ''
+    comment TEXT DEFAULT '',
+    contains_popularity_eligible INTEGER NOT NULL DEFAULT 1
 );
 
 CREATE INDEX IF NOT EXISTS idx_dict_base_pinyin ON dict_base(pinyin);

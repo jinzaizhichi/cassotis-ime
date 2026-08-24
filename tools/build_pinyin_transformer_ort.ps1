@@ -10,9 +10,10 @@ $source = Join-Path $root 'src\host\native\nc_pinyin_transformer_ort.cpp'
 $include = Join-Path $root 'third_party\onnxruntime\include'
 $onnxLibrary = Join-Path $root 'third_party\onnxruntime\win64\onnxruntime.lib'
 $output = Join-Path $root 'out\cassotis_pinyin_transformer_ort.dll'
-$object = Join-Path $root 'out\cassotis_pinyin_transformer_ort.obj'
-$importLibrary = Join-Path $root 'out\cassotis_pinyin_transformer_ort.lib'
-$pdb = Join-Path $root 'out\cassotis_pinyin_transformer_ort.pdb'
+$intermediateDir = Join-Path $root 'out\_tmp_build\pinyin_transformer_ort'
+$object = Join-Path $intermediateDir 'cassotis_pinyin_transformer_ort.obj'
+$importLibrary = Join-Path $intermediateDir 'cassotis_pinyin_transformer_ort.lib'
+$pdb = Join-Path $intermediateDir 'cassotis_pinyin_transformer_ort.pdb'
 $vcvars = $VcVarsPath
 if ($vcvars.Trim() -eq '') {
     $vcvars = @(
@@ -33,6 +34,8 @@ foreach ($path in @($source, $include, $onnxLibrary, $vcvars)) {
     }
 }
 
+New-Item -ItemType Directory -Path $intermediateDir -Force | Out-Null
+
 $optimization = if ($Configuration -ieq 'Debug') { '/Od /Zi' } else { '/O2 /GL' }
 $command = 'call "{0}" >nul && cl.exe /nologo /std:c++17 /EHsc /MD /LD {1} ' +
     '/I"{2}" "{3}" /Fo"{4}" /link /LTCG /OUT:"{5}" ' +
@@ -43,6 +46,18 @@ $command = $command -f $vcvars, $optimization, $include, $source, $object,
 & cmd.exe /d /s /c $command
 if ($LASTEXITCODE -ne 0) {
     throw "Native ONNX wrapper build failed with exit code $LASTEXITCODE"
+}
+
+# Keep only the runtime DLL in out; linker artifacts are not release inputs.
+$staleReleaseArtifacts = @(
+    (Join-Path $root 'out\cassotis_pinyin_transformer_ort.exp'),
+    (Join-Path $root 'out\cassotis_pinyin_transformer_ort.lib'),
+    (Join-Path $root 'out\cassotis_pinyin_transformer_ort.obj')
+)
+foreach ($artifact in $staleReleaseArtifacts) {
+    if (Test-Path -LiteralPath $artifact) {
+        Remove-Item -LiteralPath $artifact -Force
+    }
 }
 
 Write-Host "[pinyin-transformer] built $output"

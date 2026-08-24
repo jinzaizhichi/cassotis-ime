@@ -400,14 +400,15 @@ const
         '    value TEXT NOT NULL' + sLineBreak +
         ');' + sLineBreak +
         sLineBreak +
-        'INSERT OR IGNORE INTO meta(key, value) VALUES(''schema_version'', ''22'');' + sLineBreak +
+        'INSERT OR IGNORE INTO meta(key, value) VALUES(''schema_version'', ''23'');' + sLineBreak +
         sLineBreak +
         'CREATE TABLE IF NOT EXISTS dict_base (' + sLineBreak +
         '    id INTEGER PRIMARY KEY AUTOINCREMENT,' + sLineBreak +
         '    pinyin TEXT NOT NULL,' + sLineBreak +
         '    text TEXT NOT NULL,' + sLineBreak +
         '    weight INTEGER DEFAULT 0,' + sLineBreak +
-        '    comment TEXT DEFAULT ''''' + sLineBreak +
+        '    comment TEXT DEFAULT '''',' + sLineBreak +
+        '    contains_popularity_eligible INTEGER NOT NULL DEFAULT 1' + sLineBreak +
         ');' + sLineBreak +
         sLineBreak +
         'CREATE INDEX IF NOT EXISTS idx_dict_base_pinyin ON dict_base(pinyin);' + sLineBreak +
@@ -5356,6 +5357,16 @@ begin
         Exit;
     end;
 
+    if (not table_has_column('dict_base',
+        'contains_popularity_eligible')) and
+        (not connection.exec(
+        'ALTER TABLE dict_base ADD COLUMN ' +
+        'contains_popularity_eligible INTEGER NOT NULL DEFAULT 1;')) then
+    begin
+        Result := False;
+        Exit;
+    end;
+
     if not connection.exec(
         'CREATE TABLE IF NOT EXISTS dict_jianpin (' +
         'id INTEGER PRIMARY KEY AUTOINCREMENT,' +
@@ -6027,6 +6038,11 @@ begin
     if schema_version < 22 then
     begin
         set_schema_version(connection, 22);
+    end;
+
+    if schema_version < 23 then
+    begin
+        set_schema_version(connection, 23);
     end;
 
     Result := True;
