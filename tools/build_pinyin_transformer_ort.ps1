@@ -9,10 +9,10 @@ $root = Split-Path -Parent $PSScriptRoot
 $source = Join-Path $root 'src\host\native\nc_pinyin_transformer_ort.cpp'
 $include = Join-Path $root 'third_party\onnxruntime\include'
 $onnxLibrary = Join-Path $root 'third_party\onnxruntime\win64\onnxruntime.lib'
-$output = Join-Path $root 'out\nc_pinyin_transformer_ort.dll'
-$object = Join-Path $root 'out\nc_pinyin_transformer_ort.obj'
-$importLibrary = Join-Path $root 'out\nc_pinyin_transformer_ort.lib'
-$pdb = Join-Path $root 'out\nc_pinyin_transformer_ort.pdb'
+$output = Join-Path $root 'out\cassotis_pinyin_transformer_ort.dll'
+$object = Join-Path $root 'out\cassotis_pinyin_transformer_ort.obj'
+$importLibrary = Join-Path $root 'out\cassotis_pinyin_transformer_ort.lib'
+$pdb = Join-Path $root 'out\cassotis_pinyin_transformer_ort.pdb'
 $vcvars = $VcVarsPath
 if ($vcvars.Trim() -eq '') {
     $vcvars = @(

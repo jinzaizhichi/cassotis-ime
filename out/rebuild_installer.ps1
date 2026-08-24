@@ -78,11 +78,13 @@ $requiredFiles = @(
     'out\cassotis_ime_svr32.dll',
     'out\cassotis_ime_profile_reg.exe',
     'out\sqlite3_64.dll',
-    'out\nc_pinyin_transformer_ort.dll',
+    'out\cassotis_pinyin_transformer_ort.dll',
     'out\onnxruntime.dll',
     'out\onnxruntime_providers_shared.dll',
     'out\pinyin_transformer\pinyin_difference_reranker_int8.onnx',
-    'out\pinyin_transformer\vocab.json'
+    'out\pinyin_transformer\vocab.json',
+    'third_party\onnxruntime\LICENSE',
+    'third_party\onnxruntime\ThirdPartyNotices.txt'
 )
 
 foreach ($relativePath in $requiredFiles) {
@@ -96,7 +98,7 @@ $runtimeFingerprintFiles = @(
     'out\cassotis_ime_svr32.dll',
     'out\cassotis_ime_profile_reg.exe',
     'out\sqlite3_64.dll',
-    'out\nc_pinyin_transformer_ort.dll',
+    'out\cassotis_pinyin_transformer_ort.dll',
     'out\onnxruntime.dll',
     'out\onnxruntime_providers_shared.dll',
     'out\pinyin_transformer\pinyin_difference_reranker_int8.onnx',

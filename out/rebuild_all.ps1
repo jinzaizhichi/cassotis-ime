@@ -969,6 +969,18 @@ function build_and_copy_pinyin_transformer_runtime
     }
     Copy-Item -Force -LiteralPath (Join-Path $runtime_source 'onnxruntime.dll') -Destination $script_dir
     Copy-Item -Force -LiteralPath (Join-Path $runtime_source 'onnxruntime_providers_shared.dll') -Destination $script_dir
+    foreach ($legacy_name in @(
+        'nc_pinyin_transformer_ort.dll',
+        'cassotis_onnxruntime.dll',
+        'cassotis_onnxruntime_providers_shared.dll'
+    ))
+    {
+        $legacy_path = Join-Path $script_dir $legacy_name
+        if (Test-Path -LiteralPath $legacy_path)
+        {
+            Remove-Item -Force -LiteralPath $legacy_path
+        }
+    }
     New-Item -ItemType Directory -Force -Path $model_target | Out-Null
     Copy-Item -Force -LiteralPath (Join-Path $model_source 'pinyin_difference_reranker_int8.onnx') -Destination $model_target
     Copy-Item -Force -LiteralPath (Join-Path $model_source 'vocab.json') -Destination $model_target

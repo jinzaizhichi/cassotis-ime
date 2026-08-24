@@ -624,7 +624,7 @@ begin
     destroy_local := nil;
     try
         wrapper_path := TPath.Combine(m_base_directory,
-            'nc_pinyin_transformer_ort.dll');
+            'cassotis_pinyin_transformer_ort.dll');
         runtime_path := TPath.Combine(m_base_directory, 'onnxruntime.dll');
         provider_path := TPath.Combine(m_base_directory,
             'onnxruntime_providers_shared.dll');
