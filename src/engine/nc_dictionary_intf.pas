@@ -20,6 +20,9 @@ type
             out results: TncOneKeyCompletionList): Boolean; virtual;
         function lookup_long_one_key_completions(const anchor_path: string;
             out results: TncLongOneKeyCompletionList): Boolean; virtual;
+        function lookup_long_one_key_completions_by_text(
+            const anchor_text: string;
+            out results: TncLongOneKeyCompletionList): Boolean; virtual;
         function lookup_one_key_completion_competition(
             const pinyin_prefix: string; const left_context: string;
             out results: TncOneKeyCompletionCompetitionEvidenceList): Boolean; virtual;
@@ -140,6 +143,14 @@ end;
 
 function TncDictionaryProvider.lookup_long_one_key_completions(
     const anchor_path: string;
+    out results: TncLongOneKeyCompletionList): Boolean;
+begin
+    SetLength(results, 0);
+    Result := False;
+end;
+
+function TncDictionaryProvider.lookup_long_one_key_completions_by_text(
+    const anchor_text: string;
     out results: TncLongOneKeyCompletionList): Boolean;
 begin
     SetLength(results, 0);

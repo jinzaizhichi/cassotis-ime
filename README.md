@@ -29,7 +29,7 @@ The project focus is:
 - TSF text service pipeline is available (registration, activation, composition lifecycle).
 - TSF binaries support Win64 and Win32 (`svr.dll` / `svr32.dll`), while host process is Win64 only.
 - Candidate window, paging, selection, and commit flow are implemented.
-- Cassotis' original one-key completion displays exactly one trusted continuation and accepts it with the configured key. It prioritizes exact completion from the user and base dictionaries, then falls back to offline-vetted strong-transition completion.
+- Cassotis' original one-key completion displays exactly one trusted continuation and accepts it with the configured key. It prioritizes exact completion from the user and base dictionaries, then falls back to offline-vetted strong-transition completion. On long-sentence static misses, a constrained local model can review exact-lexicon suffix paths asynchronously and abstains when confidence is insufficient.
 - Full Pinyin and six selectable Double Pinyin schemes—Microsoft, Xiaohe, Ziranma, Sogou, Ziguang, and Pinyin Jiajia—share the same candidate ranking and user-learning data.
 - Configurable fuzzy Pinyin is supported for common initial and final pairs.
 - Dictionary split is supported: simplified base DB, traditional base DB, and user DB.
@@ -121,9 +121,11 @@ Cassotis v1.14.0 expands exact-word-anchored recovery into a controlled complete
 
 Cassotis v1.15.0 consolidates long-sentence Top1/Top2 decisions in a corpus-trained final arbiter and expands evidence for short-word context reranking, changing order only when the learned advantage is clear.
 
+Cassotis v1.18.0 adds a constrained neural fallback for long-sentence local continuation. The 13.82M-parameter ranker compares at most 32 suffix paths composed only of exact lexicon words, and either returns one to three words within six syllables or abstains. Existing static completion remains the zero-cost first tier; only misses are queued to a background CPU worker in `cassotis_ime_host.exe`, and stale or low-confidence results are discarded.
+
 To keep the deeper ranking pipeline responsive, search, second-stage ranking, residual comparison, and final selection reuse character-LM scores, exact dictionary lookups, path features, and context features. Expensive consensus and lookup work uses shared caches and explicit time budgets to limit long-tail latency. Exact and prefix candidate visibility remains protected, while repeated work across ranking stages is avoided.
 
-The statistical model is quantized into the local dictionary database, while the compact rerankers are exported as deterministic native Pascal parameters. Runtime scoring is local and bounded: it starts no PyTorch/ONNX environment or external model service and requires no network connection or GPU. Long-sentence and short-word ranking remain separate paths, so improvements to one do not replace the other's matching rules.
+Statistical priors are quantized into the local dictionary database, while most compact rerankers are exported as deterministic native Pascal parameters. The v1.18.0 continuation fallback uses an INT8 weight-quantized, mixed-precision ONNX model; ONNX Runtime is loaded only by the external host process, never by the TSF DLL. Runtime scoring remains local and bounded, requires no network or GPU, and falls back to the existing result while the model is loading or unavailable. Long-sentence and short-word ranking remain separate paths, so improvements to one do not replace the other's matching rules.
 
 ## Long Sentence Benchmark-16300
 See [BENCHMARK.md](BENCHMARK.md) for the Benchmark-16300 methodology, corpus source, and scoring rules.
@@ -200,7 +202,7 @@ Public results retain four columns only: `Completion Hit`, `Avg Keys Saved`, `St
 | `v1.15.0` | 7265/12831 (56.62%) | 2.542 | 1278/1323 (96.60%) | 0.777 |
 
 ## Long-sentence One-key Completion Benchmark-16300
-This benchmark leaves the final four complete Pinyin syllables untyped in the fixed long-sentence corpus and evaluates the single completion actually shown. It uses strict single-reference scoring, so a plausible continuation that differs from the source sentence is still counted as a miss. See [BENCHMARK.md](BENCHMARK.md) for the full protocol.
+This benchmark leaves the final four complete Pinyin syllables untyped and evaluates the single completion actually shown. A hit must correctly extend the intended prefix while remaining a prefix of the reference sentence; it need not complete the entire sentence in one step. See [BENCHMARK.md](BENCHMARK.md) for the full protocol.
 
 | Version | Completion Hit | Avg Keys Saved | Stability | P95 (ms) |
 | --- | --- | --- | --- | --- |
@@ -208,6 +210,8 @@ This benchmark leaves the final four complete Pinyin syllables untyped in the fi
 | `v1.16.0` | 10/16300 (0.06%) | 7.100 | 1/13 (7.69%) | 38.831 |
 
 `v1.16.0` predates the dedicated long-sentence completion path and is retained as a historical baseline.
+
+The `v1.16.0` and `v1.17.0` rows use the legacy whole-sentence exact criterion. Local-continuation scoring starts with the next published result, so the two protocols must not be compared directly.
 
 ## Configuration
 Default config file:

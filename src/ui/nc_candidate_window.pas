@@ -1422,7 +1422,8 @@ begin
         completion_key_width := Canvas.TextWidth(completion_key_text);
         completion_anchor_width := 0;
         completion_suffix_width := 0;
-        if (m_one_key_completion_source = okcs_long_transition) and
+        if (m_one_key_completion_source in
+            [okcs_long_transition, okcs_long_neural]) and
             (m_one_key_completion_anchor_text <> '') and
             (m_one_key_completion_suffix_text <> '') then
         begin
@@ -1654,7 +1655,8 @@ begin
             completion_text_rect.Left := completion_key_rect.Right +
                 nc_scale_for_dpi(8, m_current_dpi);
             completion_text_rect.Right := brand_rect.Left - brand_gap;
-            if (m_one_key_completion_source = okcs_long_transition) and
+            if (m_one_key_completion_source in
+                [okcs_long_transition, okcs_long_neural]) and
                 (m_one_key_completion_anchor_text <> '') and
                 (m_one_key_completion_suffix_text <> '') then
             begin
@@ -1691,7 +1693,8 @@ begin
                 assign_list_font_for_text(m_one_key_completion_text,
                     m_color_theme.text_color);
             end;
-            if (m_one_key_completion_source <> okcs_long_transition) or
+            if (not (m_one_key_completion_source in
+                [okcs_long_transition, okcs_long_neural])) or
                 (m_one_key_completion_anchor_text = '') or
                 (m_one_key_completion_suffix_text = '') then
             begin

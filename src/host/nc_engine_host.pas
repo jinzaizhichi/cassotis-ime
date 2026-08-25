@@ -17,7 +17,8 @@ uses
     nc_candidate_window,
     nc_config,
     nc_ipc_common,
-    nc_caret_anchor_policy;
+    nc_caret_anchor_policy,
+    nc_local_completion_host;
 
 type
     TncEngineHost = class;
@@ -78,6 +79,10 @@ type
             const preedit_text: string;
             const one_key_completion: TncOneKeyCompletion);
         procedure clear_candidates;
+        function apply_long_neural_completion(
+            const task: TncLocalCompletionTask;
+            const completion_result: TncLongNeuralCompletionResult;
+            out new_generation: UInt64): Boolean;
         function has_candidates: Boolean;
         function has_dirty_candidates: Boolean;
         procedure apply_candidate_content_only(const candidate_generation: UInt64);
@@ -125,6 +130,7 @@ type
         m_next_session_instance_id: UInt64;
         m_config: TncEngineConfig;
         m_long_neural_reranker: IncLongNeuralReranker;
+        m_local_completion_host: TncLocalCompletionHost;
         m_last_lookup_perf_info: string;
         function get_config_write_time: TDateTime;
         procedure maybe_checkpoint_user_dictionary;
@@ -145,6 +151,11 @@ type
             const expected_activity_tick: UInt64; const reason: string): Boolean;
         procedure remove_session_prewarm_locked(const session_id: string);
         procedure remove_user_candidate(const session_id: string; const candidate_index: Integer);
+        procedure queue_long_neural_completion(
+            const session: TncHostSession);
+        procedure handle_long_neural_completion(
+            const task: TncLocalCompletionTask;
+            const completion_result: TncLongNeuralCompletionResult);
     public
         constructor create;
         destructor Destroy; override;
@@ -866,6 +877,11 @@ begin
         Inc(m_candidate_generation);
         m_candidate_dirty := True;
     end;
+    if changed and (m_owner <> nil) and
+        (m_one_key_completion.text = '') then
+    begin
+        m_owner.queue_long_neural_completion(Self);
+    end;
 end;
 
 procedure TncHostSession.clear_candidates;
@@ -877,6 +893,27 @@ begin
     m_selected_index := 0;
     m_preedit_text := '';
     Inc(m_candidate_generation);
+    m_candidate_dirty := True;
+end;
+
+function TncHostSession.apply_long_neural_completion(
+    const task: TncLocalCompletionTask;
+    const completion_result: TncLongNeuralCompletionResult;
+    out new_generation: UInt64): Boolean;
+begin
+    new_generation := m_candidate_generation;
+    Result := (task.session_instance_id = m_instance_id) and
+        (task.candidate_generation = m_candidate_generation) and
+        (not m_release_requested) and (m_engine <> nil) and
+        m_engine.apply_long_neural_completion(task.request,
+        completion_result);
+    if not Result then
+    begin
+        Exit;
+    end;
+    m_one_key_completion := m_engine.get_one_key_completion;
+    Inc(m_candidate_generation);
+    new_generation := m_candidate_generation;
     m_candidate_dirty := True;
 end;
 
@@ -1181,6 +1218,51 @@ begin
     end;
 end;
 
+procedure TncEngineHost.queue_long_neural_completion(
+    const session: TncHostSession);
+var
+    task: TncLocalCompletionTask;
+begin
+    if (session = nil) or (session.engine = nil) or
+        (m_local_completion_host = nil) then
+    begin
+        Exit;
+    end;
+    task := Default(TncLocalCompletionTask);
+    if not session.engine.get_long_neural_completion_request(
+        task.request) then
+    begin
+        Exit;
+    end;
+    task.session_id := session.m_session_id;
+    task.session_instance_id := session.instance_id;
+    task.candidate_generation := session.candidate_generation;
+    m_local_completion_host.enqueue(task);
+end;
+
+procedure TncEngineHost.handle_long_neural_completion(
+    const task: TncLocalCompletionTask;
+    const completion_result: TncLongNeuralCompletionResult);
+var
+    session: TncHostSession;
+    new_generation: UInt64;
+begin
+    m_lock.Acquire;
+    try
+        if (not m_sessions.TryGetValue(task.session_id, session)) or
+            (not m_active_sessions.ContainsKey(task.session_id)) or
+            (session.instance_id <> task.session_instance_id) or
+            (not session.apply_long_neural_completion(task,
+            completion_result, new_generation)) then
+        begin
+            Exit;
+        end;
+        session.apply_candidate_content_only(new_generation);
+    finally
+        m_lock.Release;
+    end;
+end;
+
 constructor TncEngineHost.create;
 begin
     inherited create;
@@ -1207,6 +1289,13 @@ begin
     m_next_session_instance_id := 0;
     m_long_neural_reranker := TncPinyinTransformerHostReranker.create(
         ExtractFileDir(ParamStr(0)), True);
+    m_local_completion_host := TncLocalCompletionHost.create(
+        ExtractFileDir(ParamStr(0)),
+        procedure(const task: TncLocalCompletionTask;
+            const completion_result: TncLongNeuralCompletionResult)
+        begin
+            handle_long_neural_completion(task, completion_result);
+        end);
     with TncConfigManager.create(m_config_path) do
     try
         m_config := load_engine_config;
@@ -1241,6 +1330,11 @@ begin
             m_maintenance_thread.FreeOnTerminate := True;
             m_maintenance_thread := nil;
         end;
+    end;
+    if m_local_completion_host <> nil then
+    begin
+        m_local_completion_host.Free;
+        m_local_completion_host := nil;
     end;
     if m_standby_session <> nil then
     begin

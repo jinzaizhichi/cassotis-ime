@@ -59,7 +59,8 @@ type
         okcs_user_exact,
         okcs_base_exact,
         okcs_transition,
-        okcs_long_transition
+        okcs_long_transition,
+        okcs_long_neural
     );
 
     TncOneKeyCompletion = record
@@ -87,6 +88,7 @@ type
     TncOneKeyCompletionList = array of TncOneKeyCompletion;
 
     TncLongOneKeyCompletion = record
+        anchor_text: string;
         anchor_path: string;
         suffix_pinyin: string;
         suffix_text: string;

@@ -391,6 +391,26 @@ type
 
     TncLongFinalCandidateDebugArray = TArray<TncLongFinalCandidateDebug>;
 
+    TncLongNeuralCompletionRequest = record
+        query_prefix: string;
+        query_syllables: string;
+        context_text: string;
+        top1_text: string;
+        top1_path: string;
+        top1_anchor_path: string;
+        top2_text: string;
+        top2_path: string;
+        top2_anchor_path: string;
+    end;
+
+    TncLongNeuralCompletionResult = record
+        suffix_text: string;
+        suffix_pinyin_path: string;
+        suffix_path: string;
+        base_rank: Integer;
+        confidence: Single;
+    end;
+
     IncLongNeuralReranker = interface
         ['{B4FC23F4-4F65-4F8B-A3E8-A69442BA57A1}']
         function try_select(const query_text: string;
@@ -531,6 +551,8 @@ type
         m_debug_capture_long_one_key_completion_pool: Boolean;
         m_one_key_completion_query_prefix: string;
         m_one_key_completion_score: Integer;
+        m_long_neural_completion_request: TncLongNeuralCompletionRequest;
+        m_has_long_neural_completion_request: Boolean;
         m_completion_feedback_origin_prefix: string;
         m_allow_one_key_completion_lookup: Boolean;
         m_visible_candidates_cache: TncCandidateList;
@@ -1035,6 +1057,11 @@ type
         function process_key(const key_code: Word; const key_state: TncKeyState): Boolean;
         function get_candidates: TncCandidateList;
         function get_one_key_completion: TncOneKeyCompletion;
+        function get_long_neural_completion_request(
+            out request: TncLongNeuralCompletionRequest): Boolean;
+        function apply_long_neural_completion(
+            const request: TncLongNeuralCompletionRequest;
+            const completion_result: TncLongNeuralCompletionResult): Boolean;
         function get_page_index: Integer;
         function get_page_count: Integer;
         function get_selected_index: Integer;
@@ -5442,6 +5469,9 @@ begin
     SetLength(m_debug_long_one_key_completion_pool, 0);
     m_one_key_completion_query_prefix := '';
     m_one_key_completion_score := Low(Integer);
+    m_long_neural_completion_request :=
+        Default(TncLongNeuralCompletionRequest);
+    m_has_long_neural_completion_request := False;
 end;
 
 procedure TncEngine.clear_one_key_completion_feedback_target;
@@ -5496,6 +5526,7 @@ type
     end;
     TncLongCompletionAnchor = record
         path_text: string;
+        text: string;
         segment_count: Integer;
     end;
     TncLongCompletionScoredItem = record
@@ -5511,6 +5542,10 @@ var
     top_index: Integer;
     second_index: Integer;
     top_path: string;
+    second_path: string;
+    top1_anchor_path: string;
+    top2_anchor_path: string;
+    query_syllable_text: string;
     top_analysis: TncLongCompletionPathAnalysis;
     second_analysis: TncLongCompletionPathAnalysis;
     anchors: TArray<TncLongCompletionAnchor>;
@@ -5535,6 +5570,29 @@ var
     best_score: Integer;
     second_best_score: Integer;
     suffix_compact_pinyin: string;
+
+    function build_query_syllable_text: string;
+    var
+        syllable_idx: Integer;
+        syllable_text: string;
+    begin
+        Result := '';
+        for syllable_idx := 0 to High(syllables) do
+        begin
+            syllable_text := normalize_pinyin_text(
+                syllables[syllable_idx].text);
+            if syllable_text = '' then
+            begin
+                Result := '';
+                Exit;
+            end;
+            if Result <> '' then
+            begin
+                Result := Result + '''';
+            end;
+            Result := Result + syllable_text;
+        end;
+    end;
 
     function is_complete_candidate(const candidate_idx: Integer): Boolean;
     begin
@@ -5645,6 +5703,57 @@ var
         end;
     end;
 
+    function exact_anchor_path_matches_query_tail(
+        const path_text: string): Boolean;
+    var
+        path_segments: TArray<string>;
+        segment_text: string;
+        segment_units: Integer;
+        total_units: Integer;
+        syllable_pos: Integer;
+        segment_idx: Integer;
+        segment_query: string;
+    begin
+        Result := False;
+        path_segments := path_text.Split([#3],
+            TStringSplitOptions.ExcludeEmpty);
+        if Length(path_segments) = 0 then
+        begin
+            Exit;
+        end;
+        total_units := 0;
+        for segment_text in path_segments do
+        begin
+            segment_units := get_candidate_text_unit_count(
+                Trim(segment_text));
+            if segment_units <= 0 then
+            begin
+                Exit;
+            end;
+            Inc(total_units, segment_units);
+        end;
+        syllable_pos := Length(syllables) - total_units;
+        if syllable_pos < 0 then
+        begin
+            Exit;
+        end;
+        for segment_idx := 0 to High(path_segments) do
+        begin
+            segment_text := Trim(path_segments[segment_idx]);
+            segment_units := get_candidate_text_unit_count(segment_text);
+            segment_query := query_key_for_span(syllable_pos,
+                segment_units);
+            if (segment_query = '') or
+                (not m_dictionary.is_base_entry(segment_query,
+                segment_text)) then
+            begin
+                Exit;
+            end;
+            Inc(syllable_pos, segment_units);
+        end;
+        Result := syllable_pos = Length(syllables);
+    end;
+
     function analysis_ends_with_path(
         const analysis: TncLongCompletionPathAnalysis;
         const path_text: string): Boolean;
@@ -5678,20 +5787,22 @@ var
         Result := True;
     end;
 
-    procedure append_anchor(const path_text: string;
+    procedure append_anchor(const path_text, anchor_text: string;
         const segment_count: Integer);
     var
         idx: Integer;
     begin
         for idx := 0 to High(anchors) do
         begin
-            if SameText(anchors[idx].path_text, path_text) then
+            if SameText(anchors[idx].path_text, path_text) and
+                SameText(anchors[idx].text, anchor_text) then
             begin
                 Exit;
             end;
         end;
         SetLength(anchors, Length(anchors) + 1);
         anchors[High(anchors)].path_text := path_text;
+        anchors[High(anchors)].text := anchor_text;
         anchors[High(anchors)].segment_count := segment_count;
     end;
 
@@ -5710,17 +5821,92 @@ var
         debug_used: TArray<Boolean>;
         candidate_analysis: TncLongCompletionPathAnalysis;
         candidate_path: string;
-        candidate_anchor: string;
+        candidate_anchor_text: string;
         candidate_results: TncLongOneKeyCompletionList;
+        candidate_units: TArray<string>;
         candidate_idx: Integer;
-        segment_count: Integer;
-        completion_idx: Integer;
-        existing_idx: Integer;
+        anchor_unit_count: Integer;
+        unit_idx: Integer;
         debug_idx: Integer;
         debug_rank: Integer;
         debug_best_idx: Integer;
-        debug_item: TncLongCompletionDebugItem;
-        suffix_key: string;
+
+        procedure append_candidate_completions(const specificity: Integer);
+        var
+            local_completion_idx: Integer;
+            local_existing_idx: Integer;
+            local_debug_idx: Integer;
+            local_debug_item: TncLongCompletionDebugItem;
+            local_suffix_key: string;
+        begin
+            for local_completion_idx := 0 to High(candidate_results) do
+            begin
+                if (candidate_results[local_completion_idx].evidence <= 0) or
+                    (candidate_results[local_completion_idx].source_count < 1) or
+                    (Trim(candidate_results[local_completion_idx].suffix_text) = '') or
+                    (not exact_anchor_path_matches_query_tail(
+                    candidate_results[local_completion_idx].anchor_path)) then
+                begin
+                    Continue;
+                end;
+                local_suffix_key := normalize_pinyin_text(
+                    candidate_results[local_completion_idx].suffix_pinyin);
+                if local_suffix_key = '' then
+                begin
+                    Continue;
+                end;
+                local_debug_item := Default(TncLongCompletionDebugItem);
+                local_debug_item.completion.anchor_text :=
+                    Trim(m_candidates[candidate_idx].text);
+                local_debug_item.completion.suffix_text :=
+                    candidate_results[local_completion_idx].suffix_text;
+                local_debug_item.completion.anchor_path :=
+                    candidate_results[local_completion_idx].anchor_path;
+                local_debug_item.completion.text :=
+                    local_debug_item.completion.anchor_text +
+                    local_debug_item.completion.suffix_text;
+                local_debug_item.completion.full_pinyin := compact_query +
+                    local_suffix_key;
+                local_debug_item.completion.path_text := candidate_path + #3 +
+                    candidate_results[local_completion_idx].suffix_path;
+                local_debug_item.completion.source_count :=
+                    candidate_results[local_completion_idx].source_count;
+                local_debug_item.completion.feedback_count :=
+                    candidate_results[local_completion_idx].feedback_count;
+                local_debug_item.completion.feedback_reject_count :=
+                    candidate_results[local_completion_idx].feedback_reject_count;
+                local_debug_item.completion.prefix_anchored := True;
+                local_debug_item.completion.source := okcs_long_transition;
+                local_debug_item.score :=
+                    (candidate_results[local_completion_idx].evidence * 8) +
+                    (Min(candidate_results[local_completion_idx].source_count,
+                    64) * 3) + (specificity * 24) -
+                    (candidate_idx * 96);
+                local_debug_item.completion.weight := local_debug_item.score;
+                local_existing_idx := -1;
+                for local_debug_idx := 0 to High(debug_items) do
+                begin
+                    if SameText(debug_items[local_debug_idx].completion.text,
+                        local_debug_item.completion.text) and
+                        SameText(debug_items[local_debug_idx].completion.full_pinyin,
+                        local_debug_item.completion.full_pinyin) then
+                    begin
+                        local_existing_idx := local_debug_idx;
+                        Break;
+                    end;
+                end;
+                if local_existing_idx < 0 then
+                begin
+                    SetLength(debug_items, Length(debug_items) + 1);
+                    debug_items[High(debug_items)] := local_debug_item;
+                end
+                else if local_debug_item.score >
+                    debug_items[local_existing_idx].score then
+                begin
+                    debug_items[local_existing_idx] := local_debug_item;
+                end;
+            end;
+        end;
     begin
         SetLength(m_debug_long_one_key_completion_pool, 0);
         SetLength(debug_items, 0);
@@ -5738,86 +5924,26 @@ var
             begin
                 Continue;
             end;
-            for segment_count := Min(c_max_anchor_segments,
-                Length(candidate_analysis.segments)) downto 1 do
+            candidate_units := split_text_units(
+                Trim(m_candidates[candidate_idx].text));
+            for anchor_unit_count := Min(8,
+                Length(candidate_units)) downto 1 do
             begin
-                if not exact_suffix_path(candidate_analysis, segment_count,
-                    candidate_anchor) then
+                candidate_anchor_text := '';
+                for unit_idx := Length(candidate_units) - anchor_unit_count to
+                    High(candidate_units) do
                 begin
-                    Continue;
+                    candidate_anchor_text := candidate_anchor_text +
+                        candidate_units[unit_idx];
                 end;
                 SetLength(candidate_results, 0);
-                if not m_dictionary.lookup_long_one_key_completions(
-                    candidate_anchor, candidate_results) then
+                if not m_dictionary.lookup_long_one_key_completions_by_text(
+                    candidate_anchor_text, candidate_results) then
                 begin
                     Continue;
                 end;
-                for completion_idx := 0 to High(candidate_results) do
-                begin
-                    if (candidate_results[completion_idx].evidence <
-                        c_min_evidence) or
-                        (candidate_results[completion_idx].source_count <
-                        c_min_source_count) or
-                        (Trim(candidate_results[completion_idx].suffix_text) =
-                        '') then
-                    begin
-                        Continue;
-                    end;
-                    suffix_key := normalize_pinyin_text(
-                        candidate_results[completion_idx].suffix_pinyin);
-                    if suffix_key = '' then
-                    begin
-                        Continue;
-                    end;
-                    debug_item := Default(TncLongCompletionDebugItem);
-                    debug_item.completion.anchor_text :=
-                        Trim(m_candidates[candidate_idx].text);
-                    debug_item.completion.suffix_text :=
-                        candidate_results[completion_idx].suffix_text;
-                    debug_item.completion.anchor_path := candidate_anchor;
-                    debug_item.completion.text :=
-                        debug_item.completion.anchor_text +
-                        debug_item.completion.suffix_text;
-                    debug_item.completion.full_pinyin := compact_query +
-                        suffix_key;
-                    debug_item.completion.path_text := candidate_path + #3 +
-                        candidate_results[completion_idx].suffix_path;
-                    debug_item.completion.source_count :=
-                        candidate_results[completion_idx].source_count;
-                    debug_item.completion.feedback_count :=
-                        candidate_results[completion_idx].feedback_count;
-                    debug_item.completion.feedback_reject_count :=
-                        candidate_results[completion_idx].feedback_reject_count;
-                    debug_item.completion.prefix_anchored := True;
-                    debug_item.completion.source := okcs_long_transition;
-                    debug_item.score :=
-                        (candidate_results[completion_idx].evidence * 8) +
-                        (Min(candidate_results[completion_idx].source_count,
-                        64) * 3) + (segment_count * 24) -
-                        (candidate_idx * 96);
-                    debug_item.completion.weight := debug_item.score;
-                    existing_idx := -1;
-                    for debug_idx := 0 to High(debug_items) do
-                    begin
-                        if SameText(debug_items[debug_idx].completion.text,
-                            debug_item.completion.text) and
-                            SameText(debug_items[debug_idx].completion.full_pinyin,
-                            debug_item.completion.full_pinyin) then
-                        begin
-                            existing_idx := debug_idx;
-                            Break;
-                        end;
-                    end;
-                    if existing_idx < 0 then
-                    begin
-                        SetLength(debug_items, Length(debug_items) + 1);
-                        debug_items[High(debug_items)] := debug_item;
-                    end
-                    else if debug_item.score > debug_items[existing_idx].score then
-                    begin
-                        debug_items[existing_idx] := debug_item;
-                    end;
-                end;
+                append_candidate_completions(Min(c_max_anchor_segments,
+                    Max(1, (anchor_unit_count + 1) div 2)));
             end;
         end;
 
@@ -5887,11 +6013,78 @@ begin
     begin
         Exit;
     end;
+    if m_debug_capture_long_one_key_completion_pool then
+    begin
+        capture_debug_completion_pool;
+    end;
 
     second_analysis := Default(TncLongCompletionPathAnalysis);
+    second_path := '';
     if second_index >= 0 then
     begin
-        analyze_candidate_path(second_index, second_analysis);
+        if analyze_candidate_path(second_index, second_analysis) then
+        begin
+            second_path := Trim(get_segment_path_for_candidate(
+                m_candidates[second_index], second_index));
+        end;
+    end;
+
+    top1_anchor_path := '';
+    for anchor_segment_count := Min(c_max_anchor_segments,
+        Length(top_analysis.segments)) downto 1 do
+    begin
+        if exact_suffix_path(top_analysis, anchor_segment_count,
+            top1_anchor_path) then
+        begin
+            Break;
+        end;
+    end;
+    top2_anchor_path := '';
+    if second_analysis.valid then
+    begin
+        for anchor_segment_count := Min(c_max_anchor_segments,
+            Length(second_analysis.segments)) downto 1 do
+        begin
+            if exact_suffix_path(second_analysis, anchor_segment_count,
+                top2_anchor_path) then
+            begin
+                Break;
+            end;
+        end;
+    end;
+    query_syllable_text := build_query_syllable_text;
+    if (top1_anchor_path <> '') and (query_syllable_text <> '') then
+    begin
+        context_value := m_left_context;
+        if m_segment_left_context <> '' then
+        begin
+            context_value := m_segment_left_context;
+        end
+        else if m_external_left_context <> '' then
+        begin
+            context_value := m_external_left_context;
+        end;
+        m_long_neural_completion_request :=
+            Default(TncLongNeuralCompletionRequest);
+        m_long_neural_completion_request.query_prefix := compact_query;
+        m_long_neural_completion_request.query_syllables :=
+            query_syllable_text;
+        m_long_neural_completion_request.context_text :=
+            trim_left_context_to_sentence(context_value, c_context_length);
+        m_long_neural_completion_request.top1_text :=
+            Trim(m_candidates[top_index].text);
+        m_long_neural_completion_request.top1_path := top_path;
+        m_long_neural_completion_request.top1_anchor_path :=
+            top1_anchor_path;
+        if (second_index >= 0) and (top2_anchor_path <> '') then
+        begin
+            m_long_neural_completion_request.top2_text :=
+                Trim(m_candidates[second_index].text);
+            m_long_neural_completion_request.top2_path := second_path;
+            m_long_neural_completion_request.top2_anchor_path :=
+                top2_anchor_path;
+        end;
+        m_has_long_neural_completion_request := True;
     end;
     top1_strong := (second_index < 0) or
         (Int64(m_candidates[top_index].score) -
@@ -5911,7 +6104,10 @@ begin
         if analysis_ends_with_path(second_analysis, anchor.path_text) or
             top1_strong then
         begin
-            append_anchor(anchor.path_text, anchor.segment_count);
+            anchor.text := StringReplace(anchor.path_text, #3, '',
+                [rfReplaceAll]);
+            append_anchor(anchor.path_text, anchor.text,
+                anchor.segment_count);
         end;
     end;
     if Length(anchors) = 0 then
@@ -5923,8 +6119,12 @@ begin
     for anchor_idx := 0 to High(anchors) do
     begin
         SetLength(anchor_results, 0);
-        if not m_dictionary.lookup_long_one_key_completions(
-            anchors[anchor_idx].path_text, anchor_results) then
+        if anchors[anchor_idx].path_text <> '' then
+        begin
+            m_dictionary.lookup_long_one_key_completions(
+                anchors[anchor_idx].path_text, anchor_results);
+        end;
+        if Length(anchor_results) = 0 then
         begin
             Continue;
         end;
@@ -5934,6 +6134,8 @@ begin
                 (anchor_results[result_idx].source_count <
                 c_min_source_count) or
                 (Trim(anchor_results[result_idx].suffix_text) = '') or
+                (not exact_anchor_path_matches_query_tail(
+                anchor_results[result_idx].anchor_path)) or
                 (anchor_results[result_idx].feedback_reject_count >
                 anchor_results[result_idx].feedback_count + 6) then
             begin
@@ -5953,6 +6155,10 @@ begin
             item := Default(TncLongCompletionScoredItem);
             item.value := anchor_results[result_idx];
             item.anchor := anchors[anchor_idx];
+            if Trim(item.value.anchor_path) <> '' then
+            begin
+                item.anchor.path_text := item.value.anchor_path;
+            end;
             item.score := (item.value.evidence * 8) +
                 (Min(item.value.source_count, 64) * 3) +
                 (item.anchor.segment_count * 24) +
@@ -6038,10 +6244,6 @@ begin
         end;
     end;
 
-    if m_debug_capture_long_one_key_completion_pool then
-    begin
-        capture_debug_completion_pool;
-    end;
     if (best_idx < 0) or ((second_best_idx >= 0) and
         (best_score - second_best_score < c_min_winner_margin)) then
     begin
@@ -6053,8 +6255,7 @@ begin
         SetLength(anchor_lm_texts, 1);
         anchor_lm_texts[0] := items[best_idx].value.suffix_text;
         if get_cached_char_lm_scores(anchor_lm_texts, anchor_lm_scores,
-            clsm_context, StringReplace(
-            items[best_idx].anchor.path_text, #3, '', [rfReplaceAll])) and
+            clsm_context, items[best_idx].anchor.text) and
             (Length(anchor_lm_scores) = 1) and
             (char_lm_scores[best_idx] +
             c_context_contradiction_tolerance < anchor_lm_scores[0]) then
@@ -7762,6 +7963,8 @@ begin
         clear_one_key_completion_feedback_target;
     end
     else if (m_dictionary <> nil) and
+        (not (m_one_key_completion.source in
+        [okcs_long_transition, okcs_long_neural])) and
         (m_one_key_completion_query_prefix <> '') and
         (completion_pinyin <> '') then
     begin
@@ -7769,7 +7972,8 @@ begin
             m_one_key_completion_query_prefix, completion_pinyin,
             completion_text);
     end;
-    if m_one_key_completion.source = okcs_long_transition then
+    if m_one_key_completion.source in
+        [okcs_long_transition, okcs_long_neural] then
     begin
         clear_one_key_completion_feedback_target;
     end
@@ -188631,6 +188835,137 @@ end;
 function TncEngine.get_one_key_completion: TncOneKeyCompletion;
 begin
     Result := m_one_key_completion;
+end;
+
+function TncEngine.get_long_neural_completion_request(
+    out request: TncLongNeuralCompletionRequest): Boolean;
+begin
+    request := Default(TncLongNeuralCompletionRequest);
+    Result := m_has_long_neural_completion_request and
+        (m_one_key_completion.text = '') and
+        (m_long_neural_completion_request.query_prefix <> '') and
+        (m_long_neural_completion_request.query_syllables <> '') and
+        (m_long_neural_completion_request.top1_text <> '') and
+        (m_long_neural_completion_request.top1_anchor_path <> '');
+    if Result then
+    begin
+        request := m_long_neural_completion_request;
+    end;
+end;
+
+function TncEngine.apply_long_neural_completion(
+    const request: TncLongNeuralCompletionRequest;
+    const completion_result: TncLongNeuralCompletionResult): Boolean;
+var
+    suffix_segments: TArray<string>;
+    pinyin_segments: TArray<string>;
+    base_text: string;
+    base_path: string;
+    anchor_path: string;
+    suffix_text: string;
+    suffix_pinyin: string;
+    segment_text: string;
+    segment_pinyin: string;
+    segment_idx: Integer;
+    syllable_count: Integer;
+
+    function same_request(const left_value,
+        right_value: TncLongNeuralCompletionRequest): Boolean;
+    begin
+        Result := SameText(left_value.query_prefix,
+            right_value.query_prefix) and
+            SameText(left_value.query_syllables,
+            right_value.query_syllables) and
+            SameText(left_value.context_text,
+            right_value.context_text) and
+            SameText(left_value.top1_text, right_value.top1_text) and
+            SameText(left_value.top1_path, right_value.top1_path) and
+            SameText(left_value.top1_anchor_path,
+            right_value.top1_anchor_path) and
+            SameText(left_value.top2_text, right_value.top2_text) and
+            SameText(left_value.top2_path, right_value.top2_path) and
+            SameText(left_value.top2_anchor_path,
+            right_value.top2_anchor_path);
+    end;
+begin
+    Result := False;
+    if (m_dictionary = nil) or (m_one_key_completion.text <> '') or
+        (not m_has_long_neural_completion_request) or
+        (not same_request(request, m_long_neural_completion_request)) or
+        (completion_result.base_rank < 1) or
+        (completion_result.base_rank > 2) then
+    begin
+        Exit;
+    end;
+    if completion_result.base_rank = 1 then
+    begin
+        base_text := request.top1_text;
+        base_path := request.top1_path;
+        anchor_path := request.top1_anchor_path;
+    end
+    else
+    begin
+        base_text := request.top2_text;
+        base_path := request.top2_path;
+        anchor_path := request.top2_anchor_path;
+    end;
+    if (base_text = '') or (base_path = '') or (anchor_path = '') then
+    begin
+        Exit;
+    end;
+
+    suffix_segments := completion_result.suffix_path.Split([#3],
+        TStringSplitOptions.ExcludeEmpty);
+    pinyin_segments := completion_result.suffix_pinyin_path.Split([#3],
+        TStringSplitOptions.ExcludeEmpty);
+    if (Length(suffix_segments) < 1) or (Length(suffix_segments) > 3) or
+        (Length(pinyin_segments) <> Length(suffix_segments)) then
+    begin
+        Exit;
+    end;
+    suffix_text := '';
+    suffix_pinyin := '';
+    syllable_count := 0;
+    for segment_idx := 0 to High(suffix_segments) do
+    begin
+        segment_text := Trim(suffix_segments[segment_idx]);
+        segment_pinyin := normalize_pinyin_text(
+            pinyin_segments[segment_idx]);
+        if (segment_text = '') or (segment_pinyin = '') or
+            (not m_dictionary.is_base_entry(segment_pinyin,
+            segment_text)) then
+        begin
+            Exit;
+        end;
+        Inc(syllable_count,
+            get_effective_compact_pinyin_unit_count(segment_pinyin));
+        suffix_text := suffix_text + segment_text;
+        suffix_pinyin := suffix_pinyin + segment_pinyin;
+    end;
+    if (syllable_count < 1) or (syllable_count > 6) or
+        (not SameText(suffix_text,
+        Trim(completion_result.suffix_text))) then
+    begin
+        Exit;
+    end;
+
+    m_one_key_completion := Default(TncOneKeyCompletion);
+    m_one_key_completion.anchor_text := base_text;
+    m_one_key_completion.suffix_text := suffix_text;
+    m_one_key_completion.anchor_path := anchor_path;
+    m_one_key_completion.text := base_text + suffix_text;
+    m_one_key_completion.full_pinyin := request.query_prefix +
+        suffix_pinyin;
+    m_one_key_completion.path_text := base_path + #3 +
+        completion_result.suffix_path;
+    m_one_key_completion.weight := Round(
+        completion_result.confidence * 1000.0);
+    m_one_key_completion.prefix_anchored := True;
+    m_one_key_completion.source := okcs_long_neural;
+    m_one_key_completion_query_prefix := request.query_prefix;
+    m_one_key_completion_score := m_one_key_completion.weight;
+    m_has_long_neural_completion_request := False;
+    Result := True;
 end;
 
 function TncEngine.get_page_count_internal(const page_size: Integer): Integer;

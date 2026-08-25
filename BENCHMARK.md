@@ -119,11 +119,11 @@ This benchmark measures whether one-key completion can extend a partially decode
 - Reuse all 16,300 fixed long-sentence cases and their reviewed full Pinyin queries.
 - Leave the final four complete Pinyin syllables untyped while retaining at least the first four syllables as the visible composition prefix.
 - Decode that prefix in deterministic-work mode, then read only the single completion that the UI would display.
-- Count a hit only when accepting the displayed completion would produce the complete reference sentence exactly. Alternative plausible continuations remain misses because the corpus supplies one reference.
+- Count a local-continuation hit when the displayed result strictly extends the intended typed prefix and the whole displayed text remains a prefix of the reference sentence. The completion may stop after the next one to three local words; it does not have to reproduce the rest of the sentence in one step.
 - Disable the user dictionary and external document context, and use a snapshot of the simplified base dictionary selected for the tested release.
 - Query the immediately preceding syllable boundary before the scored query to measure whether a compatible completion remains stable as typing continues.
 
-The report uses the same four primary metrics as Benchmark-12831: completion hit rate, average keys saved by correct completions, incremental stability, and `P95` latency. Coverage and wrong-prompt counts are also retained for diagnosis.
+The report uses the same four primary metrics as Benchmark-12831: local-continuation hit rate, average keys saved by correct completions, incremental stability, and `P95` latency. Coverage, wrong-prompt counts, full-sentence exact hits, and internal-pool Oracle ranks are retained for diagnosis. Because the corpus supplies one reference, a plausible continuation with different wording still counts as a miss.
 
 ### Latency Protocol
 
@@ -142,7 +142,7 @@ These values quantify complete-query engine performance and long-tail cost. They
 
 ## Result Publication
 
-Version-specific results are published in `README.md`. The short-word completion benchmark begins with `v1.15.0`; the long-sentence completion benchmark begins with the first release formally evaluated under this protocol. Neither completion suite is backfilled for earlier releases. This document defines their shared source, case construction, accuracy scoring, and latency protocols.
+Version-specific results are published in `README.md`. The short-word completion benchmark begins with `v1.15.0`. Long-sentence completion results through `v1.17.0` used the legacy whole-sentence exact criterion; the local-continuation criterion starts with the next formally evaluated release and is not backfilled. This document defines their shared source, case construction, accuracy scoring, and latency protocols.
 
 ## Notes
 

@@ -1,11 +1,11 @@
--- cassotis ime sqlite schema v23
+-- cassotis ime sqlite schema v24
 
 CREATE TABLE IF NOT EXISTS meta (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL
 );
 
-INSERT OR IGNORE INTO meta(key, value) VALUES('schema_version', '23');
+INSERT OR IGNORE INTO meta(key, value) VALUES('schema_version', '24');
 
 CREATE TABLE IF NOT EXISTS dict_base (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -310,6 +310,20 @@ CREATE TABLE IF NOT EXISTS dict_base_long_completion (
 
 CREATE INDEX IF NOT EXISTS idx_dict_base_long_completion_anchor
 ON dict_base_long_completion(anchor_path, evidence DESC, source_count DESC);
+
+CREATE TABLE IF NOT EXISTS dict_base_long_completion_text (
+    anchor_text TEXT NOT NULL,
+    anchor_path TEXT NOT NULL,
+    suffix_pinyin TEXT NOT NULL,
+    suffix_text TEXT NOT NULL,
+    suffix_path TEXT NOT NULL,
+    evidence INTEGER NOT NULL DEFAULT 0,
+    source_count INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY(anchor_text, anchor_path, suffix_pinyin, suffix_text)
+) WITHOUT ROWID;
+
+CREATE INDEX IF NOT EXISTS idx_dict_base_long_completion_text_anchor
+ON dict_base_long_completion_text(anchor_text, evidence DESC, source_count DESC);
 
 CREATE TABLE IF NOT EXISTS dict_base_char_lm (
     ngram TEXT NOT NULL PRIMARY KEY,

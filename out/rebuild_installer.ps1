@@ -83,6 +83,9 @@ $requiredFiles = @(
     'out\onnxruntime_providers_shared.dll',
     'out\pinyin_transformer\pinyin_difference_reranker_int8.onnx',
     'out\pinyin_transformer\vocab.json',
+    'out\local_completion\local_completion_path_ranker_int8.onnx',
+    'out\local_completion\local_completion_index.bin',
+    'out\local_completion\model_manifest.json',
     'third_party\onnxruntime\LICENSE',
     'third_party\onnxruntime\ThirdPartyNotices.txt'
 )
@@ -102,7 +105,10 @@ $runtimeFingerprintFiles = @(
     'out\onnxruntime.dll',
     'out\onnxruntime_providers_shared.dll',
     'out\pinyin_transformer\pinyin_difference_reranker_int8.onnx',
-    'out\pinyin_transformer\vocab.json'
+    'out\pinyin_transformer\vocab.json',
+    'out\local_completion\local_completion_path_ranker_int8.onnx',
+    'out\local_completion\local_completion_index.bin',
+    'out\local_completion\model_manifest.json'
 )
 $fingerprintSource = ($runtimeFingerprintFiles | ForEach-Object {
     (Get-FileHash -LiteralPath (Join-Path $resolvedSourceRoot $_) -Algorithm SHA256).Hash
