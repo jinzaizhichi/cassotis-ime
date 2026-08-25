@@ -11,7 +11,7 @@
   <img src="snapshot.png" alt="Cassotis IME snapshot" width="550" height="442">
 </p>
 
-[English](README.md) | [簡體中文](README.zh-Hans.md) | 繁體中文
+[English](README.md) | [簡體中文](README.zh-Hans.md) | 繁體中文 | [Linux 版](https://github.com/shenmin/cassotis-ime-linux)
 
 Cassotis IME（言泉輸入法）是一款適用於 Windows 10/11 的實驗性中文拼音輸入法，主要以 Delphi 開發，並建構於 TSF（Text Services Framework）之上。
 
