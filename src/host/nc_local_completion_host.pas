@@ -23,6 +23,10 @@ type
         const task: TncLocalCompletionTask;
         const completion_result: TncLongNeuralCompletionResult);
 
+    TncLocalCompletionFinishedEvent = reference to procedure(
+        const task: TncLocalCompletionTask; const accepted: Boolean;
+        const completion_result: TncLongNeuralCompletionResult);
+
     TncLocalCompletionWorker = class(TThread)
     private
         m_owner: TncLocalCompletionHost;
@@ -61,6 +65,7 @@ type
         m_pending_task: TncLocalCompletionTask;
         m_has_pending_task: Boolean;
         m_result_event: TncLocalCompletionResultEvent;
+        m_finished_event: TncLocalCompletionFinishedEvent;
         m_module: HMODULE;
         m_onnx_runtime_module: HMODULE;
         m_onnx_provider_module: HMODULE;
@@ -75,15 +80,18 @@ type
         function pop_task(out task: TncLocalCompletionTask): Boolean;
         function run_task(const task: TncLocalCompletionTask;
             out completion_result: TncLongNeuralCompletionResult): Boolean;
-        procedure queue_result(const task: TncLocalCompletionTask;
+        procedure queue_finished(const task: TncLocalCompletionTask;
+            const accepted: Boolean;
             const completion_result: TncLongNeuralCompletionResult);
-        procedure deliver_result(const task: TncLocalCompletionTask;
+        procedure deliver_finished(const task: TncLocalCompletionTask;
+            const accepted: Boolean;
             const completion_result: TncLongNeuralCompletionResult);
         procedure disable(const error_text: string);
         procedure log_message(const level_text, message_text: string);
     public
         constructor create(const base_directory: string;
-            const result_event: TncLocalCompletionResultEvent);
+            const result_event: TncLocalCompletionResultEvent;
+            const finished_event: TncLocalCompletionFinishedEvent = nil);
         destructor Destroy; override;
         procedure enqueue(const task: TncLocalCompletionTask);
         function ready: Boolean;
@@ -129,7 +137,8 @@ begin
 end;
 
 constructor TncLocalCompletionHost.create(const base_directory: string;
-    const result_event: TncLocalCompletionResultEvent);
+    const result_event: TncLocalCompletionResultEvent;
+    const finished_event: TncLocalCompletionFinishedEvent);
 begin
     inherited create;
     m_base_directory := base_directory;
@@ -138,6 +147,7 @@ begin
     m_pending_task := Default(TncLocalCompletionTask);
     m_has_pending_task := False;
     m_result_event := result_event;
+    m_finished_event := finished_event;
     m_module := 0;
     m_onnx_runtime_module := 0;
     m_onnx_provider_module := 0;
@@ -154,6 +164,7 @@ end;
 destructor TncLocalCompletionHost.Destroy;
 begin
     m_result_event := nil;
+    m_finished_event := nil;
     if m_worker <> nil then
     begin
         m_worker.Terminate;
@@ -492,32 +503,40 @@ begin
     end;
 end;
 
-procedure TncLocalCompletionHost.queue_result(
-    const task: TncLocalCompletionTask;
+procedure TncLocalCompletionHost.queue_finished(
+    const task: TncLocalCompletionTask; const accepted: Boolean;
     const completion_result: TncLongNeuralCompletionResult);
 var
     task_copy: TncLocalCompletionTask;
+    accepted_copy: Boolean;
     result_copy: TncLongNeuralCompletionResult;
 begin
     task_copy := task;
+    accepted_copy := accepted;
     result_copy := completion_result;
     TThread.Queue(m_worker,
         procedure
         begin
-            deliver_result(task_copy, result_copy);
+            deliver_finished(task_copy, accepted_copy, result_copy);
         end);
 end;
 
-procedure TncLocalCompletionHost.deliver_result(
-    const task: TncLocalCompletionTask;
+procedure TncLocalCompletionHost.deliver_finished(
+    const task: TncLocalCompletionTask; const accepted: Boolean;
     const completion_result: TncLongNeuralCompletionResult);
 var
     handler: TncLocalCompletionResultEvent;
+    finished_handler: TncLocalCompletionFinishedEvent;
 begin
     handler := m_result_event;
-    if Assigned(handler) then
+    if accepted and Assigned(handler) then
     begin
         handler(task, completion_result);
+    end;
+    finished_handler := m_finished_event;
+    if Assigned(finished_handler) then
+    begin
+        finished_handler(task, accepted, completion_result);
     end;
 end;
 
@@ -525,6 +544,7 @@ procedure TncLocalCompletionHost.worker_execute;
 var
     task: TncLocalCompletionTask;
     completion_result: TncLongNeuralCompletionResult;
+    accepted: Boolean;
 begin
     try
         load_runtime;
@@ -553,9 +573,13 @@ begin
         begin
             Break;
         end;
-        if run_task(task, completion_result) then
+        accepted := run_task(task, completion_result);
+        // Production only needs accepted results. The optional finished event
+        // lets synchronous benchmark bridges observe abstentions without
+        // adding no-op main-thread callbacks to the normal Host path.
+        if accepted or Assigned(m_finished_event) then
         begin
-            queue_result(task, completion_result);
+            queue_finished(task, accepted, completion_result);
         end;
         if not ready then
         begin

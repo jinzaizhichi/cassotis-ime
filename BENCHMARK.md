@@ -40,6 +40,7 @@ Benchmark-16300 contains 16,300 eligible sentences extracted from the novel in a
 
 - Accuracy runs use deterministic-work mode: normal search paths do not stop on wall-clock time and remain bounded by fixed beam, state, edge, candidate, and work limits. Changes in machine load therefore do not change normal candidate generation.
 - Latency runs use production mode: fixed work limits are the primary boundary, with wider emergency wall-clock ceilings retained to prevent unacceptable stalls on malformed long Pinyin or slower machines.
+- Both modes load the same deployed long-sentence Transformer reranker as the Host. A missing or incomplete runtime is an error rather than a silent fallback; disabling it is reserved for explicitly labelled diagnostic runs.
 - The two measurements are run separately. The eight-slice runner accelerates accuracy evaluation and is not used for latency measurement.
 
 ### Latency Protocol
@@ -118,7 +119,8 @@ This benchmark measures whether one-key completion can extend a partially decode
 
 - Reuse all 16,300 fixed long-sentence cases and their reviewed full Pinyin queries.
 - Leave the final four complete Pinyin syllables untyped while retaining at least the first four syllables as the visible composition prefix.
-- Decode that prefix in deterministic-work mode, then read only the single completion that the UI would display.
+- Decode that prefix in deterministic-work mode with the same long-sentence Transformer reranker used by the Host.
+- Run the same constrained local-completion model when the static layer requests asynchronous refinement, apply the same confidence, timeout, and exact-path validation, then read only the single settled completion that the UI would display.
 - Count a local-continuation hit when the displayed result strictly extends the intended typed prefix and the whole displayed text remains a prefix of the reference sentence. The completion may stop after the next one to three local words; it does not have to reproduce the rest of the sentence in one step.
 - Disable the user dictionary and external document context, and use a snapshot of the simplified base dictionary selected for the tested release.
 - Query the immediately preceding syllable boundary before the scored query to measure whether a compatible completion remains stable as typing continues.
@@ -127,7 +129,7 @@ The report uses the same four primary metrics as Benchmark-12831: local-continua
 
 ### Latency Protocol
 
-Latency starts immediately before assigning the scored Pinyin prefix and ends after candidate decoding and completion selection. It includes the underlying long-sentence decode, exact/transition completion lookup, language-model scoring, and hysteresis. It excludes process and dictionary cold start, the preceding stability probe, report output, TSF/host communication, rendering, real inter-key timing, and learning writes. The engine is reset before every source sentence while the dictionary connection and runtime caches remain open for the complete run.
+The dictionary and both runtime models are loaded and warmed before scored cases begin. Latency starts immediately before assigning the scored Pinyin prefix and includes long-sentence decoding, exact/transition lookup, language-model scoring, hysteresis, and accepted local-model refinement. Model work that abstains or times out is asynchronous and does not delay the visible static result, so it is not added to visible latency. The measurement excludes process and model cold start, the preceding stability probe, report output, TSF-to-Host IPC, rendering, real inter-key timing, and learning writes. The engine is reset before every source sentence while dictionary connections, model sessions, and runtime caches remain open for the complete run.
 
 ## Latency Statistics
 

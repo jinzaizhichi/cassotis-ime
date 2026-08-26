@@ -206,12 +206,13 @@ This benchmark leaves the final four complete Pinyin syllables untyped and evalu
 
 | Version | Completion Hit | Avg Keys Saved | Stability | P95 (ms) |
 | --- | --- | --- | --- | --- |
+| `v1.18.0` | 131/16300 (0.80%) | 3.069 | 1/284 (0.35%) | 74.835 |
 | `v1.17.0` | 20/16300 (0.12%) | 6.200 | 1/224 (0.45%) | 37.357 |
 | `v1.16.0` | 10/16300 (0.06%) | 7.100 | 1/13 (7.69%) | 38.831 |
 
 `v1.16.0` predates the dedicated long-sentence completion path and is retained as a historical baseline.
 
-The `v1.16.0` and `v1.17.0` rows use the legacy whole-sentence exact criterion. Local-continuation scoring starts with the next published result, so the two protocols must not be compared directly.
+The `v1.18.0` row uses local-continuation scoring and includes the same long-sentence reranker and constrained local-completion runtime as the Host. The `v1.16.0` and `v1.17.0` rows use the legacy whole-sentence exact criterion, so the two protocols must not be compared directly.
 
 ## Configuration
 Default config file:
