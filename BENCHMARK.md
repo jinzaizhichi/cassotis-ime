@@ -125,7 +125,14 @@ This benchmark measures whether one-key completion can extend a partially decode
 - Disable the user dictionary and external document context, and use a snapshot of the simplified base dictionary selected for the tested release.
 - Query the immediately preceding syllable boundary before the scored query to measure whether a compatible completion remains stable as typing continues.
 
-The report uses the same four primary metrics as Benchmark-12831: local-continuation hit rate, average keys saved by correct completions, incremental stability, and `P95` latency. Coverage, wrong-prompt counts, full-sentence exact hits, and internal-pool Oracle ranks are retained for diagnosis. Because the corpus supplies one reference, a plausible continuation with different wording still counts as a miss.
+The public report uses four metrics suited to direct cross-version comparison under the current protocol:
+
+- `Local Completion Hit`: correct local continuations divided by all 16,300 opportunities.
+- `Prompt Coverage`: opportunities where any completion was displayed, divided by all opportunities.
+- `Total Keys Saved`: net keys saved across all correct local-continuation hits after charging one key for each acceptance.
+- `P95`: 95% of visible completion queries finish within this many milliseconds.
+
+The detailed report additionally retains average keys saved per hit, incremental stability, wrong-prompt counts, strict whole-sentence hits, and internal-pool Oracle ranks for attribution. Incremental stability is not published as a primary comparison because its eligible denominator depends on the prompts produced by each version and can be very small. Because the corpus supplies one reference, a plausible continuation with different wording still counts as a miss.
 
 ### Latency Protocol
 

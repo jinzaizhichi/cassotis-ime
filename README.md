@@ -134,6 +134,7 @@ Corpus: 16,300 eligible Chinese sentences from the developer's own novel [**Eleg
 
 | Version | Top1 | Top2 | Mean (ms) | P50 (ms) | P95 (ms) | Max (ms) |
 |---|---:|---:|---:|---:|---:|---:|
+| `v1.18.0` | 10731/16300 (65.83%) | 12128/16300 (74.40%) | 51.78 | 47 | 93 | 454 |
 | `v1.17.0` | 10595/16300 (65.00%) | 12023/16300 (73.76%) | 42.68 | 32 | 78 | 406 |
 | `v1.16.0` / `v1.15.0` | 10553/16300 (64.74%) | 11921/16300 (73.13%) | 41.5 | 32 | 78 | 484 |
 | `v1.14.0` | 10345/16300 (63.47%) | 11903/16300 (73.02%) | 58.78 | 47 | 172 | 766 |
@@ -172,6 +173,7 @@ See [BENCHMARK.md](BENCHMARK.md) for the shared corpus source, short-word case c
 
 | Version | Top1 | Top2 | Contested Top1 | Contested Top2 | Mean (ms) | P50 (ms) | P95 (ms) | Max (ms) |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|
+| `v1.18.0` | 61827/65000 (95.12%) | 63517/65000 (97.72%) | 9596/11728 (81.82%) | 10775/11728 (91.87%) | 4.584 | 3.985 | 9.653 | 39.36 |
 | `v1.17.0`<br>`v1.16.0`<br>`v1.15.0` | 61827/65000 (95.12%) | 63516/65000 (97.72%) | 9596/11728 (81.82%) | 10775/11728 (91.87%) | 3.817 | 3.239 | 8.376 | 39.881 |
 | `v1.14.0` | 61782/65000 (95.05%) | 63516/65000 (97.72%) | 9560/11728 (81.51%) | 10775/11728 (91.87%) | 3.998 | 3.132 | 8.665 | 68.147 |
 | `v1.13.0` | 61515/65000 (94.64%) | 63516/65000 (97.72%) | 9384/11728 (80.01%) | 10775/11728 (91.87%) | 4.748 | 3.652 | 10.337 | 103.689 |
@@ -197,6 +199,7 @@ Public results retain four columns only: `Completion Hit`, `Avg Keys Saved`, `St
 
 | Version | Completion Hit | Avg Keys Saved | Stability | P95 (ms) |
 | --- | --- | --- | --- | --- |
+| `v1.18.0` | 9419/12831 (73.41%) | 2.549 | 1691/1749 (96.68%) | 2.026 |
 | `v1.17.0` | 9273/12831 (72.27%) | 2.554 | 1652/1718 (96.16%) | 1.880 |
 | `v1.16.0` | 8752/12831 (68.21%) | 2.570 | 1649/1676 (98.39%) | 1.509 |
 | `v1.15.0` | 7265/12831 (56.62%) | 2.542 | 1278/1323 (96.60%) | 0.777 |
@@ -204,15 +207,22 @@ Public results retain four columns only: `Completion Hit`, `Avg Keys Saved`, `St
 ## Long-sentence One-key Completion Benchmark-16300
 This benchmark leaves the final four complete Pinyin syllables untyped and evaluates the single completion actually shown. A hit must correctly extend the intended prefix while remaining a prefix of the reference sentence; it need not complete the entire sentence in one step. See [BENCHMARK.md](BENCHMARK.md) for the full protocol.
 
-| Version | Completion Hit | Avg Keys Saved | Stability | P95 (ms) |
+### Current local-continuation protocol
+
+| Version | Local Completion Hit | Prompt Coverage | Total Keys Saved | P95 (ms) |
 | --- | --- | --- | --- | --- |
-| `v1.18.0` | 131/16300 (0.80%) | 3.069 | 1/284 (0.35%) | 74.835 |
-| `v1.17.0` | 20/16300 (0.12%) | 6.200 | 1/224 (0.45%) | 37.357 |
-| `v1.16.0` | 10/16300 (0.06%) | 7.100 | 1/13 (7.69%) | 38.831 |
+| `v1.18.0` | 143/16300 (0.88%) | 3957/16300 (24.28%) | 478 | 40.329 |
 
-`v1.16.0` predates the dedicated long-sentence completion path and is retained as a historical baseline.
+`Prompt Coverage` counts opportunities where any completion was displayed. `Total Keys Saved` sums the net keys saved by correct local-continuation hits after charging one key for accepting each completion. Per-hit averages and incremental stability remain available in detailed diagnostic reports rather than the public comparison table.
 
-The `v1.18.0` row uses local-continuation scoring and includes the same long-sentence reranker and constrained local-completion runtime as the Host. The `v1.16.0` and `v1.17.0` rows use the legacy whole-sentence exact criterion, so the two protocols must not be compared directly.
+### Historical whole-sentence protocol
+
+| Version | Whole-sentence Hit | Total Keys Saved | P95 (ms) |
+| --- | --- | --- | --- |
+| `v1.17.0` | 20/16300 (0.12%) | 124 | 37.357 |
+| `v1.16.0` | 10/16300 (0.06%) | 71 | 38.831 |
+
+`v1.16.0` and `v1.17.0` use the legacy strict whole-sentence criterion and are retained only as historical results. They are not directly comparable with the current local-continuation protocol.
 
 ## Configuration
 Default config file:
