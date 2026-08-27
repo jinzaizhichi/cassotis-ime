@@ -1872,6 +1872,8 @@ var
     hr: HRESULT;
     service_guid: TGUID;
     category_guid: TGUID;
+    category_name: string;
+    category_index: Integer;
 
     function register_one(const category: TGUID; const name: string): Boolean;
     begin
@@ -1911,34 +1913,17 @@ begin
     end;
 
     service_guid := service_clsid;
-    if not register_one(GUID_TFCAT_TIP_KEYBOARD, 'TIP_KEYBOARD') then
+    for category_index := 0 to NC_TSF_REGISTRATION_CATEGORY_COUNT - 1 do
     begin
-        Exit;
-    end;
-
-    if not register_one(GUID_TFCAT_TIPCAP_UIELEMENTENABLED, 'UIELEMENTENABLED') then
-    begin
-        Exit;
-    end;
-
-    if not register_one(GUID_TFCAT_TIPCAP_INPUTMODECOMPARTMENT, 'INPUTMODECOMPARTMENT') then
-    begin
-        Exit;
-    end;
-
-    if not register_one(GUID_TFCAT_TIPCAP_IMMERSIVESUPPORT, 'IMMERSIVESUPPORT') then
-    begin
-        Exit;
-    end;
-
-    if not register_one(GUID_TFCAT_TIPCAP_SYSTRAYSUPPORT, 'SYSTRAYSUPPORT') then
-    begin
-        Exit;
-    end;
-
-    if not register_one(GUID_TFCAT_DISPLAYATTRIBUTEPROVIDER, 'DISPLAYATTRIBUTEPROVIDER') then
-    begin
-        Exit;
+        if not nc_try_get_tsf_registration_category(category_index,
+            category_guid, category_name) then
+        begin
+            Exit;
+        end;
+        if not register_one(category_guid, category_name) then
+        begin
+            Exit;
+        end;
     end;
 
     Result := True;
@@ -1950,6 +1935,8 @@ var
     hr: HRESULT;
     service_guid: TGUID;
     category_guid: TGUID;
+    category_name: string;
+    category_index: Integer;
 begin
     category_mgr := nil;
     hr := TF_CreateCategoryMgr(PPTfCategoryMgr(@category_mgr));
@@ -1960,30 +1947,18 @@ begin
     end;
 
     service_guid := service_clsid;
-    category_guid := GUID_TFCAT_DISPLAYATTRIBUTEPROVIDER;
-    hr := category_mgr.UnregisterCategory(service_guid, category_guid, service_guid);
-    print_hresult('UnregisterCategory DISPLAYATTRIBUTEPROVIDER', hr);
-    remove_category_registry(service_guid, category_guid);
-    category_guid := GUID_TFCAT_TIPCAP_SYSTRAYSUPPORT;
-    hr := category_mgr.UnregisterCategory(service_guid, category_guid, service_guid);
-    print_hresult('UnregisterCategory SYSTRAYSUPPORT', hr);
-    remove_category_registry(service_guid, category_guid);
-    category_guid := GUID_TFCAT_TIPCAP_IMMERSIVESUPPORT;
-    hr := category_mgr.UnregisterCategory(service_guid, category_guid, service_guid);
-    print_hresult('UnregisterCategory IMMERSIVESUPPORT', hr);
-    remove_category_registry(service_guid, category_guid);
-    category_guid := GUID_TFCAT_TIPCAP_UIELEMENTENABLED;
-    hr := category_mgr.UnregisterCategory(service_guid, category_guid, service_guid);
-    print_hresult('UnregisterCategory UIELEMENTENABLED', hr);
-    remove_category_registry(service_guid, category_guid);
-    category_guid := GUID_TFCAT_TIPCAP_INPUTMODECOMPARTMENT;
-    hr := category_mgr.UnregisterCategory(service_guid, category_guid, service_guid);
-    print_hresult('UnregisterCategory INPUTMODECOMPARTMENT', hr);
-    remove_category_registry(service_guid, category_guid);
-    category_guid := GUID_TFCAT_TIP_KEYBOARD;
-    hr := category_mgr.UnregisterCategory(service_guid, category_guid, service_guid);
-    print_hresult('UnregisterCategory TIP_KEYBOARD', hr);
-    remove_category_registry(service_guid, category_guid);
+    for category_index := NC_TSF_REGISTRATION_CATEGORY_COUNT - 1 downto 0 do
+    begin
+        if not nc_try_get_tsf_registration_category(category_index,
+            category_guid, category_name) then
+        begin
+            Continue;
+        end;
+        hr := category_mgr.UnregisterCategory(service_guid, category_guid,
+            service_guid);
+        print_hresult('UnregisterCategory ' + category_name, hr);
+        remove_category_registry(service_guid, category_guid);
+    end;
 end;
 
 function register_profile: Boolean;

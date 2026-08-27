@@ -17,8 +17,59 @@ const
     GUID_TFCAT_TIPCAP_IMMERSIVESUPPORT: TGUID = '{13A016DF-560B-46CD-947A-4C3AF1E0E35D}';
     GUID_TFCAT_TIPCAP_SYSTRAYSUPPORT: TGUID = '{25504FB4-7BAB-4BC1-9C69-CF81890F0EF5}';
     GUID_TFCAT_DISPLAYATTRIBUTEPROVIDER: TGUID = '{046B8C80-1647-40F7-9B21-B93B81AABC1B}';
+    NC_TSF_REGISTRATION_CATEGORY_COUNT = 7;
     NC_LANG_ID_ZH_CN = $0804;
 
+function nc_try_get_tsf_registration_category(const index: Integer;
+    out category: TGUID; out name: string): Boolean;
+
 implementation
+
+function nc_try_get_tsf_registration_category(const index: Integer;
+    out category: TGUID; out name: string): Boolean;
+begin
+    Result := True;
+    case index of
+        0:
+        begin
+            category := GUID_TFCAT_TIP_KEYBOARD;
+            name := 'TIP_KEYBOARD';
+        end;
+        1:
+        begin
+            category := GUID_TFCAT_TIPCAP_UIELEMENTENABLED;
+            name := 'UIELEMENTENABLED';
+        end;
+        2:
+        begin
+            category := GUID_TFCAT_TIPCAP_INPUTMODECOMPARTMENT;
+            name := 'INPUTMODECOMPARTMENT';
+        end;
+        3:
+        begin
+            category := GUID_TFCAT_TIPCAP_COMLESS;
+            name := 'COMLESS';
+        end;
+        4:
+        begin
+            category := GUID_TFCAT_TIPCAP_IMMERSIVESUPPORT;
+            name := 'IMMERSIVESUPPORT';
+        end;
+        5:
+        begin
+            category := GUID_TFCAT_TIPCAP_SYSTRAYSUPPORT;
+            name := 'SYSTRAYSUPPORT';
+        end;
+        6:
+        begin
+            category := GUID_TFCAT_DISPLAYATTRIBUTEPROVIDER;
+            name := 'DISPLAYATTRIBUTEPROVIDER';
+        end;
+    else
+        FillChar(category, SizeOf(category), 0);
+        name := '';
+        Result := False;
+    end;
+end;
 
 end.
