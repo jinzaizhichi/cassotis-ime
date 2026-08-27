@@ -8907,6 +8907,132 @@ var
         end;
     end;
 
+    procedure ensure_supported_short_four_two_prefix_partial_visible_local(
+        const query_syllables_local: TncPinyinParseResult;
+        var candidates_local: TncCandidateList);
+    const
+        c_prefix_syllable_count = 4;
+        c_max_query_syllables = 8;
+        c_remaining_syllable_penalty = 80;
+    var
+        prefix_syllables_local: TncPinyinParseResult;
+        prefix_candidates_local: TncCandidateList;
+        prefix_candidate_local: TncCandidate;
+        prefix_query_local: string;
+        remaining_pinyin_local: string;
+        evidence_path_local: string;
+        evidence_score_local: Integer;
+        prefix_idx_local: Integer;
+        candidate_idx_local: Integer;
+        syllable_idx_local: Integer;
+        existing_idx_local: Integer;
+        remaining_count_local: Integer;
+    begin
+        if (m_dictionary = nil) or
+            (Length(query_syllables_local) <= c_prefix_syllable_count) or
+            (Length(query_syllables_local) > c_max_query_syllables) or
+            has_explicit_apostrophe_input then
+        begin
+            Exit;
+        end;
+
+        SetLength(prefix_syllables_local, c_prefix_syllable_count);
+        prefix_query_local := '';
+        for syllable_idx_local := 0 to c_prefix_syllable_count - 1 do
+        begin
+            prefix_syllables_local[syllable_idx_local] :=
+                query_syllables_local[syllable_idx_local];
+            prefix_query_local := prefix_query_local + normalize_pinyin_text(
+                query_syllables_local[syllable_idx_local].text);
+        end;
+
+        remaining_pinyin_local := '';
+        for syllable_idx_local := c_prefix_syllable_count to
+            High(query_syllables_local) do
+        begin
+            remaining_pinyin_local := remaining_pinyin_local +
+                normalize_pinyin_text(
+                query_syllables_local[syllable_idx_local].text);
+        end;
+        if (prefix_query_local = '') or (remaining_pinyin_local = '') then
+        begin
+            Exit;
+        end;
+
+        SetLength(prefix_candidates_local, 0);
+        ensure_supported_short_four_two_exact_path_visible_local(
+            prefix_syllables_local, prefix_candidates_local);
+        for prefix_idx_local := 0 to High(prefix_candidates_local) do
+        begin
+            prefix_candidate_local := prefix_candidates_local[prefix_idx_local];
+            if (Trim(prefix_candidate_local.comment) <> '') or
+                (prefix_candidate_local.display_kind <> cdk_lm_compound) or
+                (get_candidate_text_unit_count(
+                Trim(prefix_candidate_local.text)) <>
+                c_prefix_syllable_count) or
+                (not get_short_four_two_exact_path_evidence(
+                prefix_query_local, Trim(prefix_candidate_local.text),
+                evidence_path_local, evidence_score_local)) then
+            begin
+                Continue;
+            end;
+
+            existing_idx_local := -1;
+            for candidate_idx_local := 0 to High(candidates_local) do
+            begin
+                if SameText(Trim(candidates_local[candidate_idx_local].text),
+                    Trim(prefix_candidate_local.text)) and
+                    SameText(normalize_pinyin_text(Trim(
+                    candidates_local[candidate_idx_local].comment)),
+                    remaining_pinyin_local) then
+                begin
+                    existing_idx_local := candidate_idx_local;
+                    Break;
+                end;
+            end;
+
+            remaining_count_local := Length(query_syllables_local) -
+                c_prefix_syllable_count;
+            prefix_candidate_local.comment := remaining_pinyin_local;
+            prefix_candidate_local.score := Max(1,
+                prefix_candidate_local.score -
+                (remaining_count_local * c_remaining_syllable_penalty));
+            prefix_candidate_local.source := cs_rule;
+            prefix_candidate_local.has_dict_weight := False;
+            prefix_candidate_local.dict_weight := 0;
+            prefix_candidate_local.display_kind := cdk_lm_compound;
+            if existing_idx_local >= 0 then
+            begin
+                if prefix_candidate_local.score >
+                    candidates_local[existing_idx_local].score then
+                begin
+                    candidates_local[existing_idx_local].score :=
+                        prefix_candidate_local.score;
+                end;
+                candidates_local[existing_idx_local].source := cs_rule;
+                candidates_local[existing_idx_local].has_dict_weight := False;
+                candidates_local[existing_idx_local].dict_weight := 0;
+                candidates_local[existing_idx_local].display_kind :=
+                    cdk_lm_compound;
+            end
+            else
+            begin
+                SetLength(candidates_local, Length(candidates_local) + 1);
+                candidates_local[High(candidates_local)] :=
+                    prefix_candidate_local;
+            end;
+            remember_segment_path_for_candidate(
+                Trim(prefix_candidate_local.text), remaining_pinyin_local,
+                evidence_path_local, prefix_candidate_local.score);
+            if m_config.debug_mode then
+            begin
+                m_last_full_path_debug_info := m_last_full_path_debug_info +
+                    ' s42prefix=1';
+            end;
+            Break;
+        end;
+    end;
+
     procedure ensure_supported_short_four_transition_particle_path_visible_local(
         const query_syllables_local: TncPinyinParseResult;
         var candidates_local: TncCandidateList);
@@ -20001,6 +20127,9 @@ var
                 ' [ps-chain]';
         end;
         ensure_simple_fixed_boundary_chain_candidate_visible(m_candidates);
+        ensure_supported_short_four_two_prefix_partial_visible_local(
+            get_effective_compact_pinyin_syllables(lookup_text),
+            m_candidates);
         if can_use_trailing_prefix_preserved_fast_finalize_local then
         begin
             dedupe_visible_candidates_local(m_candidates,
@@ -122670,6 +122799,9 @@ begin
                         incremental_partial_candidates, m_candidates, 0);
                     incremental_partial_reuse_applied := True;
                 end;
+                ensure_supported_short_four_two_prefix_partial_visible_local(
+                    get_effective_compact_pinyin_syllables(lookup_text),
+                    m_candidates);
                 sort_candidates_lightweight(m_candidates);
                 if incremental_partial_reuse_applied and
                     (Length(incremental_partial_candidates) > 0) and
@@ -124104,6 +124236,9 @@ begin
                     incremental_partial_reuse_applied := True;
                     m_last_lookup_incremental_partial_reuse := True;
                 end;
+                ensure_supported_short_four_two_prefix_partial_visible_local(
+                    get_effective_compact_pinyin_syllables(lookup_text),
+                    m_candidates);
                 if incremental_partial_reuse_applied then
                 begin
                     finalize_prefix_partial_candidates_and_prepare_exit(Format(
