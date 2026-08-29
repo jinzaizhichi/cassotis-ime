@@ -953,7 +953,7 @@ function build_and_copy_pinyin_transformer_runtime
         $native_build,
         (Join-Path $runtime_source 'onnxruntime.dll'),
         (Join-Path $runtime_source 'onnxruntime_providers_shared.dll'),
-        (Join-Path $model_source 'pinyin_difference_reranker_int8.onnx'),
+        (Join-Path $model_source 'pinyin_conditional_scorer_int8.onnx'),
         (Join-Path $model_source 'vocab.json'),
         (Join-Path $local_completion_source 'local_completion_path_ranker_int8.onnx'),
         (Join-Path $local_completion_source 'local_completion_index.bin'),
@@ -987,7 +987,7 @@ function build_and_copy_pinyin_transformer_runtime
         }
     }
     New-Item -ItemType Directory -Force -Path $model_target | Out-Null
-    Copy-Item -Force -LiteralPath (Join-Path $model_source 'pinyin_difference_reranker_int8.onnx') -Destination $model_target
+    Copy-Item -Force -LiteralPath (Join-Path $model_source 'pinyin_conditional_scorer_int8.onnx') -Destination $model_target
     Copy-Item -Force -LiteralPath (Join-Path $model_source 'vocab.json') -Destination $model_target
     New-Item -ItemType Directory -Force -Path $local_completion_target | Out-Null
     Copy-Item -Force -LiteralPath (Join-Path $local_completion_source 'local_completion_path_ranker_int8.onnx') -Destination $local_completion_target
