@@ -26,7 +26,7 @@ The project focus is:
 - improve corpus-trained local ranking for long sentences and context-aware short-word selection.
 
 ## Features
-- TSF text service pipeline is available (registration, activation, composition lifecycle).
+- TSF text service pipeline is available (registration, activation, composition lifecycle), including the TSF COM-less capability category for hosts that use that activation path.
 - TSF binaries support Win64 and Win32 (`svr.dll` / `svr32.dll`), while host process is Win64 only.
 - Candidate window, paging, selection, and commit flow are implemented.
 - Cassotis' original one-key completion displays exactly one trusted continuation and accepts it with the configured key. It prioritizes exact completion from the user and base dictionaries, then falls back to offline-vetted strong-transition completion. On long-sentence static misses, a constrained local model can review exact-lexicon suffix paths asynchronously and abstains when confidence is insufficient.
@@ -123,9 +123,11 @@ Cassotis v1.15.0 consolidates long-sentence Top1/Top2 decisions in a corpus-trai
 
 Cassotis v1.18.0 adds a constrained neural fallback for long-sentence local continuation. The 13.82M-parameter ranker compares at most 32 suffix paths composed only of exact lexicon words, and either returns one to three words within six syllables or abstains. Existing static completion remains the zero-cost first tier; only misses are queued to a background CPU worker in `cassotis_ime_host.exe`, and stale or low-confidence results are discarded.
 
+Cassotis v1.19.0 deploys a Pinyin-conditioned sequence scorer in the final long-sentence decision stage: the external host jointly compares the complete Pinyin input with up to 16 stable candidates, while offline-trained gate and fusion models decide whether to reorder them. Long-sentence one-key completion also expands its multi-level suffix-recall index, using a native recall selector to filter exact-lexicon continuations before the existing completion model reviews them.
+
 To keep the deeper ranking pipeline responsive, search, second-stage ranking, residual comparison, and final selection reuse character-LM scores, exact dictionary lookups, path features, and context features. Expensive consensus and lookup work uses shared caches and explicit time budgets to limit long-tail latency. Exact and prefix candidate visibility remains protected, while repeated work across ranking stages is avoided.
 
-Statistical priors are quantized into the local dictionary database, while most compact rerankers are exported as deterministic native Pascal parameters. The v1.18.0 continuation fallback uses an INT8 weight-quantized, mixed-precision ONNX model; ONNX Runtime is loaded only by the external host process, never by the TSF DLL. Runtime scoring remains local and bounded, requires no network or GPU, and falls back to the existing result while the model is loading or unavailable. Long-sentence and short-word ranking remain separate paths, so improvements to one do not replace the other's matching rules.
+Statistical priors are quantized into the local dictionary database, while most compact rerankers are exported as deterministic native Pascal parameters. The v1.18.0 continuation fallback and v1.19.0 Pinyin-conditioned scorer are deployed as quantized ONNX models; ONNX Runtime is loaded only by the external host process, never by the TSF DLL. Runtime scoring remains local and bounded, requires no network or GPU, and falls back to the existing result while a model is loading or unavailable. Long-sentence and short-word ranking remain separate paths, so improvements to one do not replace the other's matching rules.
 
 ## Long Sentence Benchmark-16300
 See [BENCHMARK.md](BENCHMARK.md) for the Benchmark-16300 methodology, corpus source, and scoring rules.
@@ -134,6 +136,7 @@ Corpus: 16,300 eligible Chinese sentences from the developer's own novel [**Eleg
 
 | Version | Top1 | Top2 | Mean (ms) | P50 (ms) | P95 (ms) | Max (ms) |
 |---|---:|---:|---:|---:|---:|---:|
+| `v1.19.0` | 10917/16300 (66.98%) | 12248/16300 (75.14%) | 55.99 | 47 | 94 | 437 |
 | `v1.18.0` | 10731/16300 (65.83%) | 12128/16300 (74.40%) | 51.78 | 47 | 93 | 454 |
 | `v1.17.0` | 10595/16300 (65.00%) | 12023/16300 (73.76%) | 42.68 | 32 | 78 | 406 |
 | `v1.16.0` / `v1.15.0` | 10553/16300 (64.74%) | 11921/16300 (73.13%) | 41.5 | 32 | 78 | 484 |
@@ -173,7 +176,7 @@ See [BENCHMARK.md](BENCHMARK.md) for the shared corpus source, short-word case c
 
 | Version | Top1 | Top2 | Contested Top1 | Contested Top2 | Mean (ms) | P50 (ms) | P95 (ms) | Max (ms) |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|
-| `v1.18.0` | 61827/65000 (95.12%) | 63517/65000 (97.72%) | 9596/11728 (81.82%) | 10775/11728 (91.87%) | 4.584 | 3.985 | 9.653 | 39.36 |
+| `v1.19.0`<br/>`v1.18.0` | 61827/65000 (95.12%) | 63517/65000 (97.72%) | 9596/11728 (81.82%) | 10775/11728 (91.87%) | 4.584 | 3.985 | 9.653 | 39.36 |
 | `v1.17.0`<br>`v1.16.0`<br>`v1.15.0` | 61827/65000 (95.12%) | 63516/65000 (97.72%) | 9596/11728 (81.82%) | 10775/11728 (91.87%) | 3.817 | 3.239 | 8.376 | 39.881 |
 | `v1.14.0` | 61782/65000 (95.05%) | 63516/65000 (97.72%) | 9560/11728 (81.51%) | 10775/11728 (91.87%) | 3.998 | 3.132 | 8.665 | 68.147 |
 | `v1.13.0` | 61515/65000 (94.64%) | 63516/65000 (97.72%) | 9384/11728 (80.01%) | 10775/11728 (91.87%) | 4.748 | 3.652 | 10.337 | 103.689 |
@@ -199,7 +202,7 @@ Public results retain four columns only: `Completion Hit`, `Avg Keys Saved`, `St
 
 | Version | Completion Hit | Avg Keys Saved | Stability | P95 (ms) |
 | --- | --- | --- | --- | --- |
-| `v1.18.0` | 9419/12831 (73.41%) | 2.549 | 1691/1749 (96.68%) | 2.026 |
+| `v1.19.0`<br/>`v1.18.0` | 9419/12831 (73.41%) | 2.549 | 1691/1749 (96.68%) | 2.026 |
 | `v1.17.0` | 9273/12831 (72.27%) | 2.554 | 1652/1718 (96.16%) | 1.880 |
 | `v1.16.0` | 8752/12831 (68.21%) | 2.570 | 1649/1676 (98.39%) | 1.509 |
 | `v1.15.0` | 7265/12831 (56.62%) | 2.542 | 1278/1323 (96.60%) | 0.777 |
@@ -211,6 +214,7 @@ This benchmark leaves the final four complete Pinyin syllables untyped and evalu
 
 | Version | Local Completion Hit | Prompt Coverage | Total Keys Saved | P95 (ms) |
 | --- | --- | --- | --- | --- |
+| `v1.19.0` | 202/16300 (1.24%) | 3834/16300 (23.52%) | 571 | 38.452 |
 | `v1.18.0` | 143/16300 (0.88%) | 3957/16300 (24.28%) | 478 | 40.329 |
 
 `Prompt Coverage` counts opportunities where any completion was displayed. `Total Keys Saved` sums the net keys saved by correct local-continuation hits after charging one key for accepting each completion. Per-hit averages and incremental stability remain available in detailed diagnostic reports rather than the public comparison table.
