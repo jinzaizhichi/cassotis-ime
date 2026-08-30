@@ -6,7 +6,9 @@ uses
     System.Types;
 
 type
-    TncCaretAnchorSource = (casTsf, casGui, casCaretPos, casLastSent, casCursor);
+    // Keep existing values stable because the source is sent over IPC.
+    TncCaretAnchorSource = (casTsf, casGui, casCaretPos, casLastSent, casCursor,
+        casImm, casComlessFallback);
 
     TncCaretAnchorObservation = record
         source: TncCaretAnchorSource;
@@ -41,6 +43,8 @@ function should_relax_terminal_tsf_suspicion(const tsf_point: TPoint; const tsf_
 function should_reject_top_band_point(const candidate: TPoint; const candidate_valid: Boolean;
     const reference_point: TPoint; const reference_valid: Boolean; const base_rect: TRect;
     const has_base_rect: Boolean): Boolean;
+function try_get_comless_fallback_anchor(const target_rect: TRect;
+    const has_target_rect: Boolean; out anchor: TPoint): Boolean;
 function try_choose_best_anchor_scored(const observations: array of TncCaretAnchorObservation;
     const context: TncCaretAnchorContext; out best_point: TPoint; out best_source: TncCaretAnchorSource;
     out best_score: Integer): Boolean;
@@ -66,9 +70,41 @@ begin
             Result := 'last_sent';
         casCursor:
             Result := 'cursor';
+        casImm:
+            Result := 'imm';
+        casComlessFallback:
+            Result := 'comless_fallback';
     else
         Result := 'unknown';
     end;
+end;
+
+function try_get_comless_fallback_anchor(const target_rect: TRect;
+    const has_target_rect: Boolean; out anchor: TPoint): Boolean;
+var
+    target_width: Integer;
+    target_height: Integer;
+begin
+    anchor := System.Types.Point(0, 0);
+    if not has_target_rect then
+    begin
+        Result := False;
+        Exit;
+    end;
+
+    target_width := target_rect.Right - target_rect.Left;
+    target_height := target_rect.Bottom - target_rect.Top;
+    if (target_width < 160) or (target_height < 120) then
+    begin
+        Result := False;
+        Exit;
+    end;
+
+    // Legacy games commonly draw their chat edit near the lower quarter of
+    // the client surface without exposing an accessibility/TSF caret.
+    anchor.X := target_rect.Left + target_width div 4;
+    anchor.Y := target_rect.Top + (target_height * 3) div 4;
+    Result := True;
 end;
 
 function points_are_close(const left_point: TPoint; const right_point: TPoint; const max_delta: Integer): Boolean;
@@ -279,6 +315,10 @@ var
                     Result := 165;
                 casCursor:
                     Result := 80;
+                casImm:
+                    Result := 420;
+                casComlessFallback:
+                    Result := 110;
             else
                 Result := 0;
             end;
@@ -296,6 +336,10 @@ var
                 Result := 185;
             casCursor:
                 Result := 120;
+            casImm:
+                Result := 390;
+            casComlessFallback:
+                Result := 150;
         else
             Result := 0;
         end;
@@ -316,6 +360,10 @@ var
                     Result := 2;
                 casCursor:
                     Result := 1;
+                casImm:
+                    Result := 6;
+                casComlessFallback:
+                    Result := 2;
             else
                 Result := 0;
             end;
@@ -333,6 +381,10 @@ var
                 Result := 2;
             casCursor:
                 Result := 1;
+            casImm:
+                Result := 6;
+            casComlessFallback:
+                Result := 2;
         else
             Result := 0;
         end;

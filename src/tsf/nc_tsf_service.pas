@@ -5,6 +5,7 @@ interface
 uses
     Winapi.Windows,
     Winapi.ActiveX,
+    Winapi.Imm,
     Winapi.Msctf,
     Winapi.ShellAPI,
     Winapi.MultiMon,
@@ -49,6 +50,7 @@ type
         m_last_punctuation_full_width: Boolean;
         m_compartment_state_inited: Boolean;
         m_client_id: TfClientId;
+        m_activation_flags: DWORD;
         m_keystroke_mgr: ITfKeystrokeMgr;
         m_key_event_advised: Boolean;
         m_doc_mgr: ITfDocumentMgr;
@@ -114,7 +116,7 @@ type
         procedure clear_state;
         procedure rollback_activation;
         function activate_core(const thread_mgr: ITfThreadMgr;
-            client_id: TfClientId): HResult;
+            client_id: TfClientId; const activation_flags: DWORD): HResult;
         procedure deactivate_core;
         procedure mark_session_dirty;
         procedure reset_session_if_needed(const force: Boolean = False);
@@ -757,6 +759,7 @@ begin
     m_last_punctuation_full_width := False;
     m_compartment_state_inited := False;
     m_client_id := 0;
+    m_activation_flags := 0;
     m_keystroke_mgr := nil;
     m_key_event_advised := False;
     m_doc_mgr := nil;
@@ -1452,7 +1455,7 @@ begin
 end;
 
 function TncTextService.activate_core(const thread_mgr: ITfThreadMgr;
-    client_id: TfClientId): HResult;
+    client_id: TfClientId; const activation_flags: DWORD): HResult;
 var
     keystroke_mgr: ITfKeystrokeMgr;
     hr: HRESULT;
@@ -1461,6 +1464,7 @@ var
 begin
     m_thread_mgr := thread_mgr;
     m_client_id := client_id;
+    m_activation_flags := activation_flags;
 
     m_keystroke_mgr := nil;
     m_key_event_advised := False;
@@ -1522,7 +1526,8 @@ begin
 
     if m_logger <> nil then
     begin
-        m_logger.info('TSF activate');
+        m_logger.info(Format('TSF activate flags=0x%.8x comless=%d',
+            [m_activation_flags, Ord((m_activation_flags and TF_TMAE_COMLESS) <> 0)]));
     end;
 
     Result := S_OK;
@@ -1538,7 +1543,7 @@ begin
     end;
 
     try
-        Result := activate_core(thread_mgr, client_id);
+        Result := activate_core(thread_mgr, client_id, 0);
     except
         log_tsf_boundary_exception('Activate');
         try
@@ -1595,7 +1600,23 @@ end;
 
 function TncTextService.ActivateEx(const thread_mgr: ITfThreadMgr; client_id: TfClientId; flags: DWORD): HResult;
 begin
-    Result := Activate(thread_mgr, client_id);
+    if thread_mgr = nil then
+    begin
+        Result := E_INVALIDARG;
+        Exit;
+    end;
+
+    try
+        Result := activate_core(thread_mgr, client_id, flags);
+    except
+        log_tsf_boundary_exception('ActivateEx');
+        try
+            rollback_activation;
+        except
+            log_tsf_boundary_exception('ActivateEx.Rollback');
+        end;
+        Result := E_FAIL;
+    end;
 end;
 
 function TncTextService.OnSetFocus(focus: Integer): HResult;
@@ -3225,6 +3246,8 @@ function TncTextService.get_candidate_point(out point: TPoint; out placement_lin
 var
     caret_point: TPoint;
     gui_point: TPoint;
+    imm_point: TPoint;
+    comless_fallback_point: TPoint;
     converted_tsf_point: TPoint;
     last_sent_point: TPoint;
     hwnd: Winapi.Windows.HWND;
@@ -3234,6 +3257,7 @@ var
     tsf_point_valid: Boolean;
     caret_point_valid: Boolean;
     gui_point_valid: Boolean;
+    imm_point_valid: Boolean;
     virtual_left: Integer;
     virtual_top: Integer;
     virtual_right: Integer;
@@ -3253,7 +3277,7 @@ var
     cursor_point: TPoint;
     cursor_point_valid: Boolean;
     last_sent_point_valid: Boolean;
-    observations: array[0..4] of TncCaretAnchorObservation;
+    observations: array[0..5] of TncCaretAnchorObservation;
     observation_count: Integer;
     anchor_context: TncCaretAnchorContext;
     tsf_suspicious: Boolean;
@@ -3262,6 +3286,10 @@ var
     last_suspicious: Boolean;
     gui_caret_pair: Boolean;
     gui_far_from_tsf: Boolean;
+    comless_target: Boolean;
+    imm_line_height: Integer;
+    imm_anchor_hwnd: Winapi.Windows.HWND;
+    imm_anchor_kind: string;
     caret_debug_logging: Boolean;
     current_tick: UInt64;
 
@@ -3464,6 +3492,140 @@ var
             (Pos('pseudoconsole', class_lower) > 0);
     end;
 
+    function try_get_imm_anchor_point(const source_hwnd: Winapi.Windows.HWND;
+        out candidate: TPoint; out candidate_line_height: Integer;
+        out anchor_kind: string): Boolean;
+    var
+        input_context: HIMC;
+        composition_form: TCompositionForm;
+        candidate_form: TCandidateForm;
+        candidate_index: Integer;
+        best_score: Integer;
+
+        procedure consider_local_anchor(const local_point: TPoint;
+            const local_line_height: Integer; const local_score: Integer;
+            const local_kind: string);
+        var
+            screen_point: TPoint;
+        begin
+            // A zero point is the default IMM position and reproduces the
+            // upper-left placement bug rather than describing a real caret.
+            if (local_point.X = 0) and (local_point.Y = 0) then
+            begin
+                Exit;
+            end;
+
+            screen_point := local_point;
+            if not try_client_point_to_screen_physical(source_hwnd, screen_point) then
+            begin
+                Exit;
+            end;
+            if (not point_in_virtual_screen(screen_point)) or
+                (not point_in_foreground(screen_point)) then
+            begin
+                Exit;
+            end;
+            if local_score <= best_score then
+            begin
+                Exit;
+            end;
+
+            best_score := local_score;
+            candidate := screen_point;
+            candidate_line_height := local_line_height;
+            anchor_kind := local_kind;
+        end;
+
+        function rect_line_height(const bounds: TRect): Integer;
+        begin
+            Result := bounds.Bottom - bounds.Top;
+            if Result < 0 then
+            begin
+                Result := 0;
+            end;
+        end;
+
+        function rect_has_area(const bounds: TRect): Boolean;
+        begin
+            Result := (bounds.Right > bounds.Left) and
+                (bounds.Bottom > bounds.Top);
+        end;
+    begin
+        candidate := System.Types.Point(0, 0);
+        candidate_line_height := 0;
+        anchor_kind := '';
+        best_score := Low(Integer);
+        Result := False;
+        if source_hwnd = 0 then
+        begin
+            Exit;
+        end;
+
+        input_context := ImmGetContext(source_hwnd);
+        if input_context = 0 then
+        begin
+            Exit;
+        end;
+        try
+            FillChar(composition_form, SizeOf(composition_form), 0);
+            if ImmGetCompositionWindow(input_context, @composition_form) then
+            begin
+                case composition_form.dwStyle of
+                    CFS_FORCE_POSITION:
+                        consider_local_anchor(composition_form.ptCurrentPos,
+                            0, 420, 'composition-force');
+                    CFS_POINT:
+                        consider_local_anchor(composition_form.ptCurrentPos,
+                            0, 400, 'composition-point');
+                    CFS_RECT:
+                        if rect_has_area(composition_form.rcArea) then
+                        begin
+                            consider_local_anchor(System.Types.Point(
+                                composition_form.rcArea.Left,
+                                composition_form.rcArea.Bottom),
+                                rect_line_height(composition_form.rcArea),
+                                340, 'composition-rect');
+                        end;
+                end;
+            end;
+
+            for candidate_index := 0 to 3 do
+            begin
+                FillChar(candidate_form, SizeOf(candidate_form), 0);
+                candidate_form.dwIndex := candidate_index;
+                if not ImmGetCandidateWindow(input_context,
+                    candidate_index, @candidate_form) then
+                begin
+                    Continue;
+                end;
+                case candidate_form.dwStyle of
+                    CFS_EXCLUDE:
+                        begin
+                            consider_local_anchor(candidate_form.ptCurrentPos,
+                                rect_line_height(candidate_form.rcArea),
+                                460, 'candidate-exclude');
+                            if ((candidate_form.ptCurrentPos.X = 0) and
+                                (candidate_form.ptCurrentPos.Y = 0)) and
+                                rect_has_area(candidate_form.rcArea) then
+                            begin
+                                consider_local_anchor(System.Types.Point(
+                                    candidate_form.rcArea.Left,
+                                    candidate_form.rcArea.Bottom),
+                                    rect_line_height(candidate_form.rcArea),
+                                    440, 'candidate-exclude-rect');
+                            end;
+                        end;
+                    CFS_CANDIDATEPOS:
+                        consider_local_anchor(candidate_form.ptCurrentPos,
+                            0, 450, 'candidate-position');
+                end;
+            end;
+        finally
+            ImmReleaseContext(source_hwnd, input_context);
+        end;
+        Result := best_score > Low(Integer);
+    end;
+
     function format_anchor_point(const candidate: TPoint; const valid: Boolean): string;
     begin
         if valid then
@@ -3542,6 +3704,7 @@ begin
         m_last_caret_debug_tick := current_tick;
     end;
     terminal_like_target := False;
+    comless_target := (m_activation_flags and TF_TMAE_COMLESS) <> 0;
     chosen_source := casCursor;
     chosen_score := 0;
     virtual_left := GetSystemMetrics(SM_XVIRTUALSCREEN);
@@ -3723,6 +3886,37 @@ begin
     begin
         m_logger.debug(Format('CaretPos point=(%d,%d)', [caret_point.X, caret_point.Y]));
     end;
+
+    imm_point_valid := False;
+    imm_point := System.Types.Point(0, 0);
+    imm_line_height := 0;
+    imm_anchor_hwnd := 0;
+    imm_anchor_kind := '';
+    if try_get_imm_anchor_point(hwnd, imm_point, imm_line_height,
+        imm_anchor_kind) then
+    begin
+        imm_point_valid := True;
+        imm_anchor_hwnd := hwnd;
+    end
+    else if (context_hwnd <> hwnd) and
+        try_get_imm_anchor_point(context_hwnd, imm_point, imm_line_height,
+        imm_anchor_kind) then
+    begin
+        imm_point_valid := True;
+        imm_anchor_hwnd := context_hwnd;
+    end
+    else if (foreground_hwnd <> hwnd) and (foreground_hwnd <> context_hwnd) and
+        try_get_imm_anchor_point(foreground_hwnd, imm_point, imm_line_height,
+        imm_anchor_kind) then
+    begin
+        imm_point_valid := True;
+        imm_anchor_hwnd := foreground_hwnd;
+    end;
+    if imm_point_valid and caret_debug_logging then
+    begin
+        m_logger.debug(Format('IMM caret hwnd=%d kind=%s point=(%d,%d)',
+            [imm_anchor_hwnd, imm_anchor_kind, imm_point.X, imm_point.Y]));
+    end;
     if last_sent_point_valid and caret_debug_logging then
     begin
         m_logger.debug(Format('Last sent caret point=(%d,%d)', [last_sent_point.X, last_sent_point.Y]));
@@ -3730,6 +3924,7 @@ begin
 
     observation_count := 0;
     add_observation(casTsf, tsf_point, tsf_point_valid);
+    add_observation(casImm, imm_point, imm_point_valid);
     add_observation(casGui, gui_point, gui_point_valid);
     add_observation(casCaretPos, caret_point, caret_point_valid);
     add_observation(casLastSent, last_sent_point, last_sent_point_valid);
@@ -3767,9 +3962,10 @@ begin
     if caret_debug_logging then
     begin
         m_logger.debug(Format(
-            'CaretObs term=%d tsf=%s gui=%s caret=%s last=%s cursor=%s line=%d',
-            [Ord(terminal_like_target),
+            'CaretObs term=%d comless=%d tsf=%s imm=%s gui=%s caret=%s last=%s cursor=%s line=%d',
+            [Ord(terminal_like_target), Ord(comless_target),
             format_anchor_point(tsf_point, tsf_point_valid),
+            format_anchor_point(imm_point, imm_point_valid),
             format_anchor_point(gui_point, gui_point_valid),
             format_anchor_point(caret_point, caret_point_valid),
             format_anchor_point(last_sent_point, last_sent_point_valid),
@@ -3785,6 +3981,24 @@ begin
     if try_choose_best_anchor_scored(Slice(observations, observation_count), anchor_context, point, chosen_source,
         chosen_score) then
     begin
+        if chosen_source = casImm then
+        begin
+            placement_line_height := imm_line_height;
+        end;
+        if comless_target and (not imm_point_valid) and
+            ((chosen_source = casCursor) or
+            anchor_looks_like_window_origin(point, foreground_rect,
+            has_foreground_rect)) and
+            (try_get_comless_fallback_anchor(foreground_rect,
+            has_foreground_rect, comless_fallback_point) or
+            try_get_comless_fallback_anchor(context_rect,
+            has_context_rect, comless_fallback_point)) then
+        begin
+            point := comless_fallback_point;
+            placement_line_height := 0;
+            chosen_source := casComlessFallback;
+            chosen_score := 180;
+        end;
         if caret_debug_logging then
         begin
             m_logger.debug(Format('Caret choose=%s point=(%d,%d)', [anchor_source_name(chosen_source), point.X, point.Y]));
@@ -3800,6 +4014,20 @@ begin
                 [Ord(terminal_like_target), anchor_source_name(chosen_source), chosen_score,
                 point.X, point.Y, placement_line_height]));
         end;
+        Result := True;
+        Exit;
+    end;
+
+    if comless_target and
+        (try_get_comless_fallback_anchor(foreground_rect,
+        has_foreground_rect, comless_fallback_point) or
+        try_get_comless_fallback_anchor(context_rect,
+        has_context_rect, comless_fallback_point)) then
+    begin
+        point := comless_fallback_point;
+        placement_line_height := 0;
+        chosen_source := casComlessFallback;
+        chosen_score := 180;
         Result := True;
         Exit;
     end;

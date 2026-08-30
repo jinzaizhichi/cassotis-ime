@@ -259,6 +259,10 @@ var
 function caret_source_priority(const source: TncCaretAnchorSource): Integer;
 begin
     case source of
+        casImm:
+            Result := 7;
+        casComlessFallback:
+            Result := 6;
         casTsf:
             Result := 5;
         casGui:
