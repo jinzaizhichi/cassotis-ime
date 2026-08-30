@@ -9,6 +9,7 @@
 #include <cstring>
 #include <cwchar>
 #include <float.h>
+#include <fstream>
 #include <limits>
 #include <memory>
 #include <mutex>
@@ -27,6 +28,8 @@ constexpr int64_t kCandidateCount = 12;
 constexpr int64_t kConditionalCandidateCount = 16;
 constexpr int64_t kSequenceLength = 41;
 constexpr int64_t kNumericFeatureCount = 88;
+constexpr int64_t kParallelGeneratorLength = 40;
+constexpr int64_t kParallelGeneratorBeamLimit = 4;
 
 std::mutex& InitializationMutex() {
     static std::mutex value;
@@ -36,6 +39,65 @@ std::mutex& InitializationMutex() {
 struct SessionHandle {
     std::unique_ptr<Ort::Session> session;
 };
+
+struct ParallelGeneratorHandle {
+    std::unique_ptr<Ort::Session> session;
+    uint32_t pinyin_vocab_size{};
+    uint32_t allowed_limit{};
+    uint32_t char_vocab_size{};
+    std::vector<uint16_t> allowed_counts;
+    std::vector<uint16_t> allowed_ids;
+};
+
+template <typename T>
+bool ReadBinary(std::ifstream& stream, T& value) {
+    return static_cast<bool>(stream.read(
+        reinterpret_cast<char*>(&value), static_cast<std::streamsize>(sizeof(value))));
+}
+
+bool LoadParallelAllowed(const wchar_t* path, ParallelGeneratorHandle& handle,
+    std::wstring& error) {
+    std::ifstream stream(path, std::ios::binary);
+    if (!stream) {
+        error = L"cannot open pinyin generator constraint table";
+        return false;
+    }
+    std::array<char, 8> magic{};
+    if (!stream.read(magic.data(), static_cast<std::streamsize>(magic.size())) ||
+        std::memcmp(magic.data(), "CASPGA01", magic.size()) != 0) {
+        error = L"invalid pinyin generator constraint table";
+        return false;
+    }
+    uint32_t version = 0;
+    if (!ReadBinary(stream, version) || version != 1 ||
+        !ReadBinary(stream, handle.pinyin_vocab_size) ||
+        !ReadBinary(stream, handle.allowed_limit) ||
+        !ReadBinary(stream, handle.char_vocab_size) ||
+        handle.pinyin_vocab_size == 0 || handle.allowed_limit == 0 ||
+        handle.allowed_limit > 512 || handle.char_vocab_size == 0) {
+        error = L"unsupported pinyin generator constraint table";
+        return false;
+    }
+    handle.allowed_counts.resize(handle.pinyin_vocab_size);
+    handle.allowed_ids.resize(
+        static_cast<size_t>(handle.pinyin_vocab_size) * handle.allowed_limit);
+    if (!stream.read(reinterpret_cast<char*>(handle.allowed_counts.data()),
+            static_cast<std::streamsize>(handle.allowed_counts.size() *
+            sizeof(handle.allowed_counts[0]))) ||
+        !stream.read(reinterpret_cast<char*>(handle.allowed_ids.data()),
+            static_cast<std::streamsize>(handle.allowed_ids.size() *
+            sizeof(handle.allowed_ids[0])))) {
+        error = L"truncated pinyin generator constraint table";
+        return false;
+    }
+    for (const uint16_t count : handle.allowed_counts) {
+        if (count > handle.allowed_limit) {
+            error = L"invalid pinyin generator constraint count";
+            return false;
+        }
+    }
+    return true;
+}
 
 class FloatingPointMaskGuard {
 public:
@@ -271,6 +333,198 @@ extern "C" __declspec(dllexport) int __cdecl nc_pt_run_conditional(
 
 extern "C" __declspec(dllexport) void __cdecl nc_pt_destroy(void* opaque_handle) {
     delete static_cast<SessionHandle*>(opaque_handle);
+}
+
+extern "C" __declspec(dllexport) void* __cdecl nc_pg_create(
+    const wchar_t* model_path,
+    const wchar_t* allowed_path,
+    int intra_threads,
+    wchar_t* error_text,
+    int error_capacity) {
+    SetError(error_text, error_capacity, L"");
+    if (model_path == nullptr || *model_path == L'\0' ||
+        allowed_path == nullptr || *allowed_path == L'\0') {
+        SetError(error_text, error_capacity, L"pinyin generator path is empty");
+        return nullptr;
+    }
+    try {
+        FloatingPointMaskGuard floating_point_guard;
+        auto handle = std::make_unique<ParallelGeneratorHandle>();
+        std::wstring load_error;
+        if (!LoadParallelAllowed(allowed_path, *handle, load_error)) {
+            SetError(error_text, error_capacity, load_error);
+            return nullptr;
+        }
+        const std::lock_guard<std::mutex> initialization_lock(
+            InitializationMutex());
+        Ort::InitApi();
+        Ort::SessionOptions options;
+        options.SetExecutionMode(ExecutionMode::ORT_SEQUENTIAL);
+        options.SetIntraOpNumThreads(std::max(1, intra_threads));
+        options.SetInterOpNumThreads(1);
+        options.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
+        handle->session = std::make_unique<Ort::Session>(
+            Environment(), model_path, options);
+        return handle.release();
+    } catch (const Ort::Exception& error) {
+        SetError(error_text, error_capacity, Utf8ToWide(error.what()));
+    } catch (const std::exception& error) {
+        SetError(error_text, error_capacity, Utf8ToWide(error.what()));
+    } catch (...) {
+        SetError(error_text, error_capacity,
+            L"unknown pinyin generator initialization failure");
+    }
+    return nullptr;
+}
+
+extern "C" __declspec(dllexport) int __cdecl nc_pg_run(
+    void* opaque_handle,
+    const int64_t* pinyin_ids,
+    int syllable_count,
+    int beam_size,
+    uint16_t* output_char_ids,
+    int output_char_capacity,
+    float* output_scores,
+    int output_score_capacity,
+    int* output_count,
+    wchar_t* error_text,
+    int error_capacity) {
+    SetError(error_text, error_capacity, L"");
+    if (output_count != nullptr) {
+        *output_count = 0;
+    }
+    if (opaque_handle == nullptr || pinyin_ids == nullptr ||
+        output_char_ids == nullptr || output_scores == nullptr ||
+        output_count == nullptr || syllable_count <= 0 ||
+        syllable_count > kParallelGeneratorLength || beam_size <= 0 ||
+        beam_size > kParallelGeneratorBeamLimit ||
+        output_char_capacity < beam_size * kParallelGeneratorLength ||
+        output_score_capacity < beam_size) {
+        SetError(error_text, error_capacity,
+            L"invalid pinyin generator inference arguments");
+        return 0;
+    }
+    try {
+        FloatingPointMaskGuard floating_point_guard;
+        auto* handle = static_cast<ParallelGeneratorHandle*>(opaque_handle);
+        if (!handle->session) {
+            SetError(error_text, error_capacity,
+                L"pinyin generator session is unavailable");
+            return 0;
+        }
+        std::array<int64_t, kParallelGeneratorLength> input_ids{};
+        std::copy_n(pinyin_ids, syllable_count, input_ids.begin());
+        for (int position = 0; position < syllable_count; ++position) {
+            if (input_ids[position] < 0 ||
+                input_ids[position] >= handle->pinyin_vocab_size ||
+                handle->allowed_counts[static_cast<size_t>(input_ids[position])] == 0) {
+                SetError(error_text, error_capacity,
+                    L"unsupported pinyin generator syllable");
+                return 0;
+            }
+        }
+
+        const std::array<int64_t, 2> shape{1, kParallelGeneratorLength};
+        auto memory = Ort::MemoryInfo::CreateCpu(
+            OrtArenaAllocator, OrtMemTypeDefault);
+        std::array<Ort::Value, 1> inputs{
+            Ort::Value::CreateTensor<int64_t>(memory, input_ids.data(),
+                input_ids.size(), shape.data(), shape.size())};
+        constexpr std::array<const char*, 1> input_names{"pinyin_ids"};
+        constexpr std::array<const char*, 1> output_names{"character_logits"};
+        auto outputs = handle->session->Run(Ort::RunOptions{nullptr},
+            input_names.data(), inputs.data(), inputs.size(),
+            output_names.data(), output_names.size());
+        if (outputs.size() != 1 || !outputs[0].IsTensor()) {
+            SetError(error_text, error_capacity,
+                L"pinyin generator returned an invalid output tensor");
+            return 0;
+        }
+        const auto info = outputs[0].GetTensorTypeAndShapeInfo();
+        const size_t expected = static_cast<size_t>(kParallelGeneratorLength) *
+            handle->char_vocab_size;
+        if (info.GetElementCount() < expected) {
+            SetError(error_text, error_capacity,
+                L"pinyin generator output tensor is too small");
+            return 0;
+        }
+        const float* logits = outputs[0].GetTensorData<float>();
+
+        struct BeamState {
+            float score{};
+            std::array<uint16_t, kParallelGeneratorLength> ids{};
+        };
+        std::vector<BeamState> beam(1);
+        for (int position = 0; position < syllable_count; ++position) {
+            const float* row = logits +
+                static_cast<size_t>(position) * handle->char_vocab_size;
+            const float row_max = *std::max_element(
+                row, row + handle->char_vocab_size);
+            double sum = 0.0;
+            for (uint32_t id = 0; id < handle->char_vocab_size; ++id) {
+                sum += std::exp(static_cast<double>(row[id] - row_max));
+            }
+            const float normalizer = row_max +
+                static_cast<float>(std::log(sum));
+            const size_t pinyin_id = static_cast<size_t>(input_ids[position]);
+            const size_t allowed_offset = pinyin_id * handle->allowed_limit;
+            const size_t allowed_count = handle->allowed_counts[pinyin_id];
+            std::vector<BeamState> expanded;
+            expanded.reserve(beam.size() * allowed_count);
+            for (const BeamState& parent : beam) {
+                for (size_t allowed_index = 0;
+                     allowed_index < allowed_count; ++allowed_index) {
+                    const uint16_t char_id =
+                        handle->allowed_ids[allowed_offset + allowed_index];
+                    if (char_id >= handle->char_vocab_size) {
+                        continue;
+                    }
+                    BeamState next = parent;
+                    next.ids[position] = char_id;
+                    next.score += row[char_id] - normalizer;
+                    expanded.push_back(next);
+                }
+            }
+            if (expanded.empty()) {
+                SetError(error_text, error_capacity,
+                    L"pinyin generator produced no constrained path");
+                return 0;
+            }
+            std::stable_sort(expanded.begin(), expanded.end(),
+                [](const BeamState& left, const BeamState& right) {
+                    return left.score > right.score;
+                });
+            if (expanded.size() > static_cast<size_t>(beam_size)) {
+                expanded.resize(static_cast<size_t>(beam_size));
+            }
+            beam.swap(expanded);
+        }
+
+        std::fill_n(output_char_ids,
+            beam_size * kParallelGeneratorLength, static_cast<uint16_t>(0));
+        const int count = std::min(beam_size, static_cast<int>(beam.size()));
+        for (int index = 0; index < count; ++index) {
+            std::copy_n(beam[index].ids.begin(), kParallelGeneratorLength,
+                output_char_ids + index * kParallelGeneratorLength);
+            output_scores[index] = beam[index].score /
+                static_cast<float>(std::max(1, syllable_count));
+        }
+        *output_count = count;
+        return 1;
+    } catch (const Ort::Exception& error) {
+        SetError(error_text, error_capacity, Utf8ToWide(error.what()));
+    } catch (const std::exception& error) {
+        SetError(error_text, error_capacity, Utf8ToWide(error.what()));
+    } catch (...) {
+        SetError(error_text, error_capacity,
+            L"unknown pinyin generator inference failure");
+    }
+    return 0;
+}
+
+extern "C" __declspec(dllexport) void __cdecl nc_pg_destroy(
+    void* opaque_handle) {
+    delete static_cast<ParallelGeneratorHandle*>(opaque_handle);
 }
 
 namespace {
@@ -1506,4 +1760,141 @@ extern "C" __declspec(dllexport) int __cdecl nc_lc_run(
 
 extern "C" __declspec(dllexport) void __cdecl nc_lc_destroy(void* opaque_handle) {
     delete static_cast<LocalCompletionHandle*>(opaque_handle);
+}
+
+namespace {
+constexpr size_t kLocalGeneratorInputLength = 125;
+
+struct LocalGeneratorHandle {
+    std::unique_ptr<Ort::Session> session;
+    LocalCompletionIndex index;
+};
+
+bool BuildLocalGeneratorInputs(const LocalCompletionIndex& index,
+    const wchar_t* context, const wchar_t* query_syllables,
+    const wchar_t* top1_text, const wchar_t* top2_text,
+    std::array<int64_t, kLocalGeneratorInputLength>& input_ids,
+    std::array<int64_t, kLocalGeneratorInputLength>& type_ids) {
+    std::vector<int64_t> ids{static_cast<int64_t>(index.header().cls_id)};
+    std::vector<int64_t> types{0};
+    AppendTextInput(index, WideCodepoints(context), 32, 1, ids, types);
+    const auto pinyins = SplitPinyin(query_syllables);
+    const size_t start = pinyins.size() > 24 ? pinyins.size() - 24 : 0;
+    for (size_t position = start; position < pinyins.size(); ++position) {
+        ids.push_back(index.header().pinyin_offset + index.PinyinId(pinyins[position]));
+        types.push_back(2);
+    }
+    ids.push_back(index.header().separator_id);
+    types.push_back(0);
+    AppendTextInput(index, WideCodepoints(top1_text), 32, 3, ids, types);
+    AppendTextInput(index, WideCodepoints(top2_text), 32, 4, ids, types);
+    if (ids.size() > kLocalGeneratorInputLength) {
+        return false;
+    }
+    input_ids.fill(0);
+    type_ids.fill(0);
+    std::copy(ids.begin(), ids.end(), input_ids.begin());
+    std::copy(types.begin(), types.end(), type_ids.begin());
+    return true;
+}
+}
+
+extern "C" __declspec(dllexport) void* __cdecl nc_lcg_create(
+    const wchar_t* model_path, const wchar_t* index_path, int intra_threads,
+    wchar_t* error_text, int error_capacity) {
+    SetError(error_text, error_capacity, L"");
+    try {
+        FloatingPointMaskGuard floating_point_guard;
+        const std::lock_guard<std::mutex> lock(InitializationMutex());
+        Ort::InitApi();
+        auto handle = std::make_unique<LocalGeneratorHandle>();
+        std::wstring index_error;
+        if (!handle->index.Load(index_path, index_error)) {
+            SetError(error_text, error_capacity, index_error);
+            return nullptr;
+        }
+        Ort::SessionOptions options;
+        options.SetExecutionMode(ExecutionMode::ORT_SEQUENTIAL);
+        options.SetIntraOpNumThreads(std::max(1, intra_threads));
+        options.SetInterOpNumThreads(1);
+        options.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
+        handle->session = std::make_unique<Ort::Session>(
+            Environment(), model_path, options);
+        return handle.release();
+    } catch (const Ort::Exception& error) {
+        SetError(error_text, error_capacity, Utf8ToWide(error.what()));
+    } catch (const std::exception& error) {
+        SetError(error_text, error_capacity, Utf8ToWide(error.what()));
+    }
+    return nullptr;
+}
+
+extern "C" __declspec(dllexport) int __cdecl nc_lcg_run(
+    void* opaque_handle, const wchar_t* context,
+    const wchar_t* query_syllables, const wchar_t* top1_text,
+    const wchar_t* top2_text, float minimum_confidence,
+    wchar_t* output_suffix_text, int output_suffix_text_capacity,
+    wchar_t* output_suffix_pinyin, int output_suffix_pinyin_capacity,
+    wchar_t* output_suffix_path, int output_suffix_path_capacity,
+    float* output_confidence, wchar_t* error_text, int error_capacity) {
+    SetError(error_text, error_capacity, L"");
+    SetWideOutput(output_suffix_text, output_suffix_text_capacity, L"");
+    SetWideOutput(output_suffix_pinyin, output_suffix_pinyin_capacity, L"");
+    SetWideOutput(output_suffix_path, output_suffix_path_capacity, L"");
+    try {
+        auto* handle = static_cast<LocalGeneratorHandle*>(opaque_handle);
+        if (handle == nullptr || !handle->session || output_confidence == nullptr) {
+            return 0;
+        }
+        std::array<int64_t, kLocalGeneratorInputLength> input_ids{};
+        std::array<int64_t, kLocalGeneratorInputLength> type_ids{};
+        if (!BuildLocalGeneratorInputs(handle->index, context, query_syllables,
+                top1_text, top2_text, input_ids, type_ids)) {
+            return 0;
+        }
+        const std::array<int64_t, 2> shape{1,
+            static_cast<int64_t>(kLocalGeneratorInputLength)};
+        auto memory = Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault);
+        std::array<Ort::Value, 2> inputs{
+            Ort::Value::CreateTensor<int64_t>(memory, input_ids.data(),
+                input_ids.size(), shape.data(), shape.size()),
+            Ort::Value::CreateTensor<int64_t>(memory, type_ids.data(),
+                type_ids.size(), shape.data(), shape.size())};
+        constexpr std::array<const char*, 2> input_names{"input_ids", "type_ids"};
+        constexpr std::array<const char*, 3> output_names{
+            "word_ids", "log_probabilities", "margins"};
+        const auto outputs = handle->session->Run(Ort::RunOptions{nullptr},
+            input_names.data(), inputs.data(), inputs.size(),
+            output_names.data(), output_names.size());
+        const int64_t word_id = outputs[0].GetTensorData<int64_t>()[0];
+        const float log_probability = outputs[1].GetTensorData<float>()[0];
+        const float margin = outputs[2].GetTensorData<float>()[0];
+        const float confidence = log_probability + 0.15f * margin;
+        if (word_id <= 3 || word_id >= handle->index.header().word_count ||
+            confidence < minimum_confidence) {
+            return 0;
+        }
+        const auto text = handle->index.WordText(static_cast<uint16_t>(word_id));
+        const auto pinyin = handle->index.WordPinyin(static_cast<uint16_t>(word_id));
+        if (text.empty() || pinyin.empty()) {
+            return 0;
+        }
+        const std::wstring wide_text = Utf8TextToWide(text);
+        SetWideOutput(output_suffix_text, output_suffix_text_capacity, wide_text);
+        SetWideOutput(output_suffix_pinyin, output_suffix_pinyin_capacity,
+            Utf8TextToWide(pinyin));
+        SetWideOutput(output_suffix_path, output_suffix_path_capacity, wide_text);
+        *output_confidence = confidence;
+        return 1;
+    } catch (const Ort::Exception& error) {
+        SetError(error_text, error_capacity, Utf8ToWide(error.what()));
+    } catch (const std::exception& error) {
+        SetError(error_text, error_capacity, Utf8ToWide(error.what()));
+    }
+    return 0;
+}
+
+extern "C" __declspec(dllexport) void __cdecl nc_lcg_destroy(
+    void* opaque_handle) {
+    delete static_cast<LocalGeneratorHandle*>(opaque_handle);
 }

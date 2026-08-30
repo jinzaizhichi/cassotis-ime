@@ -42,7 +42,9 @@ type
         function set_caret(const session_id: string; const point: TPoint; const has_caret: Boolean;
             const line_height: Integer = 0; const source: TncCaretAnchorSource = casCursor;
             const anchor_score: Integer = 0; const terminal_like_target: Boolean = False): Boolean;
-        function set_surrounding(const session_id: string; const left_context: string): Boolean;
+        function set_surrounding(const session_id: string;
+            const left_context: string; const document_key: string = '';
+            const document_snapshot: string = ''): Boolean;
         function reload_config(const session_id: string): Boolean;
         function clear_user_dictionary(const session_id: string): Boolean;
         function reset_session(const session_id: string): Boolean;
@@ -655,7 +657,9 @@ begin
     Result := (Length(fields) >= 1) and SameText(fields[0], 'OK');
 end;
 
-function TncIpcClient.set_surrounding(const session_id: string; const left_context: string): Boolean;
+function TncIpcClient.set_surrounding(const session_id: string;
+    const left_context: string; const document_key: string;
+    const document_snapshot: string): Boolean;
 var
     request_text: string;
     response_text: string;
@@ -668,7 +672,22 @@ begin
         Exit;
     end;
 
-    request_text := 'SET_SURROUNDING'#9 + session_id + #9 + encode_ipc_text(left_context);
+    if (document_key <> '') and (document_snapshot <> '') then
+    begin
+        request_text := 'SET_SURROUNDING'#9 + session_id + #9 +
+            encode_ipc_text(document_key) + #9 + encode_ipc_text(left_context) +
+            #9 + encode_ipc_text(document_snapshot);
+    end
+    else if document_key <> '' then
+    begin
+        request_text := 'SET_SURROUNDING'#9 + session_id + #9 +
+            encode_ipc_text(document_key) + #9 + encode_ipc_text(left_context);
+    end
+    else
+    begin
+        request_text := 'SET_SURROUNDING'#9 + session_id + #9 +
+            encode_ipc_text(left_context);
+    end;
     if not call_pipe(request_text, response_text) then
     begin
         Result := False;

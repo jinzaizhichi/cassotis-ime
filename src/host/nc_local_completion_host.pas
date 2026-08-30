@@ -57,6 +57,22 @@ type
             const error_text: PWideChar;
             const error_capacity: Integer): Integer; cdecl;
         TncLcDestroy = procedure(const handle: Pointer); cdecl;
+        TncLcgCreate = function(const model_path, index_path: PWideChar;
+            const intra_threads: Integer; const error_text: PWideChar;
+            const error_capacity: Integer): Pointer; cdecl;
+        TncLcgRun = function(const handle: Pointer;
+            const context, query_syllables, top1_text, top2_text: PWideChar;
+            const minimum_confidence: Single;
+            const output_suffix_text: PWideChar;
+            const output_suffix_text_capacity: Integer;
+            const output_suffix_pinyin: PWideChar;
+            const output_suffix_pinyin_capacity: Integer;
+            const output_suffix_path: PWideChar;
+            const output_suffix_path_capacity: Integer;
+            const output_confidence: PSingle;
+            const error_text: PWideChar;
+            const error_capacity: Integer): Integer; cdecl;
+        TncLcgDestroy = procedure(const handle: Pointer); cdecl;
     private
         m_base_directory: string;
         m_lock: TCriticalSection;
@@ -70,8 +86,11 @@ type
         m_onnx_runtime_module: HMODULE;
         m_onnx_provider_module: HMODULE;
         m_session: Pointer;
+        m_generator_session: Pointer;
         m_run_function: TncLcRun;
         m_destroy_function: TncLcDestroy;
+        m_generator_run_function: TncLcgRun;
+        m_generator_destroy_function: TncLcgDestroy;
         m_minimum_confidence: Single;
         m_ready: Boolean;
         m_last_error: string;
@@ -110,6 +129,7 @@ uses
 const
     c_model_threads = 4;
     c_result_timeout_ms = 40;
+    c_generator_minimum_confidence: Single = -2.8333864;
 
 constructor TncLocalCompletionWorker.create(
     const owner: TncLocalCompletionHost);
@@ -152,8 +172,11 @@ begin
     m_onnx_runtime_module := 0;
     m_onnx_provider_module := 0;
     m_session := nil;
+    m_generator_session := nil;
     m_run_function := nil;
     m_destroy_function := nil;
+    m_generator_run_function := nil;
+    m_generator_destroy_function := nil;
     m_minimum_confidence := 0.0;
     m_ready := False;
     m_last_error := '';
@@ -179,6 +202,12 @@ begin
     begin
         m_destroy_function(m_session);
         m_session := nil;
+    end;
+    if (m_generator_session <> nil) and
+        Assigned(m_generator_destroy_function) then
+    begin
+        m_generator_destroy_function(m_generator_session);
+        m_generator_session := nil;
     end;
     if m_module <> 0 then
     begin
@@ -229,6 +258,7 @@ var
     provider_path: string;
     model_directory: string;
     model_path: string;
+    generator_model_path: string;
     index_path: string;
     manifest_path: string;
     root_value: TJSONValue;
@@ -236,6 +266,7 @@ var
     gate_object: TJSONObject;
     dev_object: TJSONObject;
     index_object: TJSONObject;
+    generator_object: TJSONObject;
     threshold_value: TJSONValue;
     format_value: TJSONValue;
     model_file_value: TJSONValue;
@@ -244,11 +275,14 @@ var
     index_file_value: TJSONValue;
     index_hash_value: TJSONValue;
     index_vocab_hash_value: TJSONValue;
+    generator_hash_value: TJSONValue;
     model_hash: string;
     vocab_hash: string;
     index_hash: string;
     index_vocab_hash: string;
+    generator_hash: string;
     create_function: TncLcCreate;
+    generator_create_function: TncLcgCreate;
     error_buffer: array[0..511] of WideChar;
 begin
     wrapper_path := TPath.Combine(m_base_directory,
@@ -259,6 +293,8 @@ begin
     model_directory := TPath.Combine(m_base_directory, 'local_completion');
     model_path := TPath.Combine(model_directory,
         'local_completion_path_ranker_int8.onnx');
+    generator_model_path := TPath.Combine(model_directory,
+        'local_completion_generator_int8.onnx');
     index_path := TPath.Combine(model_directory,
         'local_completion_index.bin');
     manifest_path := TPath.Combine(model_directory, 'model_manifest.json');
@@ -354,6 +390,17 @@ begin
         vocab_hash := LowerCase(vocab_hash_value.Value);
         index_hash := LowerCase(index_hash_value.Value);
         index_vocab_hash := LowerCase(index_vocab_hash_value.Value);
+        generator_object := root_object.GetValue(
+            'fallback_generator') as TJSONObject;
+        generator_hash := '';
+        if generator_object <> nil then
+        begin
+            generator_hash_value := generator_object.GetValue('model_sha256');
+            if generator_hash_value is TJSONString then
+            begin
+                generator_hash := LowerCase(generator_hash_value.Value);
+            end;
+        end;
         if (Length(model_hash) <> 64) or (Length(vocab_hash) <> 64) or
             (Length(index_hash) <> 64) or
             (not SameText(vocab_hash, index_vocab_hash)) then
@@ -373,6 +420,14 @@ begin
         index_hash) then
     begin
         raise EInvalidOp.Create('local-completion index checksum mismatch');
+    end;
+    if FileExists(generator_model_path) and
+        ((Length(generator_hash) <> 64) or
+        (not SameText(LowerCase(THashSHA2.GetHashStringFromFile(
+        generator_model_path)), generator_hash))) then
+    begin
+        raise EInvalidOp.Create(
+            'local-completion generator checksum mismatch');
     end;
 
     m_onnx_provider_module := LoadLibraryEx(PChar(provider_path), 0,
@@ -402,6 +457,12 @@ begin
         PAnsiChar(AnsiString('nc_lc_run'))));
     m_destroy_function := TncLcDestroy(GetProcAddress(m_module,
         PAnsiChar(AnsiString('nc_lc_destroy'))));
+    generator_create_function := TncLcgCreate(GetProcAddress(m_module,
+        PAnsiChar(AnsiString('nc_lcg_create'))));
+    m_generator_run_function := TncLcgRun(GetProcAddress(m_module,
+        PAnsiChar(AnsiString('nc_lcg_run'))));
+    m_generator_destroy_function := TncLcgDestroy(GetProcAddress(m_module,
+        PAnsiChar(AnsiString('nc_lcg_destroy'))));
     if (not Assigned(create_function)) or
         (not Assigned(m_run_function)) or
         (not Assigned(m_destroy_function)) then
@@ -414,6 +475,21 @@ begin
     if m_session = nil then
     begin
         raise EInvalidOp.Create(string(PWideChar(@error_buffer[0])));
+    end;
+    if FileExists(generator_model_path) and
+        Assigned(generator_create_function) and
+        Assigned(m_generator_run_function) and
+        Assigned(m_generator_destroy_function) then
+    begin
+        FillChar(error_buffer, SizeOf(error_buffer), 0);
+        m_generator_session := generator_create_function(
+            PChar(generator_model_path), PChar(index_path), c_model_threads,
+            @error_buffer[0], Length(error_buffer));
+        if m_generator_session = nil then
+        begin
+            log_message('WARN', 'generator disabled: ' +
+                string(PWideChar(@error_buffer[0])));
+        end;
     end;
     m_lock.Acquire;
     try
@@ -479,6 +555,29 @@ begin
         @suffix_path[0], Length(suffix_path),
         @base_rank, @confidence, @error_buffer[0],
         Length(error_buffer)) <> 0;
+    if (not Result) and (error_buffer[0] = #0) and
+        (m_generator_session <> nil) and
+        Assigned(m_generator_run_function) then
+    begin
+        FillChar(suffix_text, SizeOf(suffix_text), 0);
+        FillChar(suffix_pinyin, SizeOf(suffix_pinyin), 0);
+        FillChar(suffix_path, SizeOf(suffix_path), 0);
+        confidence := 0.0;
+        Result := m_generator_run_function(m_generator_session,
+            PChar(task.request.context_text),
+            PChar(task.request.query_syllables),
+            PChar(task.request.top1_text),
+            PChar(task.request.top2_text),
+            c_generator_minimum_confidence,
+            @suffix_text[0], Length(suffix_text),
+            @suffix_pinyin[0], Length(suffix_pinyin),
+            @suffix_path[0], Length(suffix_path),
+            @confidence, @error_buffer[0], Length(error_buffer)) <> 0;
+        if Result then
+        begin
+            base_rank := 1;
+        end;
+    end;
     elapsed_ms := GetTickCount64 - started_at;
     if (not Result) and (error_buffer[0] <> #0) then
     begin

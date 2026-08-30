@@ -82,7 +82,13 @@ type
         m_last_sent_caret_line_height: Integer;
         m_last_sent_caret_tick: DWORD;
         m_last_sent_surrounding_text: string;
+        m_last_sent_document_key: string;
         m_last_sent_surrounding_valid: Boolean;
+        m_document_context_serial: UInt64;
+        m_read_lock_surrounding_text: string;
+        m_read_lock_document_key: string;
+        m_read_lock_surrounding_valid: Boolean;
+        m_last_read_lock_capture_tick: UInt64;
         m_last_surrounding_request_tick: UInt64;
         m_last_context_activate_tick: UInt64;
         m_surrounding_needs_refresh: Boolean;
@@ -170,6 +176,13 @@ type
             out chosen_score: Integer): Boolean;
         function request_text_ext_update(const context: ITfContext): Boolean;
         function request_surrounding_text(const context: ITfContext; out left_text: string): Boolean;
+        function current_document_context_key: string;
+        procedure rotate_document_context;
+        function is_password_window_context(const context: ITfContext): Boolean;
+        function is_protected_input_scope(const context: ITfContext;
+            const ec: TfEditCookie): Boolean;
+        procedure capture_surrounding_text_under_lock(const context: ITfContext;
+            const ec: TfEditCookie);
         function maybe_update_surrounding_text(const context: ITfContext; const force: Boolean = False): Boolean;
         function update_surrounding_text(const context: ITfContext): Boolean;
         function update_composition(const context: ITfContext; const text: string): Boolean;
@@ -776,7 +789,13 @@ begin
     m_last_sent_caret_line_height := 0;
     m_last_sent_caret_tick := 0;
     m_last_sent_surrounding_text := '';
+    m_last_sent_document_key := '';
     m_last_sent_surrounding_valid := False;
+    m_document_context_serial := 1;
+    m_read_lock_surrounding_text := '';
+    m_read_lock_document_key := '';
+    m_read_lock_surrounding_valid := False;
+    m_last_read_lock_capture_tick := 0;
     m_last_surrounding_request_tick := 0;
     m_last_context_activate_tick := 0;
     m_surrounding_needs_refresh := True;
@@ -828,6 +847,7 @@ begin
         m_last_ipc_error := 0;
         invalidate_sent_caret;
         m_last_sent_surrounding_text := '';
+        m_last_sent_document_key := '';
         m_last_sent_surrounding_valid := False;
         m_last_surrounding_request_tick := 0;
         m_last_context_activate_tick := 0;
@@ -1417,6 +1437,7 @@ begin
     end;
 
     m_context := context;
+    rotate_document_context;
     m_has_caret_point := False;
     m_pending_caret_update := False;
     invalidate_sent_caret;
@@ -1461,6 +1482,7 @@ begin
         m_context := nil;
         if m_doc_mgr.GetTop(m_context) = S_OK then
         begin
+            rotate_document_context;
             m_last_surrounding_request_tick := 0;
             m_last_context_activate_tick := GetTickCount64;
             m_surrounding_needs_refresh := True;
@@ -1593,6 +1615,7 @@ begin
             unadvise_context_sinks;
             m_doc_mgr := nil;
             m_context := nil;
+            rotate_document_context;
             m_modifier_shortcut_pending := False;
             m_modifier_shortcut_canceled := False;
             m_modifier_shortcut_key_code := 0;
@@ -2678,6 +2701,7 @@ begin
             begin
                 advise_context_sinks(m_context);
             end;
+            rotate_document_context;
         end;
         // Keep active state aligned to document focus changes.
         // We do not use OnSetFocus callback for active toggles to avoid per-key
@@ -2744,6 +2768,8 @@ begin
     begin
         Exit;
     end;
+
+    capture_surrounding_text_under_lock(pic, ecReadOnly);
 
     if m_composition = nil then
     begin
@@ -3806,12 +3832,6 @@ begin
 end;
 
 function TncTextService.request_surrounding_text(const context: ITfContext; out left_text: string): Boolean;
-const
-    c_surrounding_max_chars = 64;
-var
-    edit_session: ITfEditSession;
-    session_hr: HRESULT;
-    hr: HRESULT;
 begin
     left_text := '';
     Result := False;
@@ -3819,10 +3839,228 @@ begin
     begin
         Exit;
     end;
+    if is_password_window_context(context) then
+    begin
+        Result := True;
+        Exit;
+    end;
+    if m_read_lock_surrounding_valid and
+        SameText(m_read_lock_document_key, current_document_context_key) then
+    begin
+        left_text := m_read_lock_surrounding_text;
+        Result := True;
+        Exit;
+    end;
 
-    edit_session := TncSurroundingTextEditSession.create(context, @m_composition, c_surrounding_max_chars, @left_text);
-    hr := context.RequestEditSession(m_client_id, edit_session, TF_ES_READ or TF_ES_SYNC, session_hr);
-    Result := (hr = S_OK) and (session_hr = S_OK);
+    { Never request a synchronous document scan from the key path. The cache
+      is refreshed only while TSF has already granted a read lock. }
+end;
+
+function TncTextService.current_document_context_key: string;
+begin
+    if m_session_id = '' then
+    begin
+        Result := '';
+        Exit;
+    end;
+    Result := m_session_id + ':' + IntToStr(Int64(m_document_context_serial));
+end;
+
+procedure TncTextService.rotate_document_context;
+begin
+    Inc(m_document_context_serial);
+    if m_document_context_serial = 0 then
+    begin
+        m_document_context_serial := 1;
+    end;
+    m_last_sent_surrounding_text := '';
+    m_last_sent_document_key := '';
+    m_last_sent_surrounding_valid := False;
+    m_read_lock_surrounding_text := '';
+    m_read_lock_document_key := '';
+    m_read_lock_surrounding_valid := False;
+    m_last_read_lock_capture_tick := 0;
+    m_last_surrounding_request_tick := 0;
+    m_surrounding_needs_refresh := True;
+end;
+
+procedure TncTextService.capture_surrounding_text_under_lock(
+    const context: ITfContext; const ec: TfEditCookie);
+const
+    c_surrounding_max_chars = 1024;
+    c_capture_interval_ms = 120;
+var
+    now_tick: UInt64;
+    captured_text: string;
+    reader: TncSurroundingTextEditSession;
+
+    procedure clear_cached_snapshot;
+    begin
+        m_read_lock_surrounding_text := '';
+        m_read_lock_document_key := current_document_context_key;
+        m_read_lock_surrounding_valid := True;
+        m_surrounding_needs_refresh := True;
+    end;
+
+begin
+    if context = nil then
+    begin
+        Exit;
+    end;
+    if is_password_window_context(context) or
+        is_protected_input_scope(context, ec) then
+    begin
+        clear_cached_snapshot;
+        Exit;
+    end;
+    now_tick := GetTickCount64;
+    if (m_last_read_lock_capture_tick <> 0) and
+        (now_tick - m_last_read_lock_capture_tick < c_capture_interval_ms) then
+    begin
+        Exit;
+    end;
+    m_last_read_lock_capture_tick := now_tick;
+    captured_text := '';
+    reader := TncSurroundingTextEditSession.create(context, @m_composition,
+        c_surrounding_max_chars, @captured_text);
+    try
+        try
+            if not reader.read_left_text(ec) then
+            begin
+                clear_cached_snapshot;
+                Exit;
+            end;
+        except
+            clear_cached_snapshot;
+            Exit;
+        end;
+    finally
+        reader.Free;
+    end;
+    m_read_lock_surrounding_text := captured_text;
+    m_read_lock_document_key := current_document_context_key;
+    m_read_lock_surrounding_valid := True;
+    m_surrounding_needs_refresh := True;
+end;
+
+function TncTextService.is_protected_input_scope(
+    const context: ITfContext; const ec: TfEditCookie): Boolean;
+const
+    c_input_scope_private = 61;
+    c_input_scope_numeric_password = 63;
+    c_input_scope_numeric_pin = 64;
+    c_input_scope_alphanumeric_pin = 65;
+    c_input_scope_alphanumeric_pin_set = 66;
+var
+    prop: ITfReadOnlyProperty;
+    selection: TF_SELECTION;
+    fetched: ULONG;
+    value: OleVariant;
+    unknown_value: IUnknown;
+    input_scope: ITfInputScope;
+    scopes: PInputScope;
+    scope_count: UINT;
+    idx: UINT;
+    guid: TGUID;
+    scope_value: Integer;
+begin
+    Result := False;
+    if context = nil then
+    begin
+        Exit;
+    end;
+
+    FillChar(selection, SizeOf(selection), 0);
+    fetched := 0;
+    if (context.GetSelection(ec, 0, 1, selection, fetched) <> S_OK) or
+        (fetched = 0) or (selection.range = nil) then
+    begin
+        Exit;
+    end;
+
+    prop := nil;
+    guid := GUID_PROP_INPUTSCOPE;
+    if (context.GetAppProperty(guid, prop) <> S_OK) or (prop = nil) then
+    begin
+        Exit;
+    end;
+
+    value := Unassigned;
+    if prop.GetValue(ec, selection.range, value) <> S_OK then
+    begin
+        Exit;
+    end;
+    try
+        if VarType(value) <> varUnknown then
+        begin
+            Exit;
+        end;
+        unknown_value := IUnknown(value);
+        if (unknown_value = nil) or
+            (not Supports(unknown_value, ITfInputScope, input_scope)) then
+        begin
+            Exit;
+        end;
+
+        scopes := nil;
+        scope_count := 0;
+        if input_scope.GetInputScopes(@scopes, @scope_count) <> S_OK then
+        begin
+            Exit;
+        end;
+        try
+            if scope_count = 0 then
+            begin
+                Exit;
+            end;
+            for idx := 0 to scope_count - 1 do
+            begin
+                scope_value := Integer(PInputScope(NativeUInt(scopes) +
+                    (NativeUInt(idx) * SizeOf(TInputScope)))^);
+                if (scope_value = Integer(IS_PASSWORD)) or
+                    (scope_value = c_input_scope_private) or
+                    (scope_value = c_input_scope_numeric_password) or
+                    (scope_value = c_input_scope_numeric_pin) or
+                    (scope_value = c_input_scope_alphanumeric_pin) or
+                    (scope_value = c_input_scope_alphanumeric_pin_set) then
+                begin
+                    Result := True;
+                    Exit;
+                end;
+            end;
+        finally
+            if scopes <> nil then
+            begin
+                CoTaskMemFree(scopes);
+            end;
+        end;
+    finally
+        VarClear(value);
+    end;
+end;
+
+function TncTextService.is_password_window_context(
+    const context: ITfContext): Boolean;
+const
+    c_edit_password_style = $0020;
+var
+    view: ITfContextView;
+    window_handle: Winapi.Windows.HWND;
+    style: NativeInt;
+begin
+    Result := False;
+    if (context = nil) or (context.GetActiveView(view) <> S_OK) or
+        (view = nil) then
+    begin
+        Exit;
+    end;
+    window_handle := 0;
+    if (view.GetWnd(window_handle) <> S_OK) or (window_handle = 0) then
+    begin
+        Exit;
+    end;
+    style := GetWindowLongPtr(window_handle, GWL_STYLE);
+    Result := (style and c_edit_password_style) <> 0;
 end;
 
 function TncTextService.maybe_update_surrounding_text(const context: ITfContext; const force: Boolean): Boolean;
@@ -3861,6 +4099,7 @@ end;
 function TncTextService.update_surrounding_text(const context: ITfContext): Boolean;
 var
     left_text: string;
+    document_key: string;
 begin
     Result := False;
     if (context = nil) or (m_ipc_client = nil) or (m_session_id = '') then
@@ -3871,15 +4110,20 @@ begin
     left_text := '';
     if request_surrounding_text(context, left_text) then
     begin
-        if m_last_sent_surrounding_valid and (m_last_sent_surrounding_text = left_text) then
+        document_key := current_document_context_key;
+        if m_last_sent_surrounding_valid and
+            (m_last_sent_document_key = document_key) and
+            (m_last_sent_surrounding_text = left_text) then
         begin
             m_surrounding_needs_refresh := False;
             Exit;
         end;
 
-        if m_ipc_client.set_surrounding(m_session_id, left_text) then
+        if m_ipc_client.set_surrounding(m_session_id, left_text,
+            document_key, left_text) then
         begin
             m_last_sent_surrounding_text := left_text;
+            m_last_sent_document_key := document_key;
             m_last_sent_surrounding_valid := True;
             m_surrounding_needs_refresh := False;
             mark_session_dirty;

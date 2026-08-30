@@ -46,10 +46,10 @@ type
         m_composition_ref: PITfComposition;
         m_max_chars: Integer;
         m_out_text: PString;
-        function read_left_text(const ec: TfEditCookie): Boolean;
     public
         constructor create(const context: ITfContext; const composition_ref: PITfComposition; const max_chars: Integer;
             const out_text: PString);
+        function read_left_text(const ec: TfEditCookie): Boolean;
         function DoEditSession(ec: TfEditCookie): HResult; stdcall;
     end;
 

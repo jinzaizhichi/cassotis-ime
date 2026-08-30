@@ -179,7 +179,9 @@ type
         procedure update_caret(const session_id: string; const point: TPoint; const has_caret: Boolean;
             const line_height: Integer; const terminal_like_target: Boolean; const source: TncCaretAnchorSource;
             const anchor_score: Integer);
-        procedure update_surrounding(const session_id: string; const left_context: string);
+        procedure update_surrounding(const session_id: string;
+            const left_context: string; const document_key: string = '';
+            const document_snapshot: string = '');
         procedure reset_session(const session_id: string);
     end;
 
@@ -3249,7 +3251,9 @@ begin
     end;
 end;
 
-procedure TncEngineHost.update_surrounding(const session_id: string; const left_context: string);
+procedure TncEngineHost.update_surrounding(const session_id: string;
+    const left_context: string; const document_key: string;
+    const document_snapshot: string);
 var
     session: TncHostSession;
 begin
@@ -3260,7 +3264,8 @@ begin
         begin
             Exit;
         end;
-        session.engine.set_external_left_context(left_context);
+        session.engine.set_external_left_context(left_context, document_key,
+            document_snapshot);
     finally
         m_lock.Release;
     end;
@@ -3698,7 +3703,18 @@ begin
 
         if SameText(cmd, 'SET_SURROUNDING') then
         begin
-            if Length(fields) >= 3 then
+            if Length(fields) >= 5 then
+            begin
+                m_host.update_surrounding(session_id,
+                    decode_ipc_text(fields[3]), decode_ipc_text(fields[2]),
+                    decode_ipc_text(fields[4]));
+            end
+            else if Length(fields) >= 4 then
+            begin
+                m_host.update_surrounding(session_id,
+                    decode_ipc_text(fields[3]), decode_ipc_text(fields[2]));
+            end
+            else if Length(fields) >= 3 then
             begin
                 m_host.update_surrounding(session_id, decode_ipc_text(fields[2]));
             end
