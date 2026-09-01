@@ -844,7 +844,7 @@ begin
         Exit;
     end;
 
-    if m_ipc_client.reset_session(m_session_id) then
+    if m_ipc_client.reset_session(m_session_id, not force) then
     begin
         m_session_dirty := False;
         m_last_ipc_error := 0;
@@ -1437,6 +1437,12 @@ begin
     if (m_composition <> nil) and (m_composition_context <> nil) and (m_composition_context <> context) then
     begin
         cancel_composition;
+    end;
+
+    if (m_ipc_client <> nil) and (m_session_id <> '') then
+    begin
+        mark_session_dirty;
+        reset_session_if_needed(True);
     end;
 
     m_context := context;
@@ -2698,6 +2704,11 @@ begin
         if (pdim <> nil) and (m_doc_mgr <> nil) and (pdim = m_doc_mgr) then
         begin
             cancel_composition;
+            if (m_ipc_client <> nil) and (m_session_id <> '') then
+            begin
+                mark_session_dirty;
+                reset_session_if_needed(True);
+            end;
             unadvise_context_sinks;
             m_doc_mgr := nil;
             m_context := nil;
@@ -2715,6 +2726,11 @@ begin
         if pdimFocus <> m_doc_mgr then
         begin
             cancel_composition;
+            if (m_ipc_client <> nil) and (m_session_id <> '') then
+            begin
+                mark_session_dirty;
+                reset_session_if_needed(True);
+            end;
             unadvise_context_sinks;
             m_doc_mgr := pdimFocus;
             m_context := nil;

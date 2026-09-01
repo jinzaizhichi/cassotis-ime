@@ -45,6 +45,7 @@ type
         TncLcRun = function(const handle: Pointer;
             const context, query_syllables, top1_text, top1_path,
             top2_text, top2_path: PWideChar;
+            const phonetic_only: Integer;
             const minimum_confidence: Single;
             const output_suffix_text: PWideChar;
             const output_suffix_text_capacity: Integer;
@@ -53,7 +54,26 @@ type
             const output_suffix_path: PWideChar;
             const output_suffix_path_capacity: Integer;
             const output_base_rank: PInteger;
+            const output_replace_units: PInteger;
             const output_confidence: PSingle;
+            const error_text: PWideChar;
+            const error_capacity: Integer): Integer; cdecl;
+        TncLcRunPool = function(const handle: Pointer;
+            const context, query_syllables, top1_text, top1_path,
+            top2_text, top2_path: PWideChar;
+            const phonetic_only: Integer;
+            const output_suffix_texts: PWideChar;
+            const output_suffix_text_stride: Integer;
+            const output_suffix_pinyins: PWideChar;
+            const output_suffix_pinyin_stride: Integer;
+            const output_suffix_paths: PWideChar;
+            const output_suffix_path_stride: Integer;
+            const output_base_ranks: PInteger;
+            const output_replace_units: PInteger;
+            const output_scores: PSingle;
+            const output_capacity: Integer;
+            const output_abstain_score: PSingle;
+            const output_candidate_count: PInteger;
             const error_text: PWideChar;
             const error_capacity: Integer): Integer; cdecl;
         TncLcDestroy = procedure(const handle: Pointer); cdecl;
@@ -88,10 +108,13 @@ type
         m_session: Pointer;
         m_generator_session: Pointer;
         m_run_function: TncLcRun;
+        m_run_pool_function: TncLcRunPool;
         m_destroy_function: TncLcDestroy;
         m_generator_run_function: TncLcgRun;
         m_generator_destroy_function: TncLcgDestroy;
         m_minimum_confidence: Single;
+        m_result_timeout_ms: UInt64;
+        m_capture_candidate_pool: Boolean;
         m_ready: Boolean;
         m_last_error: string;
         procedure worker_execute;
@@ -110,7 +133,9 @@ type
     public
         constructor create(const base_directory: string;
             const result_event: TncLocalCompletionResultEvent;
-            const finished_event: TncLocalCompletionFinishedEvent = nil);
+            const finished_event: TncLocalCompletionFinishedEvent = nil;
+            const deterministic_benchmark: Boolean = False;
+            const capture_candidate_pool: Boolean = False);
         destructor Destroy; override;
         procedure enqueue(const task: TncLocalCompletionTask);
         function ready: Boolean;
@@ -130,6 +155,10 @@ const
     c_model_threads = 4;
     c_result_timeout_ms = 40;
     c_generator_minimum_confidence: Single = -2.8333864;
+    c_completion_pool_capacity = 32;
+    c_completion_text_stride = 128;
+    c_completion_pinyin_stride = 256;
+    c_completion_path_stride = 128;
 
 constructor TncLocalCompletionWorker.create(
     const owner: TncLocalCompletionHost);
@@ -158,7 +187,9 @@ end;
 
 constructor TncLocalCompletionHost.create(const base_directory: string;
     const result_event: TncLocalCompletionResultEvent;
-    const finished_event: TncLocalCompletionFinishedEvent);
+    const finished_event: TncLocalCompletionFinishedEvent;
+    const deterministic_benchmark: Boolean;
+    const capture_candidate_pool: Boolean);
 begin
     inherited create;
     m_base_directory := base_directory;
@@ -174,10 +205,20 @@ begin
     m_session := nil;
     m_generator_session := nil;
     m_run_function := nil;
+    m_run_pool_function := nil;
     m_destroy_function := nil;
     m_generator_run_function := nil;
     m_generator_destroy_function := nil;
     m_minimum_confidence := 0.0;
+    m_capture_candidate_pool := capture_candidate_pool;
+    if deterministic_benchmark then
+    begin
+        m_result_timeout_ms := 0;
+    end
+    else
+    begin
+        m_result_timeout_ms := c_result_timeout_ms;
+    end;
     m_ready := False;
     m_last_error := '';
     m_worker := TncLocalCompletionWorker.create(Self);
@@ -359,7 +400,7 @@ begin
         end;
         m_minimum_confidence := TJSONNumber(threshold_value).AsDouble;
         if IsNan(m_minimum_confidence) or IsInfinite(m_minimum_confidence) or
-            (m_minimum_confidence < 0.0) or
+            (m_minimum_confidence < -1000.0) or
             (m_minimum_confidence > 1000.0) then
         begin
             raise EInvalidOp.Create('local-completion threshold is out of range');
@@ -455,6 +496,8 @@ begin
         PAnsiChar(AnsiString('nc_lc_create'))));
     m_run_function := TncLcRun(GetProcAddress(m_module,
         PAnsiChar(AnsiString('nc_lc_run'))));
+    m_run_pool_function := TncLcRunPool(GetProcAddress(m_module,
+        PAnsiChar(AnsiString('nc_lc_run_pool'))));
     m_destroy_function := TncLcDestroy(GetProcAddress(m_module,
         PAnsiChar(AnsiString('nc_lc_destroy'))));
     generator_create_function := TncLcgCreate(GetProcAddress(m_module,
@@ -530,7 +573,21 @@ var
     suffix_path: array[0..127] of WideChar;
     error_buffer: array[0..511] of WideChar;
     base_rank: Integer;
+    replace_units: Integer;
     confidence: Single;
+    pool_suffix_texts: array[0..
+        c_completion_pool_capacity * c_completion_text_stride - 1] of WideChar;
+    pool_suffix_pinyins: array[0..
+        c_completion_pool_capacity * c_completion_pinyin_stride - 1] of WideChar;
+    pool_suffix_paths: array[0..
+        c_completion_pool_capacity * c_completion_path_stride - 1] of WideChar;
+    pool_base_ranks: array[0..c_completion_pool_capacity - 1] of Integer;
+    pool_replace_units: array[0..c_completion_pool_capacity - 1] of Integer;
+    pool_scores: array[0..c_completion_pool_capacity - 1] of Single;
+    pool_abstain_score: Single;
+    pool_candidate_count: Integer;
+    pool_idx: Integer;
+    second_score: Single;
     started_at: UInt64;
     elapsed_ms: UInt64;
 begin
@@ -540,22 +597,111 @@ begin
     FillChar(suffix_path, SizeOf(suffix_path), 0);
     FillChar(error_buffer, SizeOf(error_buffer), 0);
     base_rank := 0;
+    replace_units := 0;
     confidence := 0.0;
+    pool_abstain_score := 0.0;
+    pool_candidate_count := 0;
     started_at := GetTickCount64;
-    Result := m_run_function(m_session,
-        PChar(task.request.context_text),
-        PChar(task.request.query_syllables),
-        PChar(task.request.top1_text),
-        PChar(task.request.top1_anchor_path),
-        PChar(task.request.top2_text),
-        PChar(task.request.top2_anchor_path),
-        m_minimum_confidence,
-        @suffix_text[0], Length(suffix_text),
-        @suffix_pinyin[0], Length(suffix_pinyin),
-        @suffix_path[0], Length(suffix_path),
-        @base_rank, @confidence, @error_buffer[0],
-        Length(error_buffer)) <> 0;
-    if (not Result) and (error_buffer[0] = #0) and
+    if m_capture_candidate_pool and Assigned(m_run_pool_function) then
+    begin
+        FillChar(pool_suffix_texts, SizeOf(pool_suffix_texts), 0);
+        FillChar(pool_suffix_pinyins, SizeOf(pool_suffix_pinyins), 0);
+        FillChar(pool_suffix_paths, SizeOf(pool_suffix_paths), 0);
+        FillChar(pool_base_ranks, SizeOf(pool_base_ranks), 0);
+        FillChar(pool_replace_units, SizeOf(pool_replace_units), 0);
+        FillChar(pool_scores, SizeOf(pool_scores), 0);
+        if m_run_pool_function(m_session,
+            PChar(task.request.context_text),
+            PChar(task.request.query_syllables),
+            PChar(task.request.top1_text),
+            PChar(task.request.top1_anchor_path),
+            PChar(task.request.top2_text),
+            PChar(task.request.top2_anchor_path),
+            Ord(task.request.phonetic_only),
+            @pool_suffix_texts[0], c_completion_text_stride,
+            @pool_suffix_pinyins[0], c_completion_pinyin_stride,
+            @pool_suffix_paths[0], c_completion_path_stride,
+            @pool_base_ranks[0], @pool_replace_units[0], @pool_scores[0],
+            c_completion_pool_capacity, @pool_abstain_score,
+            @pool_candidate_count, @error_buffer[0],
+            Length(error_buffer)) <> 0 then
+        begin
+            pool_candidate_count := EnsureRange(pool_candidate_count, 0,
+                c_completion_pool_capacity);
+            SetLength(completion_result.candidates, pool_candidate_count);
+            for pool_idx := 0 to pool_candidate_count - 1 do
+            begin
+                completion_result.candidates[pool_idx].suffix_text :=
+                    string(PWideChar(@pool_suffix_texts[
+                    pool_idx * c_completion_text_stride]));
+                completion_result.candidates[pool_idx].suffix_pinyin_path :=
+                    string(PWideChar(@pool_suffix_pinyins[
+                    pool_idx * c_completion_pinyin_stride]));
+                completion_result.candidates[pool_idx].suffix_path :=
+                    string(PWideChar(@pool_suffix_paths[
+                    pool_idx * c_completion_path_stride]));
+                completion_result.candidates[pool_idx].base_rank :=
+                    pool_base_ranks[pool_idx];
+                completion_result.candidates[pool_idx].replace_units :=
+                    pool_replace_units[pool_idx];
+                completion_result.candidates[pool_idx].score :=
+                    pool_scores[pool_idx];
+            end;
+            Result := pool_candidate_count > 0;
+            if Result then
+            begin
+                second_score := pool_abstain_score;
+                if pool_candidate_count > 1 then
+                begin
+                    second_score := Max(second_score, pool_scores[1]);
+                end;
+                confidence := pool_scores[0] - second_score;
+                // The calibrated threshold may be negative. In that case the
+                // joint KEEP/SWITCH/ABSTAIN model intentionally permits a
+                // candidate just below ABSTAIN when its development-set
+                // evidence is strong enough. Do not add a second hard gate
+                // that silently discards the learned calibration.
+                Result := confidence >= m_minimum_confidence;
+                if Result then
+                begin
+                    completion_result.suffix_text :=
+                        completion_result.candidates[0].suffix_text;
+                    completion_result.suffix_pinyin_path :=
+                        completion_result.candidates[0].suffix_pinyin_path;
+                    completion_result.suffix_path :=
+                        completion_result.candidates[0].suffix_path;
+                    completion_result.base_rank :=
+                        completion_result.candidates[0].base_rank;
+                    completion_result.replace_units :=
+                        completion_result.candidates[0].replace_units;
+                    completion_result.confidence := confidence;
+                end;
+            end;
+        end
+        else
+        begin
+            Result := False;
+        end;
+    end
+    else
+    begin
+        Result := m_run_function(m_session,
+            PChar(task.request.context_text),
+            PChar(task.request.query_syllables),
+            PChar(task.request.top1_text),
+            PChar(task.request.top1_anchor_path),
+            PChar(task.request.top2_text),
+            PChar(task.request.top2_anchor_path),
+            Ord(task.request.phonetic_only),
+            m_minimum_confidence,
+            @suffix_text[0], Length(suffix_text),
+            @suffix_pinyin[0], Length(suffix_pinyin),
+            @suffix_path[0], Length(suffix_path),
+            @base_rank, @replace_units, @confidence, @error_buffer[0],
+            Length(error_buffer)) <> 0;
+    end;
+    if (not Result) and (not task.request.phonetic_only) and
+        (error_buffer[0] = #0) and
         (m_generator_session <> nil) and
         Assigned(m_generator_run_function) then
     begin
@@ -576,6 +722,7 @@ begin
         if Result then
         begin
             base_rank := 1;
+            replace_units := 0;
         end;
     end;
     elapsed_ms := GetTickCount64 - started_at;
@@ -584,12 +731,13 @@ begin
         disable(string(PWideChar(@error_buffer[0])));
         Exit;
     end;
-    if Result and (elapsed_ms > c_result_timeout_ms) then
+    if Result and (m_result_timeout_ms > 0) and
+        (elapsed_ms > m_result_timeout_ms) then
     begin
         Result := False;
         Exit;
     end;
-    if Result then
+    if Result and (completion_result.suffix_text = '') then
     begin
         completion_result.suffix_text :=
             string(PWideChar(@suffix_text[0]));
@@ -598,6 +746,7 @@ begin
         completion_result.suffix_path :=
             string(PWideChar(@suffix_path[0]));
         completion_result.base_rank := base_rank;
+        completion_result.replace_units := replace_units;
         completion_result.confidence := confidence;
     end;
 end;

@@ -60,7 +60,8 @@ type
         okcs_base_exact,
         okcs_transition,
         okcs_long_transition,
-        okcs_long_neural
+        okcs_long_neural,
+        okcs_document_copy
     );
 
     TncOneKeyCompletion = record
@@ -100,6 +101,16 @@ type
     end;
 
     TncLongOneKeyCompletionList = array of TncLongOneKeyCompletion;
+
+    TncExactTextPath = record
+        valid: Boolean;
+        text: string;
+        full_pinyin: string;
+        path_text: string;
+        weight: Integer;
+        segment_count: Integer;
+        unit_count: Integer;
+    end;
 
     TncOneKeyCompletionCompetitionEvidence = record
         context_width: Integer;

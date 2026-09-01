@@ -182,7 +182,8 @@ type
         procedure update_surrounding(const session_id: string;
             const left_context: string; const document_key: string = '';
             const document_snapshot: string = '');
-        procedure reset_session(const session_id: string);
+        procedure reset_session(const session_id: string;
+            const preserve_document_context: Boolean = False);
     end;
 
     TncPipeServerThread = class(TThread)
@@ -3473,7 +3474,8 @@ begin
         end);
 end;
 
-procedure TncEngineHost.reset_session(const session_id: string);
+procedure TncEngineHost.reset_session(const session_id: string;
+    const preserve_document_context: Boolean);
 var
     session: TncHostSession;
     session_instance_id: UInt64;
@@ -3486,7 +3488,7 @@ begin
             Exit;
         end;
         session_instance_id := session.instance_id;
-        session.engine.reset;
+        session.engine.reset(preserve_document_context);
         session.set_caret(Point(0, 0), False, 0, False);
         session.clear_candidates;
     finally
@@ -3646,9 +3648,11 @@ begin
             end;
         end;
 
-        if SameText(cmd, 'RESET') then
+        if SameText(cmd, 'RESET') or
+            SameText(cmd, 'RESET_KEEP_DOCUMENT') then
         begin
-            m_host.reset_session(session_id);
+            m_host.reset_session(session_id,
+                SameText(cmd, 'RESET_KEEP_DOCUMENT'));
             Result := 'OK';
             Exit;
         end;

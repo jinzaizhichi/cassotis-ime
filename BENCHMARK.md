@@ -1,12 +1,12 @@
 # Cassotis Corpus Benchmarks
 
-Cassotis publishes four fixed corpus benchmarks for tracking decoding quality and engine performance across releases: the Long Sentence Benchmark-16300, the Short-word Context Benchmark-65000, the One-key Completion Context Benchmark-12831, and the Long-sentence One-key Completion Benchmark-16300. They turn release quality into reproducible measurements instead of relying only on hand-picked examples.
+Cassotis publishes six fixed corpus benchmarks for tracking decoding quality and engine performance across releases: the Long Sentence Benchmark-16300, the Short-word Context Benchmark-65000, the One-key Completion Context Benchmark-12831, the Medium-input One-key Completion Benchmark-10840, the Long-sentence One-key Completion Benchmark-16300, and the Document-copy Completion Replay Benchmark-386. They turn release quality into reproducible measurements instead of relying only on hand-picked examples.
 
 ## Shared Corpus Source
 
-All four benchmarks are derived from the developer's own novel, [**Elegance in Timelessness**](https://www.qidian.com/book/1037259117/) (Chinese title: [**永恒的舞动**](https://www.qidian.com/book/1037259117/)).
+All six benchmarks are derived from the developer's own novel, [**Elegance in Timelessness**](https://www.qidian.com/book/1037259117/) (Chinese title: [**永恒的舞动**](https://www.qidian.com/book/1037259117/)).
 
-Benchmark-16300 fixes 16,300 eligible sentences, while Benchmark-65000 fixes 65,000 short-word occurrences. The short-word completion benchmark derives 12,831 incremental completion opportunities from the same short-word cases. The long-sentence completion benchmark derives one fixed near-tail completion opportunity from each of the 16,300 long-sentence cases. Benchmark cases are kept separate from the corresponding model-training data.
+Benchmark-16300 fixes 16,300 eligible sentences, while Benchmark-65000 fixes 65,000 short-word occurrences. The short-word completion benchmark derives 12,831 incremental completion opportunities from the same short-word cases. The medium-input and long-sentence completion benchmarks reuse the long-sentence corpus to derive 10,840 mid-composition opportunities and 16,300 near-tail opportunities respectively. The document-copy replay benchmark fixes 386 chronological opportunities whose target continuation has already appeared earlier in the same document. Benchmark cases are kept separate from the corresponding model-training data.
 
 ## Shared Accuracy Equivalence Rule
 
@@ -111,6 +111,32 @@ Because each corpus position has only one reference target, a different but ling
 
 Latency covers dictionary lookup, context/language-model scoring, completion selection, and hysteresis only. It excludes process and dictionary cold start, TSF/host communication, candidate-window rendering, real inter-key timing, and learning writes after acceptance. The engine is reset before each source case; adjacent prefixes of the same target are processed consecutively, while the dictionary connection and runtime caches remain open for the complete run.
 
+## Medium-input One-key Completion Benchmark-10840
+
+### Case Construction and Scoring
+
+This benchmark covers the gap between short-word completion and near-tail long-sentence completion. It reuses the fixed 16,300 long sentences and their complete Pinyin queries:
+
+- Leave the final two complete Pinyin syllables untyped and evaluate only states containing 5 to 12 complete typed syllables.
+- Eligible sentences deterministically produce 10,840 completion opportunities.
+- Use the same static completion layers and constrained local-continuation model as the Host, but read only the single settled completion that the UI would display.
+- Count a hit when the prompt strictly extends the intended typed prefix and the displayed text remains a prefix of the reference sentence.
+- Use deterministic benchmark mode, a snapshot of the simplified base dictionary, and an empty user dictionary. Benchmark cases remain isolated from model-training data.
+
+The public report records five metrics:
+
+- `Completion Hit`: correct local continuations divided by all 10,840 opportunities.
+- `Prompt Precision`: correct local continuations divided by opportunities where a prompt was displayed.
+- `Avg Keys Saved`: average net keys saved by each correct hit after charging one key for acceptance.
+- `Stability`: when the previous prompt remains compatible after further typing, the proportion for which the displayed completion remains unchanged.
+- `P95`: 95% of visible completion queries finish within this many milliseconds.
+
+The corpus provides only one reference continuation, so another natural continuation with different wording is still scored as a miss. Detailed diagnostics additionally retain the Top-32 candidates and Oracle ranks from lexical, transition, suffix-index, and local-model sources to separate recall errors from ranking errors.
+
+### Latency Protocol
+
+The dictionary and models are loaded and warmed before scored cases begin. Latency includes medium-length Pinyin decoding, completion-source lookup, unified selection, and local-model refinement when that result is actually applied. It excludes process and model cold start, report output, TSF/Host IPC, candidate-window rendering, real inter-key timing, and learning writes. Diagnostic candidate-pool construction runs after the visible-latency sample and is not included.
+
 ## Long-sentence One-key Completion Benchmark-16300
 
 ### Case Construction and Scoring
@@ -137,6 +163,32 @@ The detailed report additionally retains average keys saved per hit, incremental
 ### Latency Protocol
 
 The dictionary and both runtime models are loaded and warmed before scored cases begin. Latency starts immediately before assigning the scored Pinyin prefix and includes long-sentence decoding, exact/transition lookup, language-model scoring, hysteresis, and accepted local-model refinement. Model work that abstains or times out is asynchronous and does not delay the visible static result, so it is not added to visible latency. The measurement excludes process and model cold start, the preceding stability probe, report output, TSF-to-Host IPC, rendering, real inter-key timing, and learning writes. The engine is reset before every source sentence while dictionary connections, model sessions, and runtime caches remain open for the complete run.
+
+## Document-copy Completion Replay Benchmark-386
+
+### Case Construction and Scoring
+
+This benchmark measures document-local copy completion without leaking future text:
+
+- Replay the fixed novel corpus in its original order. Each case may read only the text that appeared before the tested sentence.
+- Retain at most the preceding 1,024 characters as the document snapshot, matching the production snapshot limit.
+- Select 386 fixed opportunities where the same local anchor and continuation have already occurred in the available history.
+- Require the reference continuation to consist of one to three exact base-dictionary words. User words and text that appears only later in the document cannot create a case or a prompt.
+- Feed the historical snapshot, document identity, current Pinyin prefix, and ordinary engine candidates through the same document-copy selection path used by the Host.
+- Disable the asynchronous local-completion runtime for this dedicated layer benchmark. Existing static completion remains the fallback when document-copy evidence abstains.
+
+The public report records four metrics:
+
+- `Document-copy Hit`: strict reference-matching document-copy prompts divided by all 386 opportunities.
+- `Prompt Precision`: strict reference-matching prompts divided by every prompt actually displayed, including fallback prompts.
+- `Total Keys Saved`: net keys saved by all strict hits after charging one key for acceptance.
+- `P95`: 95% of replay queries finish within this many milliseconds.
+
+The corpus supplies one reference continuation. A different but natural continuation is therefore counted as a miss. This strict rule keeps cross-version comparisons deterministic, while the detailed TSV retains prompt source, anchor, exact suffix path, score, and occurrence count for manual attribution.
+
+### Latency Protocol
+
+Latency includes ordinary candidate generation, document-suffix lookup, exact-path validation, scoring, and synchronous static fallback. It excludes case preparation, process and dictionary cold start, TSF-to-Host IPC, candidate-window rendering, real inter-key timing, asynchronous neural fallback, and feedback writes. Every opportunity starts from its frozen historical snapshot, so no preceding benchmark decision can alter a later case.
 
 ## Latency Statistics
 

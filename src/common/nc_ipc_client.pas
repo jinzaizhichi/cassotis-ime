@@ -47,7 +47,8 @@ type
             const document_snapshot: string = ''): Boolean;
         function reload_config(const session_id: string): Boolean;
         function clear_user_dictionary(const session_id: string): Boolean;
-        function reset_session(const session_id: string): Boolean;
+        function reset_session(const session_id: string;
+            const preserve_document_context: Boolean = False): Boolean;
         property last_error: DWORD read m_last_error;
     end;
 
@@ -739,13 +740,21 @@ begin
     Result := (Length(fields) >= 1) and SameText(fields[0], 'OK');
 end;
 
-function TncIpcClient.reset_session(const session_id: string): Boolean;
+function TncIpcClient.reset_session(const session_id: string;
+    const preserve_document_context: Boolean): Boolean;
 var
     request_text: string;
     response_text: string;
     fields: TArray<string>;
 begin
-    request_text := 'RESET'#9 + session_id;
+    if preserve_document_context then
+    begin
+        request_text := 'RESET_KEEP_DOCUMENT'#9 + session_id;
+    end
+    else
+    begin
+        request_text := 'RESET'#9 + session_id;
+    end;
     if not call_pipe(request_text, response_text) then
     begin
         Result := False;

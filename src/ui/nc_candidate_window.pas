@@ -1423,7 +1423,8 @@ begin
         completion_anchor_width := 0;
         completion_suffix_width := 0;
         if (m_one_key_completion_source in
-            [okcs_long_transition, okcs_long_neural]) and
+            [okcs_long_transition, okcs_long_neural,
+            okcs_document_copy]) and
             (m_one_key_completion_anchor_text <> '') and
             (m_one_key_completion_suffix_text <> '') then
         begin
@@ -1656,7 +1657,8 @@ begin
                 nc_scale_for_dpi(8, m_current_dpi);
             completion_text_rect.Right := brand_rect.Left - brand_gap;
             if (m_one_key_completion_source in
-                [okcs_long_transition, okcs_long_neural]) and
+                [okcs_long_transition, okcs_long_neural,
+                okcs_document_copy]) and
                 (m_one_key_completion_anchor_text <> '') and
                 (m_one_key_completion_suffix_text <> '') then
             begin
@@ -1694,7 +1696,8 @@ begin
                     m_color_theme.text_color);
             end;
             if (not (m_one_key_completion_source in
-                [okcs_long_transition, okcs_long_neural])) or
+                [okcs_long_transition, okcs_long_neural,
+                okcs_document_copy])) or
                 (m_one_key_completion_anchor_text = '') or
                 (m_one_key_completion_suffix_text = '') then
             begin

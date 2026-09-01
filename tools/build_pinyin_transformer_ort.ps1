@@ -1,6 +1,8 @@
 param(
     [string]$Configuration = 'Release',
-    [string]$VcVarsPath = ''
+    [string]$VcVarsPath = '',
+    [switch]$EnableExperimentalContextualRecall,
+    [switch]$EnableExperimentalTop32CrossRanker
 )
 
 $ErrorActionPreference = 'Stop'
@@ -89,12 +91,21 @@ END
     (New-Object System.Text.UTF8Encoding($false)))
 
 $optimization = if ($Configuration -ieq 'Debug') { '/Od /Zi' } else { '/O2 /GL' }
+$experimentalDefines = @()
+if ($EnableExperimentalContextualRecall) {
+    $experimentalDefines += '/DCASSOTIS_EXPERIMENTAL_CONTEXTUAL_RECALL'
+}
+if ($EnableExperimentalTop32CrossRanker) {
+    $experimentalDefines += '/DCASSOTIS_EXPERIMENTAL_TOP32_CROSS_RANKER'
+}
+$experimentalDefine = $experimentalDefines -join ' '
 $command = 'call "{0}" >nul && rc.exe /nologo /fo"{9}" "{10}" && ' +
-    'cl.exe /nologo /std:c++17 /EHsc /MD /LD {1} ' +
+    'cl.exe /nologo /std:c++17 /EHsc /MD /LD {1} {11} ' +
     '/I"{2}" "{3}" /Fo"{4}" /link /LTCG /OUT:"{5}" ' +
     '/IMPLIB:"{6}" /PDB:"{7}" "{8}" "{9}"'
 $command = $command -f $vcvars, $optimization, $include, $source, $object,
-    $output, $importLibrary, $pdb, $onnxLibrary, $resource, $resourceScript
+    $output, $importLibrary, $pdb, $onnxLibrary, $resource, $resourceScript,
+    $experimentalDefine
 
 & cmd.exe /d /s /c $command
 if ($LASTEXITCODE -ne 0) {
