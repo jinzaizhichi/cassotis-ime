@@ -33,6 +33,8 @@ function anchor_source_name(const source: TncCaretAnchorSource): string;
 function points_are_close(const left_point: TPoint; const right_point: TPoint; const max_delta: Integer): Boolean;
 function anchor_looks_like_window_origin(const candidate: TPoint; const base_rect: TRect;
     const has_base_rect: Boolean): Boolean;
+function anchor_looks_like_window_bottom_right(const candidate: TPoint; const base_rect: TRect;
+    const has_base_rect: Boolean): Boolean;
 function is_origin_anchor_suspicious(const candidate: TPoint; const base_rect: TRect; const has_base_rect: Boolean;
     const cursor_point: TPoint; const cursor_point_valid: Boolean; const terminal_like_target: Boolean;
     const has_composition: Boolean): Boolean;
@@ -129,6 +131,26 @@ begin
         (candidate.X <= base_rect.Left + c_left_range) and
         (candidate.Y >= base_rect.Top - 48) and
         (candidate.Y <= base_rect.Top + c_top_range);
+end;
+
+function anchor_looks_like_window_bottom_right(const candidate: TPoint; const base_rect: TRect;
+    const has_base_rect: Boolean): Boolean;
+const
+    c_edge_range = 48;
+begin
+    if not has_base_rect then
+    begin
+        Result := False;
+        Exit;
+    end;
+
+    // Some COM-less games expose the client width/height as an IMM position
+    // when no real caret rectangle is available. After client-to-screen
+    // conversion that point lands exactly at the window's lower-right edge.
+    Result := (candidate.X >= base_rect.Right - c_edge_range) and
+        (candidate.X <= base_rect.Right + c_edge_range) and
+        (candidate.Y >= base_rect.Bottom - c_edge_range) and
+        (candidate.Y <= base_rect.Bottom + c_edge_range);
 end;
 
 function is_origin_anchor_suspicious(const candidate: TPoint; const base_rect: TRect; const has_base_rect: Boolean;

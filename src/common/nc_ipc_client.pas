@@ -41,7 +41,8 @@ type
         function release_session(const session_id: string): Boolean;
         function set_caret(const session_id: string; const point: TPoint; const has_caret: Boolean;
             const line_height: Integer = 0; const source: TncCaretAnchorSource = casCursor;
-            const anchor_score: Integer = 0; const terminal_like_target: Boolean = False): Boolean;
+            const anchor_score: Integer = 0; const terminal_like_target: Boolean = False;
+            const comless_target: Boolean = False): Boolean;
         function set_surrounding(const session_id: string;
             const left_context: string; const document_key: string = '';
             const document_snapshot: string = ''): Boolean;
@@ -51,6 +52,11 @@ type
             const preserve_document_context: Boolean = False): Boolean;
         property last_error: DWORD read m_last_error;
     end;
+
+function build_set_caret_request(const session_id: string;
+    const point: TPoint; const has_caret: Boolean; const line_height: Integer;
+    const source: TncCaretAnchorSource; const anchor_score: Integer;
+    const terminal_like_target: Boolean; const comless_target: Boolean): string;
 
 implementation
 
@@ -639,15 +645,14 @@ end;
 
 function TncIpcClient.set_caret(const session_id: string; const point: TPoint; const has_caret: Boolean;
     const line_height: Integer; const source: TncCaretAnchorSource; const anchor_score: Integer;
-    const terminal_like_target: Boolean): Boolean;
+    const terminal_like_target: Boolean; const comless_target: Boolean): Boolean;
 var
     request_text: string;
     response_text: string;
     fields: TArray<string>;
 begin
-    request_text := Format('SET_CARET'#9'%s'#9'%d'#9'%d'#9'%d'#9'%d'#9'%d'#9'%d'#9'%d',
-        [session_id, point.X, point.Y, Ord(has_caret), line_height, Ord(source), anchor_score,
-        Ord(terminal_like_target)]);
+    request_text := build_set_caret_request(session_id, point, has_caret,
+        line_height, source, anchor_score, terminal_like_target, comless_target);
     if not call_pipe(request_text, response_text) then
     begin
         Result := False;
@@ -656,6 +661,17 @@ begin
 
     fields := response_text.Split([#9], TStringSplitOptions.None);
     Result := (Length(fields) >= 1) and SameText(fields[0], 'OK');
+end;
+
+function build_set_caret_request(const session_id: string;
+    const point: TPoint; const has_caret: Boolean; const line_height: Integer;
+    const source: TncCaretAnchorSource; const anchor_score: Integer;
+    const terminal_like_target: Boolean; const comless_target: Boolean): string;
+begin
+    Result := Format('SET_CARET'#9'%s'#9'%d'#9'%d'#9'%d'#9'%d'#9'%d'#9'%d'#9'%d'#9'%d',
+        [session_id, point.X, point.Y, Ord(has_caret), line_height,
+        Ord(source), anchor_score, Ord(terminal_like_target),
+        Ord(comless_target)]);
 end;
 
 function TncIpcClient.set_surrounding(const session_id: string;

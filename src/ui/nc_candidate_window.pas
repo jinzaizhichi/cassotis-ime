@@ -130,11 +130,17 @@ type
             const one_key_completion: TncOneKeyCompletion;
             const one_key_completion_key: TncOneKeyCompletionKey;
             const debug_mode: Boolean);
-        procedure show_at(const x: Integer; const y: Integer);
+        procedure show_at(const x: Integer; const y: Integer;
+            const prefer_above: Boolean = False; const clearance: Integer = 0);
         procedure hide_window;
         property on_remove_user_candidate: TncCandidateRemoveEvent read m_on_remove_user_candidate
             write m_on_remove_user_candidate;
     end;
+
+function nc_calculate_candidate_top(const anchor_y: Integer;
+    const candidate_height: Integer; const gap: Integer;
+    const clearance: Integer; const work_area: TRect;
+    const prefer_above: Boolean): Integer;
 
 implementation
 
@@ -1953,7 +1959,45 @@ begin
     Invalidate;
 end;
 
-procedure TncCandidateWindow.show_at(const x: Integer; const y: Integer);
+function nc_calculate_candidate_top(const anchor_y: Integer;
+    const candidate_height: Integer; const gap: Integer;
+    const clearance: Integer; const work_area: TRect;
+    const prefer_above: Boolean): Integer;
+var
+    effective_clearance: Integer;
+begin
+    effective_clearance := clearance;
+    if effective_clearance < gap then
+    begin
+        effective_clearance := gap;
+    end;
+
+    Result := anchor_y;
+    if prefer_above then
+    begin
+        Result := anchor_y - candidate_height - effective_clearance;
+        if Result < work_area.Top then
+        begin
+            Result := anchor_y + effective_clearance;
+        end;
+    end
+    else if Result + candidate_height > work_area.Bottom then
+    begin
+        Result := anchor_y - candidate_height - gap;
+    end;
+
+    if Result < work_area.Top then
+    begin
+        Result := work_area.Top;
+    end
+    else if Result + candidate_height > work_area.Bottom then
+    begin
+        Result := work_area.Bottom - candidate_height;
+    end;
+end;
+
+procedure TncCandidateWindow.show_at(const x: Integer; const y: Integer;
+    const prefer_above: Boolean; const clearance: Integer);
 var
     flags: UINT;
     anchor: TPoint;
@@ -1976,26 +2020,14 @@ begin
     end;
 
     target_x := x;
-    target_y := y;
     if not get_work_area(anchor, work_area) then
     begin
         work_area := Rect(0, 0, GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN));
     end;
 
     gap := nc_scale_for_dpi(4, m_current_dpi);
-    if (target_y + Height > work_area.Bottom) then
-    begin
-        target_y := y - Height - gap;
-    end;
-
-    if target_y < work_area.Top then
-    begin
-        target_y := work_area.Top;
-    end
-    else if target_y + Height > work_area.Bottom then
-    begin
-        target_y := work_area.Bottom - Height;
-    end;
+    target_y := nc_calculate_candidate_top(y, Height, gap, clearance,
+        work_area, prefer_above);
 
     if target_x + Width > work_area.Right then
     begin

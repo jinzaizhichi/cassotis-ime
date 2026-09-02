@@ -36,6 +36,7 @@ type
         m_has_caret: Boolean;
         m_caret_line_height: Integer;
         m_terminal_like_target: Boolean;
+        m_comless_target: Boolean;
         m_candidates: TncCandidateList;
         m_one_key_completion: TncOneKeyCompletion;
         m_page_index: Integer;
@@ -48,6 +49,7 @@ type
         m_pending_candidate_has_caret: Boolean;
         m_pending_candidate_line_height: Integer;
         m_pending_candidate_terminal_like_target: Boolean;
+        m_pending_candidate_comless_target: Boolean;
         m_pending_candidate_source: TncCaretAnchorSource;
         m_pending_candidate_score: Integer;
         m_pending_candidate_generation: UInt64;
@@ -70,9 +72,9 @@ type
         procedure update_config(const config: TncEngineConfig);
         procedure warm_candidate_window;
         procedure set_caret(const point: TPoint; const has_caret: Boolean; const line_height: Integer;
-            const terminal_like_target: Boolean);
+            const terminal_like_target: Boolean; const comless_target: Boolean);
         function needs_candidate_refresh(const point: TPoint; const has_caret: Boolean; const line_height: Integer;
-            const terminal_like_target: Boolean): Boolean;
+            const terminal_like_target: Boolean; const comless_target: Boolean): Boolean;
         function candidate_generation: UInt64;
         procedure store_candidates(const candidates: TncCandidateList; const page_index: Integer;
             const page_count: Integer; const selected_index: Integer;
@@ -87,14 +89,15 @@ type
         function has_dirty_candidates: Boolean;
         procedure apply_candidate_content_only(const candidate_generation: UInt64);
         procedure apply_candidate_state(const caret: TPoint; const has_caret: Boolean; const line_height: Integer;
-            const terminal_like_target: Boolean; const source: TncCaretAnchorSource; const anchor_score: Integer;
-            const candidate_generation: UInt64);
+            const terminal_like_target: Boolean; const comless_target: Boolean;
+            const source: TncCaretAnchorSource; const anchor_score: Integer; const candidate_generation: UInt64);
         procedure stage_candidate_apply(const caret: TPoint; const has_caret: Boolean; const line_height: Integer;
-            const terminal_like_target: Boolean; const source: TncCaretAnchorSource; const anchor_score: Integer;
-            out should_queue: Boolean);
+            const terminal_like_target: Boolean; const comless_target: Boolean;
+            const source: TncCaretAnchorSource; const anchor_score: Integer; out should_queue: Boolean);
         function consume_pending_candidate_apply(out caret: TPoint; out has_caret: Boolean;
-            out line_height: Integer; out terminal_like_target: Boolean; out source: TncCaretAnchorSource;
-            out anchor_score: Integer; out candidate_generation: UInt64): Boolean;
+            out line_height: Integer; out terminal_like_target: Boolean; out comless_target: Boolean;
+            out source: TncCaretAnchorSource; out anchor_score: Integer;
+            out candidate_generation: UInt64): Boolean;
         procedure hide_candidate_window;
         property engine: TncEngine read m_engine;
         property instance_id: UInt64 read m_instance_id;
@@ -177,8 +180,8 @@ type
         function reload_config_now: Boolean;
         function clear_user_dictionary(const session_id: string): Boolean;
         procedure update_caret(const session_id: string; const point: TPoint; const has_caret: Boolean;
-            const line_height: Integer; const terminal_like_target: Boolean; const source: TncCaretAnchorSource;
-            const anchor_score: Integer);
+            const line_height: Integer; const terminal_like_target: Boolean; const comless_target: Boolean;
+            const source: TncCaretAnchorSource; const anchor_score: Integer);
         procedure update_surrounding(const session_id: string;
             const left_context: string; const document_key: string = '';
             const document_snapshot: string = '');
@@ -701,6 +704,7 @@ begin
     m_has_caret := False;
     m_caret_line_height := 0;
     m_terminal_like_target := False;
+    m_comless_target := False;
     SetLength(m_candidates, 0);
     m_one_key_completion := Default(TncOneKeyCompletion);
     m_page_index := 0;
@@ -713,6 +717,7 @@ begin
     m_pending_candidate_has_caret := False;
     m_pending_candidate_line_height := 0;
     m_pending_candidate_terminal_like_target := False;
+    m_pending_candidate_comless_target := False;
     m_pending_candidate_source := casCursor;
     m_pending_candidate_score := Low(Integer);
     m_pending_candidate_generation := 0;
@@ -810,16 +815,17 @@ begin
 end;
 
 procedure TncHostSession.set_caret(const point: TPoint; const has_caret: Boolean; const line_height: Integer;
-    const terminal_like_target: Boolean);
+    const terminal_like_target: Boolean; const comless_target: Boolean);
 begin
     m_last_caret := point;
     m_has_caret := has_caret;
     m_caret_line_height := line_height;
     m_terminal_like_target := terminal_like_target;
+    m_comless_target := comless_target;
 end;
 
 function TncHostSession.needs_candidate_refresh(const point: TPoint; const has_caret: Boolean; const line_height: Integer;
-    const terminal_like_target: Boolean): Boolean;
+    const terminal_like_target: Boolean; const comless_target: Boolean): Boolean;
 begin
     Result := m_candidate_dirty;
     if Result then
@@ -851,7 +857,8 @@ begin
         Exit;
     end;
 
-    Result := m_terminal_like_target <> terminal_like_target;
+    Result := (m_terminal_like_target <> terminal_like_target) or
+        (m_comless_target <> comless_target);
 end;
 
 function TncHostSession.candidate_generation: UInt64;
@@ -971,10 +978,12 @@ begin
 end;
 
 procedure TncHostSession.apply_candidate_state(const caret: TPoint; const has_caret: Boolean; const line_height: Integer;
-    const terminal_like_target: Boolean; const source: TncCaretAnchorSource; const anchor_score: Integer;
-    const candidate_generation: UInt64);
+    const terminal_like_target: Boolean; const comless_target: Boolean;
+    const source: TncCaretAnchorSource; const anchor_score: Integer; const candidate_generation: UInt64);
 var
     y_offset: Integer;
+    comless_clearance: Integer;
+    max_comless_clearance: Integer;
     target_point: TPoint;
     window_rect: TRect;
     monitor_info: TMonitorInfo;
@@ -1021,7 +1030,28 @@ begin
     end
     else
     begin
-        m_candidate_window.show_at(target_point.X, target_point.Y + y_offset);
+        if comless_target then
+        begin
+            comless_clearance := scale_candidate_offset(c_default_offset,
+                target_point);
+            max_comless_clearance := scale_candidate_offset(64,
+                target_point);
+            if line_height > comless_clearance then
+            begin
+                comless_clearance := line_height;
+            end;
+            if comless_clearance > max_comless_clearance then
+            begin
+                comless_clearance := max_comless_clearance;
+            end;
+            m_candidate_window.show_at(target_point.X, target_point.Y,
+                True, comless_clearance);
+        end
+        else
+        begin
+            m_candidate_window.show_at(target_point.X,
+                target_point.Y + y_offset);
+        end;
     end;
 
     if m_candidate_window.HandleAllocated then
@@ -1047,8 +1077,8 @@ begin
                 end;
                 if debug_logging then
                 begin
-                    host_log_debug(Format('[DEBUG] candidate metrics line_height=%d y_offset=%d',
-                        [line_height, y_offset]));
+                    host_log_debug(Format('[DEBUG] candidate metrics line_height=%d y_offset=%d comless=%d',
+                        [line_height, y_offset, Ord(comless_target)]));
                 end;
             end
             else
@@ -1066,8 +1096,8 @@ begin
                 end;
                 if debug_logging then
                 begin
-                    host_log_debug(Format('[DEBUG] candidate metrics line_height=%d y_offset=%d',
-                        [line_height, y_offset]));
+                    host_log_debug(Format('[DEBUG] candidate metrics line_height=%d y_offset=%d comless=%d',
+                        [line_height, y_offset, Ord(comless_target)]));
                 end;
             end;
         end;
@@ -1082,8 +1112,8 @@ begin
 end;
 
 procedure TncHostSession.stage_candidate_apply(const caret: TPoint; const has_caret: Boolean;
-    const line_height: Integer; const terminal_like_target: Boolean; const source: TncCaretAnchorSource;
-    const anchor_score: Integer;
+    const line_height: Integer; const terminal_like_target: Boolean; const comless_target: Boolean;
+    const source: TncCaretAnchorSource; const anchor_score: Integer;
     out should_queue: Boolean);
 var
     now_tick: DWORD;
@@ -1106,6 +1136,7 @@ begin
             m_pending_candidate_has_caret := has_caret;
             m_pending_candidate_line_height := line_height;
             m_pending_candidate_terminal_like_target := terminal_like_target;
+            m_pending_candidate_comless_target := comless_target;
             m_pending_candidate_source := source;
             m_pending_candidate_score := anchor_score;
             m_pending_candidate_generation := m_candidate_generation;
@@ -1119,6 +1150,7 @@ begin
         m_pending_candidate_has_caret := has_caret;
         m_pending_candidate_line_height := line_height;
         m_pending_candidate_terminal_like_target := terminal_like_target;
+        m_pending_candidate_comless_target := comless_target;
         m_pending_candidate_source := source;
         m_pending_candidate_score := anchor_score;
         m_pending_candidate_generation := m_candidate_generation;
@@ -1144,6 +1176,7 @@ begin
     m_pending_candidate_has_caret := has_caret;
     m_pending_candidate_line_height := line_height;
     m_pending_candidate_terminal_like_target := terminal_like_target;
+    m_pending_candidate_comless_target := comless_target;
     m_pending_candidate_source := source;
     m_pending_candidate_score := anchor_score;
     m_pending_candidate_generation := m_candidate_generation;
@@ -1155,8 +1188,8 @@ begin
 end;
 
 function TncHostSession.consume_pending_candidate_apply(out caret: TPoint; out has_caret: Boolean;
-    out line_height: Integer; out terminal_like_target: Boolean; out source: TncCaretAnchorSource;
-    out anchor_score: Integer; out candidate_generation: UInt64): Boolean;
+    out line_height: Integer; out terminal_like_target: Boolean; out comless_target: Boolean;
+    out source: TncCaretAnchorSource; out anchor_score: Integer; out candidate_generation: UInt64): Boolean;
 begin
     if not m_candidate_apply_queued then
     begin
@@ -1164,6 +1197,7 @@ begin
         has_caret := False;
         line_height := 0;
         terminal_like_target := False;
+        comless_target := False;
         source := casCursor;
         anchor_score := 0;
         candidate_generation := m_candidate_generation;
@@ -1175,6 +1209,7 @@ begin
     has_caret := m_pending_candidate_has_caret;
     line_height := m_pending_candidate_line_height;
     terminal_like_target := m_pending_candidate_terminal_like_target;
+    comless_target := m_pending_candidate_comless_target;
     source := m_pending_candidate_source;
     anchor_score := m_pending_candidate_score;
     candidate_generation := m_pending_candidate_generation;
@@ -2404,6 +2439,7 @@ var
     has_caret: Boolean;
     caret_line_height: Integer;
     candidate_terminal_like_target: Boolean;
+    candidate_comless_target: Boolean;
     candidate_source: TncCaretAnchorSource;
     candidate_score: Integer;
     queue_candidate_apply: Boolean;
@@ -2532,14 +2568,16 @@ begin
                 has_caret := session.has_caret;
                 caret_line_height := session.caret_line_height;
                 candidate_terminal_like_target := session.m_terminal_like_target;
+                candidate_comless_target := session.m_comless_target;
                 candidate_source := session.m_last_candidate_source;
                 candidate_score := session.m_last_candidate_score;
                 has_candidate_anchor := has_caret or (caret_point.X <> 0) or (caret_point.Y <> 0);
                 if has_candidate_anchor and session.needs_candidate_refresh(caret_point, has_caret, caret_line_height,
-                    candidate_terminal_like_target) then
+                    candidate_terminal_like_target, candidate_comless_target) then
                 begin
                     session.stage_candidate_apply(caret_point, has_caret, caret_line_height,
-                        candidate_terminal_like_target, candidate_source, candidate_score, queue_candidate_apply);
+                        candidate_terminal_like_target, candidate_comless_target,
+                        candidate_source, candidate_score, queue_candidate_apply);
                 end;
                 if (not has_candidate_anchor) and session.has_dirty_candidates then
                 begin
@@ -2602,14 +2640,16 @@ begin
                 has_caret := session.has_caret;
                 caret_line_height := session.caret_line_height;
                 candidate_terminal_like_target := session.m_terminal_like_target;
+                candidate_comless_target := session.m_comless_target;
                 candidate_source := session.m_last_candidate_source;
                 candidate_score := session.m_last_candidate_score;
                 has_candidate_anchor := has_caret or (caret_point.X <> 0) or (caret_point.Y <> 0);
                 if has_candidate_anchor and session.needs_candidate_refresh(caret_point, has_caret, caret_line_height,
-                    candidate_terminal_like_target) then
+                    candidate_terminal_like_target, candidate_comless_target) then
                 begin
                     session.stage_candidate_apply(caret_point, has_caret, caret_line_height,
-                        candidate_terminal_like_target, candidate_source, candidate_score, queue_candidate_apply);
+                        candidate_terminal_like_target, candidate_comless_target,
+                        candidate_source, candidate_score, queue_candidate_apply);
                 end;
                 if (not has_candidate_anchor) and session.has_dirty_candidates then
                 begin
@@ -2652,6 +2692,7 @@ begin
                 queued_has_caret: Boolean;
                 queued_line_height: Integer;
                 queued_terminal_like_target: Boolean;
+                queued_comless_target: Boolean;
                 queued_source: TncCaretAnchorSource;
                 queued_score: Integer;
                 queued_generation: UInt64;
@@ -2667,7 +2708,8 @@ begin
                         Exit;
                     end;
                     if not queued_session.consume_pending_candidate_apply(queued_point, queued_has_caret,
-                        queued_line_height, queued_terminal_like_target, queued_source, queued_score,
+                        queued_line_height, queued_terminal_like_target, queued_comless_target,
+                        queued_source, queued_score,
                         queued_generation) then
                     begin
                         Exit;
@@ -2676,7 +2718,8 @@ begin
                     m_lock.Release;
                 end;
                 queued_session.apply_candidate_state(queued_point, queued_has_caret, queued_line_height,
-                    queued_terminal_like_target, queued_source, queued_score, queued_generation);
+                    queued_terminal_like_target, queued_comless_target,
+                    queued_source, queued_score, queued_generation);
             end);
     end;
     if queue_candidate_content_update and (not queue_candidate_apply) then
@@ -3188,8 +3231,8 @@ begin
 end;
 
 procedure TncEngineHost.update_caret(const session_id: string; const point: TPoint; const has_caret: Boolean;
-    const line_height: Integer; const terminal_like_target: Boolean; const source: TncCaretAnchorSource;
-    const anchor_score: Integer);
+    const line_height: Integer; const terminal_like_target: Boolean; const comless_target: Boolean;
+    const source: TncCaretAnchorSource; const anchor_score: Integer);
 var
     session: TncHostSession;
     should_apply: Boolean;
@@ -3206,12 +3249,14 @@ begin
         end;
         session_instance_id := session.instance_id;
         should_apply := session.has_candidates and
-            session.needs_candidate_refresh(point, has_caret, line_height, terminal_like_target);
-        session.set_caret(point, has_caret, line_height, terminal_like_target);
+            session.needs_candidate_refresh(point, has_caret, line_height,
+            terminal_like_target, comless_target);
+        session.set_caret(point, has_caret, line_height, terminal_like_target,
+            comless_target);
         if should_apply then
         begin
-            session.stage_candidate_apply(point, has_caret, line_height, terminal_like_target, source, anchor_score,
-                should_queue);
+            session.stage_candidate_apply(point, has_caret, line_height,
+                terminal_like_target, comless_target, source, anchor_score, should_queue);
         end;
     finally
         m_lock.Release;
@@ -3227,6 +3272,7 @@ begin
                 queued_has_caret: Boolean;
                 queued_line_height: Integer;
                 queued_terminal_like_target: Boolean;
+                queued_comless_target: Boolean;
                 queued_source: TncCaretAnchorSource;
                 queued_score: Integer;
                 queued_generation: UInt64;
@@ -3242,7 +3288,8 @@ begin
                         Exit;
                     end;
                     if not queued_session.consume_pending_candidate_apply(queued_point, queued_has_caret,
-                        queued_line_height, queued_terminal_like_target, queued_source, queued_score,
+                        queued_line_height, queued_terminal_like_target, queued_comless_target,
+                        queued_source, queued_score,
                         queued_generation) then
                     begin
                         Exit;
@@ -3251,7 +3298,8 @@ begin
                     m_lock.Release;
                 end;
                 queued_session.apply_candidate_state(queued_point, queued_has_caret, queued_line_height,
-                    queued_terminal_like_target, queued_source, queued_score, queued_generation);
+                    queued_terminal_like_target, queued_comless_target,
+                    queued_source, queued_score, queued_generation);
             end);
     end;
 end;
@@ -3468,7 +3516,8 @@ begin
             else
             begin
                 queued_session.apply_candidate_state(caret_point, has_caret, queued_session.caret_line_height,
-                    queued_session.m_terminal_like_target, queued_session.m_last_candidate_source,
+                    queued_session.m_terminal_like_target, queued_session.m_comless_target,
+                    queued_session.m_last_candidate_source,
                     queued_session.m_last_candidate_score, refresh_generation);
             end;
         end);
@@ -3489,7 +3538,7 @@ begin
         end;
         session_instance_id := session.instance_id;
         session.engine.reset(preserve_document_context);
-        session.set_caret(Point(0, 0), False, 0, False);
+        session.set_caret(Point(0, 0), False, 0, False, False);
         session.clear_candidates;
     finally
         m_lock.Release;
@@ -3610,6 +3659,7 @@ var
     has_caret: Boolean;
     line_height: Integer;
     caret_terminal_like_target: Boolean;
+    caret_comless_target: Boolean;
     caret_source_value: Integer;
     caret_source: TncCaretAnchorSource;
     caret_score: Integer;
@@ -3670,6 +3720,7 @@ begin
             has_caret := False;
             line_height := 0;
             caret_terminal_like_target := False;
+            caret_comless_target := False;
             if Length(fields) >= 4 then
             begin
                 x := StrToIntDef(fields[2], 0);
@@ -3702,8 +3753,13 @@ begin
             begin
                 caret_terminal_like_target := flag_to_bool(fields[8]);
             end;
+            if Length(fields) >= 10 then
+            begin
+                caret_comless_target := flag_to_bool(fields[9]);
+            end;
 
-            m_host.update_caret(session_id, Point(x, y), has_caret, line_height, caret_terminal_like_target,
+            m_host.update_caret(session_id, Point(x, y), has_caret,
+                line_height, caret_terminal_like_target, caret_comless_target,
                 caret_source, caret_score);
             Result := 'OK';
             Exit;

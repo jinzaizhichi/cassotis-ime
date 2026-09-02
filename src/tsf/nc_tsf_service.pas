@@ -1072,7 +1072,7 @@ begin
     end;
 
     if m_ipc_client.set_caret(m_session_id, point, has_caret, line_height, source, anchor_score,
-        terminal_like_target) then
+        terminal_like_target, (m_activation_flags and TF_TMAE_COMLESS) <> 0) then
     begin
         m_last_sent_caret_point := point;
         m_last_sent_has_caret := has_caret;
@@ -3517,6 +3517,8 @@ var
         candidate_form: TCandidateForm;
         candidate_index: Integer;
         best_score: Integer;
+        client_rect: TRect;
+        has_client_rect: Boolean;
 
         procedure consider_local_anchor(const local_point: TPoint;
             const local_line_height: Integer; const local_score: Integer;
@@ -3527,6 +3529,11 @@ var
             // A zero point is the default IMM position and reproduces the
             // upper-left placement bug rather than describing a real caret.
             if (local_point.X = 0) and (local_point.Y = 0) then
+            begin
+                Exit;
+            end;
+            if comless_target and anchor_looks_like_window_bottom_right(
+                local_point, client_rect, has_client_rect) then
             begin
                 Exit;
             end;
@@ -3571,6 +3578,7 @@ var
         candidate_line_height := 0;
         anchor_kind := '';
         best_score := Low(Integer);
+        has_client_rect := GetClientRect(source_hwnd, client_rect);
         Result := False;
         if source_hwnd = 0 then
         begin
@@ -3620,8 +3628,12 @@ var
                             consider_local_anchor(candidate_form.ptCurrentPos,
                                 rect_line_height(candidate_form.rcArea),
                                 460, 'candidate-exclude');
-                            if ((candidate_form.ptCurrentPos.X = 0) and
-                                (candidate_form.ptCurrentPos.Y = 0)) and
+                            if (((candidate_form.ptCurrentPos.X = 0) and
+                                (candidate_form.ptCurrentPos.Y = 0)) or
+                                (comless_target and
+                                anchor_looks_like_window_bottom_right(
+                                candidate_form.ptCurrentPos, client_rect,
+                                has_client_rect))) and
                                 rect_has_area(candidate_form.rcArea) then
                             begin
                                 consider_local_anchor(System.Types.Point(
@@ -4001,10 +4013,14 @@ begin
         begin
             placement_line_height := imm_line_height;
         end;
-        if comless_target and (not imm_point_valid) and
-            ((chosen_source = casCursor) or
+        if comless_target and
+            (((not imm_point_valid) and ((chosen_source = casCursor) or
             anchor_looks_like_window_origin(point, foreground_rect,
-            has_foreground_rect)) and
+            has_foreground_rect))) or
+            anchor_looks_like_window_bottom_right(point, foreground_rect,
+            has_foreground_rect) or
+            anchor_looks_like_window_bottom_right(point, context_rect,
+            has_context_rect)) and
             (try_get_comless_fallback_anchor(foreground_rect,
             has_foreground_rect, comless_fallback_point) or
             try_get_comless_fallback_anchor(context_rect,
