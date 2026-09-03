@@ -79,6 +79,9 @@ type
 
 implementation
 
+uses
+    nc_caret_anchor_policy;
+
 const
     PROCESS_QUERY_LIMITED_INFORMATION = $1000;
     c_guid_prop_attribute: TGUID = '{34B45670-7526-11D2-A147-00105A2799B5}';
@@ -240,6 +243,43 @@ begin
     end;
 
     Result := False;
+end;
+
+function fallback_caret_line_height(const hwnd: HWND): Integer;
+var
+    dpi: Integer;
+    window_dpi: UINT;
+    monitor: HMONITOR;
+begin
+    dpi := 96;
+    ensure_dpi_awareness_api;
+    if Assigned(g_get_dpi_for_window) and (hwnd <> 0) then
+    begin
+        window_dpi := g_get_dpi_for_window(hwnd);
+        if window_dpi > 0 then
+        begin
+            dpi := Integer(window_dpi);
+        end;
+    end;
+    if (dpi = 96) and (hwnd <> 0) then
+    begin
+        monitor := MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+        try_get_dpi_for_monitor(monitor, dpi);
+        if dpi <= 0 then
+        begin
+            dpi := 96;
+        end;
+    end;
+
+    Result := MulDiv(24, dpi, 96);
+    if Result < 16 then
+    begin
+        Result := 16;
+    end
+    else if Result > 64 then
+    begin
+        Result := 64;
+    end;
 end;
 
 function try_scale_screen_rect_between_dpi(const source_rect: Winapi.Windows.TRect; const monitor_rect: Winapi.Windows.TRect;
@@ -1061,6 +1101,12 @@ var
         end;
 
         local_rect := best_candidate_rect;
+        if collapse_to_end then
+        begin
+            local_rect := normalize_caret_text_extent(local_rect,
+                local_screen_rect, local_screen_ok,
+                fallback_caret_line_height(view_hwnd));
+        end;
 
         out_rect := local_rect;
         out_line_height := out_rect.Bottom - out_rect.Top;
@@ -1942,6 +1988,12 @@ const
         end;
 
         local_rect := best_candidate_rect;
+        if query_mode <> c_query_full_range then
+        begin
+            local_rect := normalize_caret_text_extent(local_rect,
+                local_screen_rect, local_screen_ok,
+                fallback_caret_line_height(view_hwnd));
+        end;
 
         out_rect := local_rect;
         out_line_height := out_rect.Bottom - out_rect.Top;

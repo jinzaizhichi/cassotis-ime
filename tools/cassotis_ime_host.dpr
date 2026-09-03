@@ -20,6 +20,7 @@ uses
     nc_ipc_common in '..\src\common\nc_ipc_common.pas';
 
 {$R 'cassotis_ime_host.res'}
+{$R 'cassotis_ime_tray_host_mark.res'}
 
 var
     host_app: TncEngineHostApp;

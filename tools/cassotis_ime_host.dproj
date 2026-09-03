@@ -78,6 +78,7 @@
         <Manifest_File>$(BDS)\bin\default_app.manifest</Manifest_File>
         <AppEnableRuntimeThemes>true</AppEnableRuntimeThemes>
         <AppDPIAwarenessMode>PerMonitorV2</AppDPIAwarenessMode>
+        <PreBuildEvent><![CDATA["$(BDS)\bin\brcc32.exe" -fo"$(MSBuildProjectDirectory)\cassotis_ime_tray_host_mark.res" "$(MSBuildProjectDirectory)\cassotis_ime_tray_host_mark.rc"]]></PreBuildEvent>
     </PropertyGroup>
     <PropertyGroup Condition="'$(Base_Win32)'!=''">
         <DCC_Namespace>Winapi;System.Win;Data.Win;Datasnap.Win;Web.Win;Soap.Win;Xml.Win;Bde;$(DCC_Namespace)</DCC_Namespace>

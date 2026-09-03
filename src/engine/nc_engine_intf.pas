@@ -4657,6 +4657,16 @@ begin
         Exit(nc_search_budget_should_stop(sbm_wall_clock, elapsed_ms,
             work_count, 0, timed_budget_ms, 0, 100));
     end;
+    { Direct whole-query evaluation is already bounded by work counters. A
+      wall-clock cutoff here makes benchmark accuracy depend on machine load.
+      Interactive incremental input keeps the production emergency cutoff. }
+    if (m_search_budget_mode = sbm_production) and
+        (not m_composition_built_incrementally) then
+    begin
+        Exit(nc_search_budget_should_stop(sbm_deterministic, 0,
+            work_count, work_limit, timed_budget_ms,
+            emergency_budget_ms, m_search_budget_scale_percent));
+    end;
     if m_search_budget_mode = sbm_deterministic then
     begin
         Exit(nc_search_budget_should_stop(m_search_budget_mode, 0,
@@ -8519,11 +8529,11 @@ begin
     build_started_at := GetTickCount64;
     build_candidates_core;
 
-    // Candidate visibility is more important than the optional Tab hint. Once
-    // production decoding has already missed an interactive frame by a wide
-    // margin, do not extend that tail with another indexed lookup and LM pass.
-    // Deterministic benchmark mode still evaluates the complete feature path.
+    // Candidate visibility is more important than the optional Tab hint during
+    // real incremental typing. Direct whole-query evaluation uses fixed work so
+    // that machine load cannot change later cases in the same benchmark run.
     if (m_search_budget_mode = sbm_production) and
+        m_composition_built_incrementally and
         (GetTickCount64 - build_started_at >= c_completion_emergency_skip_ms) then
     begin
         clear_one_key_completion;
@@ -161987,6 +161997,7 @@ var
             c_predictive_probe_limit = 12;
         var
             prefix_idx_local: Integer;
+            accepted_count_local: Integer;
             append_idx_local: Integer;
             existing_idx_local: Integer;
             prefix_text_local: string;
@@ -161998,9 +162009,10 @@ var
                 Exit;
             end;
 
+            accepted_count_local := 0;
             for prefix_idx_local := 0 to High(predictive_prefix_results) do
             begin
-                if prefix_idx_local >= c_predictive_probe_limit then
+                if accepted_count_local >= c_predictive_probe_limit then
                 begin
                     Break;
                 end;
@@ -162035,6 +162047,7 @@ var
                 append_idx_local := Length(m_candidates);
                 SetLength(m_candidates, append_idx_local + 1);
                 m_candidates[append_idx_local] := prefix_candidate_local;
+                Inc(accepted_count_local);
                 if Length(m_candidate_segment_paths) < Length(m_candidates) then
                 begin
                     SetLength(m_candidate_segment_paths,
@@ -162179,8 +162192,6 @@ var
         end;
 
         function has_predictive_pinyin_prefix_candidate_local: Boolean;
-        const
-            c_predictive_probe_limit = 12;
         var
             prefix_idx_local: Integer;
             prefix_text_local: string;
@@ -162198,11 +162209,6 @@ var
 
             for prefix_idx_local := 0 to High(predictive_prefix_results) do
             begin
-                if prefix_idx_local >= c_predictive_probe_limit then
-                begin
-                    Break;
-                end;
-
                 prefix_text_local := Trim(
                     predictive_prefix_results[prefix_idx_local].text);
                 if (prefix_text_local <> '') and

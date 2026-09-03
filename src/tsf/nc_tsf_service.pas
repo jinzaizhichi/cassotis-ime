@@ -53,6 +53,8 @@ type
         m_activation_flags: DWORD;
         m_keystroke_mgr: ITfKeystrokeMgr;
         m_key_event_advised: Boolean;
+        m_preserved_input_mode_registered: Boolean;
+        m_preserved_input_mode_key: TF_PRESERVEDKEY;
         m_doc_mgr: ITfDocumentMgr;
         m_context_source: ITfSource;
         m_text_edit_cookie: DWORD;
@@ -112,8 +114,13 @@ type
         m_chord_shortcut_pending: Boolean;
         m_chord_shortcut_action: TncShortcutAction;
         m_chord_shortcut_key_code: Word;
+        m_chord_shortcut_tick: UInt64;
         m_langbar_icon: HICON;
         procedure clear_state;
+        procedure unpreserve_input_mode_shortcut;
+        procedure refresh_preserved_input_mode_shortcut;
+        function begin_chord_shortcut(const action: TncShortcutAction;
+            const key_code: Word): Boolean;
         procedure rollback_activation;
         function activate_core(const thread_mgr: ITfThreadMgr;
             client_id: TfClientId; const activation_flags: DWORD): HResult;
@@ -680,6 +687,7 @@ end;
 
 procedure TncTextService.rollback_activation;
 begin
+    unpreserve_input_mode_shortcut;
     try
         if m_key_event_advised and (m_keystroke_mgr <> nil) then
         begin
@@ -762,6 +770,8 @@ begin
     m_activation_flags := 0;
     m_keystroke_mgr := nil;
     m_key_event_advised := False;
+    m_preserved_input_mode_registered := False;
+    FillChar(m_preserved_input_mode_key, SizeOf(m_preserved_input_mode_key), 0);
     m_doc_mgr := nil;
     m_context_source := nil;
     m_text_edit_cookie := c_nc_tsf_invalid_sink_cookie;
@@ -813,6 +823,114 @@ begin
     m_chord_shortcut_pending := False;
     m_chord_shortcut_action := Low(TncShortcutAction);
     m_chord_shortcut_key_code := 0;
+    m_chord_shortcut_tick := 0;
+end;
+
+procedure TncTextService.unpreserve_input_mode_shortcut;
+var
+    preserved_guid: TGUID;
+    preserved_key: TF_PRESERVEDKEY;
+    hr: HRESULT;
+begin
+    if not m_preserved_input_mode_registered then
+    begin
+        Exit;
+    end;
+
+    preserved_guid := GUID_NcPreservedKeyInputModeToggle;
+    preserved_key := m_preserved_input_mode_key;
+    m_preserved_input_mode_registered := False;
+    FillChar(m_preserved_input_mode_key, SizeOf(m_preserved_input_mode_key), 0);
+    if m_keystroke_mgr = nil then
+    begin
+        Exit;
+    end;
+
+    try
+        hr := m_keystroke_mgr.UnpreserveKey(preserved_guid, preserved_key);
+        if Failed(hr) and (m_logger <> nil) then
+        begin
+            m_logger.warn(Format('Unpreserve input-mode shortcut failed hr=0x%s',
+                [IntToHex(Cardinal(hr), 8)]));
+        end;
+    except
+        log_tsf_boundary_exception('UnpreserveInputModeShortcut');
+    end;
+end;
+
+procedure TncTextService.refresh_preserved_input_mode_shortcut;
+var
+    shortcut: TncShortcut;
+    preserved_guid: TGUID;
+    preserved_key: TF_PRESERVEDKEY;
+    description: UnicodeString;
+    hr: HRESULT;
+begin
+    shortcut := m_shortcut_config.input_mode_toggle;
+    if not nc_tsf_shortcut_to_preserved_key(shortcut, preserved_key) then
+    begin
+        unpreserve_input_mode_shortcut;
+        Exit;
+    end;
+
+    if m_preserved_input_mode_registered and
+        (m_preserved_input_mode_key.uVKey = preserved_key.uVKey) and
+        (m_preserved_input_mode_key.uModifiers = preserved_key.uModifiers) then
+    begin
+        Exit;
+    end;
+
+    unpreserve_input_mode_shortcut;
+    if m_keystroke_mgr = nil then
+    begin
+        Exit;
+    end;
+
+    preserved_guid := GUID_NcPreservedKeyInputModeToggle;
+    description := 'Cassotis IME input mode toggle';
+    try
+        hr := m_keystroke_mgr.PreserveKey(m_client_id, preserved_guid,
+            preserved_key, PWideChar(description), Length(description));
+        if not Failed(hr) then
+        begin
+            m_preserved_input_mode_key := preserved_key;
+            m_preserved_input_mode_registered := True;
+            if (m_logger <> nil) and (m_logger.level <= ll_debug) then
+            begin
+                m_logger.debug(Format('Preserved input-mode shortcut=%s key=%d modifiers=0x%s',
+                    [nc_shortcut_to_text(shortcut), preserved_key.uVKey,
+                    IntToHex(preserved_key.uModifiers, 4)]));
+            end;
+        end
+        else if m_logger <> nil then
+        begin
+            m_logger.warn(Format('Preserve input-mode shortcut=%s failed hr=0x%s; using key sink fallback',
+                [nc_shortcut_to_text(shortcut), IntToHex(Cardinal(hr), 8)]));
+        end;
+    except
+        log_tsf_boundary_exception('PreserveInputModeShortcut');
+    end;
+end;
+
+function TncTextService.begin_chord_shortcut(const action: TncShortcutAction;
+    const key_code: Word): Boolean;
+const
+    c_stale_chord_shortcut_ms = 500;
+var
+    normalized_key_code: Word;
+    now_tick: UInt64;
+begin
+    normalized_key_code := nc_normalize_shortcut_key_code(key_code);
+    now_tick := GetTickCount64;
+    Result := (not m_chord_shortcut_pending) or
+        (m_chord_shortcut_action <> action) or
+        (m_chord_shortcut_key_code <> normalized_key_code) or
+        (m_chord_shortcut_tick = 0) or
+        ((now_tick - m_chord_shortcut_tick) > c_stale_chord_shortcut_ms);
+    m_chord_shortcut_pending := True;
+    m_chord_shortcut_action := action;
+    m_chord_shortcut_key_code := normalized_key_code;
+    m_chord_shortcut_tick := now_tick;
 end;
 
 procedure TncTextService.mark_session_dirty;
@@ -1563,6 +1681,7 @@ end;
 
 procedure TncTextService.deactivate_core;
 begin
+    unpreserve_input_mode_shortcut;
     if m_key_event_advised and (m_keystroke_mgr <> nil) then
     begin
         m_keystroke_mgr.UnadviseKeyEventSink(m_client_id);
@@ -1648,6 +1767,7 @@ begin
             m_modifier_shortcut_key_code := 0;
             m_chord_shortcut_pending := False;
             m_chord_shortcut_key_code := 0;
+            m_chord_shortcut_tick := 0;
         end;
     except
         log_tsf_boundary_exception('KeyEventSink.OnSetFocus');
@@ -1693,6 +1813,7 @@ begin
     begin
         m_chord_shortcut_pending := False;
         m_chord_shortcut_key_code := 0;
+        m_chord_shortcut_tick := 0;
     end;
 
     if nc_find_shortcut_action(m_shortcut_config, key_code, key_state, shortcut_action) then
@@ -1845,6 +1966,7 @@ begin
     begin
         m_chord_shortcut_pending := False;
         m_chord_shortcut_key_code := 0;
+        m_chord_shortcut_tick := 0;
     end;
 
     if nc_find_shortcut_action(m_shortcut_config, key_code, key_state, shortcut_action) then
@@ -1859,15 +1981,10 @@ begin
         end
         else
         begin
-            if (not m_chord_shortcut_pending) or
-                (m_chord_shortcut_action <> shortcut_action) or
-                (m_chord_shortcut_key_code <> normalized_key_code) then
+            if begin_chord_shortcut(shortcut_action, normalized_key_code) then
             begin
                 execute_shortcut_action(shortcut_action);
             end;
-            m_chord_shortcut_pending := True;
-            m_chord_shortcut_action := shortcut_action;
-            m_chord_shortcut_key_code := normalized_key_code;
         end;
         eaten := 1;
         Result := S_OK;
@@ -2063,6 +2180,7 @@ begin
     begin
         m_chord_shortcut_pending := False;
         m_chord_shortcut_key_code := 0;
+        m_chord_shortcut_tick := 0;
         eaten := 1;
         Result := S_OK;
         Exit;
@@ -2628,9 +2746,39 @@ begin
 end;
 
 function TncTextService.OnPreservedKey(const context: ITfContext; var rguid: TGUID; out eaten: Integer): HResult;
+var
+    invoked_key: TF_PRESERVEDKEY;
+    had_registration: Boolean;
+    shortcut: TncShortcut;
 begin
     eaten := 0;
     Result := S_OK;
+    try
+        had_registration := m_preserved_input_mode_registered;
+        invoked_key := m_preserved_input_mode_key;
+        reload_config_if_needed;
+        if had_registration and m_preserved_input_mode_registered and
+            (invoked_key.uVKey = m_preserved_input_mode_key.uVKey) and
+            (invoked_key.uModifiers = m_preserved_input_mode_key.uModifiers) and
+            IsEqualGUID(rguid, GUID_NcPreservedKeyInputModeToggle) then
+        begin
+            ensure_active_context(context);
+            shortcut := m_shortcut_config.input_mode_toggle;
+            if begin_chord_shortcut(sa_input_mode_toggle, shortcut.key_code) then
+            begin
+                execute_shortcut_action(sa_input_mode_toggle);
+            end;
+            eaten := 1;
+            if (m_logger <> nil) and (m_logger.level <= ll_debug) then
+            begin
+                m_logger.debug(Format('Preserved input-mode shortcut handled session=%s',
+                    [m_session_id]));
+            end;
+        end;
+    except
+        eaten := 0;
+        log_tsf_boundary_exception('KeyEventSink.OnPreservedKey');
+    end;
 end;
 
 function TncTextService.OnCompositionTerminated(ecWrite: TfEditCookie; const composition: ITfComposition): HResult;
@@ -3052,10 +3200,20 @@ begin
 end;
 
 function TncTextService.build_key_state: TncKeyState;
+    function modifier_is_down(const generic_key: Integer; const left_key: Integer;
+        const right_key: Integer): Boolean;
+    var
+        key_bits: Word;
+    begin
+        key_bits := Word(GetKeyState(generic_key)) or Word(GetAsyncKeyState(generic_key)) or
+            Word(GetKeyState(left_key)) or Word(GetAsyncKeyState(left_key)) or
+            Word(GetKeyState(right_key)) or Word(GetAsyncKeyState(right_key));
+        Result := (key_bits and $8000) <> 0;
+    end;
 begin
-    Result.shift_down := ((GetKeyState(VK_SHIFT) or GetAsyncKeyState(VK_SHIFT)) and $8000) <> 0;
-    Result.ctrl_down := (GetKeyState(VK_CONTROL) and $8000) <> 0;
-    Result.alt_down := (GetKeyState(VK_MENU) and $8000) <> 0;
+    Result.shift_down := modifier_is_down(VK_SHIFT, VK_LSHIFT, VK_RSHIFT);
+    Result.ctrl_down := modifier_is_down(VK_CONTROL, VK_LCONTROL, VK_RCONTROL);
+    Result.alt_down := modifier_is_down(VK_MENU, VK_LMENU, VK_RMENU);
     Result.caps_lock := (GetKeyState(VK_CAPITAL) and 1) <> 0;
 end;
 
@@ -3124,6 +3282,7 @@ begin
         log_tsf_boundary_exception('ApplyLogConfig');
         free_logger;
     end;
+    refresh_preserved_input_mode_shortcut;
 end;
 
 procedure TncTextService.apply_log_config;
@@ -3920,25 +4079,31 @@ begin
     imm_line_height := 0;
     imm_anchor_hwnd := 0;
     imm_anchor_kind := '';
-    if try_get_imm_anchor_point(hwnd, imm_point, imm_line_height,
-        imm_anchor_kind) then
+    // IMM probing is a compatibility fallback for COM-less legacy clients.
+    // Letting it compete in normal TSF applications can promote stale IMM
+    // coordinates over a valid TSF text extent.
+    if comless_target then
     begin
-        imm_point_valid := True;
-        imm_anchor_hwnd := hwnd;
-    end
-    else if (context_hwnd <> hwnd) and
-        try_get_imm_anchor_point(context_hwnd, imm_point, imm_line_height,
-        imm_anchor_kind) then
-    begin
-        imm_point_valid := True;
-        imm_anchor_hwnd := context_hwnd;
-    end
-    else if (foreground_hwnd <> hwnd) and (foreground_hwnd <> context_hwnd) and
-        try_get_imm_anchor_point(foreground_hwnd, imm_point, imm_line_height,
-        imm_anchor_kind) then
-    begin
-        imm_point_valid := True;
-        imm_anchor_hwnd := foreground_hwnd;
+        if try_get_imm_anchor_point(hwnd, imm_point, imm_line_height,
+            imm_anchor_kind) then
+        begin
+            imm_point_valid := True;
+            imm_anchor_hwnd := hwnd;
+        end
+        else if (context_hwnd <> hwnd) and
+            try_get_imm_anchor_point(context_hwnd, imm_point, imm_line_height,
+            imm_anchor_kind) then
+        begin
+            imm_point_valid := True;
+            imm_anchor_hwnd := context_hwnd;
+        end
+        else if (foreground_hwnd <> hwnd) and (foreground_hwnd <> context_hwnd) and
+            try_get_imm_anchor_point(foreground_hwnd, imm_point, imm_line_height,
+            imm_anchor_kind) then
+        begin
+            imm_point_valid := True;
+            imm_anchor_hwnd := foreground_hwnd;
+        end;
     end;
     if imm_point_valid and caret_debug_logging then
     begin

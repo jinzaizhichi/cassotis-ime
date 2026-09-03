@@ -15,6 +15,9 @@ uses
     Winapi.Messages,
     Winapi.MultiMon,
     Winapi.TlHelp32,
+    Winapi.ActiveX,
+    Winapi.GDIPAPI,
+    Winapi.GDIPOBJ,
     nc_types,
     nc_shortcut,
     nc_dpi_scale,
@@ -39,6 +42,8 @@ type
         m_list_font: TFont;
         m_weight_font: TFont;
         m_brand_font: TFont;
+        m_brand_icon: TIcon;
+        m_brand_bitmap: TGPBitmap;
         m_brand_text: string;
         m_page_label: TLabel;
         m_preedit_label: TLabel;
@@ -58,6 +63,7 @@ type
         m_base_item_gap: Integer;
         m_item_gap: Integer;
         m_base_list_padding: Integer;
+        m_brand_icon_size: Integer;
         m_current_dpi: Integer;
         m_layout_dpi: Integer;
         m_layout_list_font_height: Integer;
@@ -87,6 +93,9 @@ type
         procedure configure_form;
         procedure configure_page_label;
         procedure configure_preedit_label;
+        function create_brand_bitmap_from_resource(
+            const target_size: Integer): TGPBitmap;
+        procedure rebuild_brand_bitmap;
         procedure apply_current_dpi;
         procedure apply_dpi(const dpi: Integer);
         function get_target_dpi(const anchor: TPoint): Integer;
@@ -159,11 +168,11 @@ var
 
 const
     c_candidate_text_height_sample = 'Hg' + WideChar($56FD);
-    c_candidate_brand_base_text = 'Cassotis IME - ' +
-        WideChar($8A00) + WideChar($6CC9) + WideChar($8F93) +
-        WideChar($5165) + WideChar($6CD5);
     c_candidate_brand_font_name = 'Microsoft YaHei UI';
     c_candidate_brand_font_size = 8;
+    c_candidate_brand_icon_size = 18;
+    c_candidate_brand_icon_gap = 6;
+    c_candidate_brand_resource_name = 'YANQUAN_MARK_PNG';
 
 function font_family_available(const font_name: string): Boolean;
 begin
@@ -386,6 +395,65 @@ begin
     g_vcl_initialized := True;
 end;
 
+function TncCandidateWindow.create_brand_bitmap_from_resource(
+    const target_size: Integer): TGPBitmap;
+var
+    resource_stream: TResourceStream;
+    resource_adapter: IStream;
+    source_bitmap: TGPBitmap;
+    graphics: TGPGraphics;
+begin
+    Result := nil;
+    if target_size < 1 then
+    begin
+        Exit;
+    end;
+
+    resource_stream := nil;
+    resource_adapter := nil;
+    source_bitmap := nil;
+    try
+        resource_stream := TResourceStream.Create(HInstance,
+            c_candidate_brand_resource_name, RT_RCDATA);
+        resource_adapter := TStreamAdapter.Create(resource_stream,
+            soReference) as IStream;
+        source_bitmap := TGPBitmap.Create(resource_adapter);
+        Result := TGPBitmap.Create(target_size, target_size,
+            PixelFormat32bppPARGB);
+        graphics := TGPGraphics.Create(Result);
+        try
+            graphics.Clear(MakeColor(0, 0, 0, 0));
+            graphics.SetCompositingQuality(CompositingQualityHighQuality);
+            graphics.SetInterpolationMode(InterpolationModeHighQualityBicubic);
+            graphics.SetPixelOffsetMode(PixelOffsetModeHighQuality);
+            graphics.SetSmoothingMode(SmoothingModeHighQuality);
+            graphics.DrawImage(source_bitmap, 0, 0, target_size,
+                target_size);
+        finally
+            graphics.Free;
+        end;
+    except
+        if Result <> nil then
+        begin
+            Result.Free;
+            Result := nil;
+        end;
+    end;
+    source_bitmap.Free;
+    resource_adapter := nil;
+    resource_stream.Free;
+end;
+
+procedure TncCandidateWindow.rebuild_brand_bitmap;
+begin
+    if m_brand_bitmap <> nil then
+    begin
+        m_brand_bitmap.Free;
+        m_brand_bitmap := nil;
+    end;
+    m_brand_bitmap := create_brand_bitmap_from_resource(m_brand_icon_size);
+end;
+
 constructor TncCandidateWindow.create;
 var
     product_version: string;
@@ -397,11 +465,17 @@ begin
     m_list_font := TFont.Create;
     m_weight_font := TFont.Create;
     m_brand_font := TFont.Create;
-    m_brand_text := c_candidate_brand_base_text;
+    m_brand_icon := TIcon.Create;
+    m_brand_bitmap := nil;
+    if (Application.Icon <> nil) and (not Application.Icon.Empty) then
+    begin
+        m_brand_icon.Assign(Application.Icon);
+    end;
+    m_brand_text := '';
     product_version := Trim(nc_get_current_exe_display_version);
     if product_version <> '' then
     begin
-        m_brand_text := m_brand_text + ' (v' + product_version + ')';
+        m_brand_text := '(v' + product_version + ')';
     end;
     m_color_scheme := c_default_candidate_color_scheme;
     m_color_theme := nc_candidate_color_theme(m_color_scheme);
@@ -419,6 +493,7 @@ begin
     m_base_item_gap := 12;
     m_item_gap := m_base_item_gap;
     m_base_list_padding := 6;
+    m_brand_icon_size := c_candidate_brand_icon_size;
     m_current_dpi := 0;
     m_layout_dpi := 0;
     m_layout_list_font_height := 0;
@@ -472,6 +547,7 @@ begin
     m_brand_font.Height := nc_font_height_for_dpi(
         c_candidate_brand_font_size, c_nc_base_dpi);
     m_brand_font.Color := m_color_theme.muted_text_color;
+    rebuild_brand_bitmap;
 end;
 
 destructor TncCandidateWindow.Destroy;
@@ -504,6 +580,18 @@ begin
     begin
         m_brand_font.Free;
         m_brand_font := nil;
+    end;
+
+    if m_brand_icon <> nil then
+    begin
+        m_brand_icon.Free;
+        m_brand_icon := nil;
+    end;
+
+    if m_brand_bitmap <> nil then
+    begin
+        m_brand_bitmap.Free;
+        m_brand_bitmap := nil;
     end;
 
     inherited Destroy;
@@ -887,6 +975,8 @@ begin
     m_preedit_label.Height := nc_scale_for_dpi(m_base_preedit_height, dpi);
     m_item_gap := nc_scale_for_dpi(m_base_item_gap, dpi);
     m_list_padding := nc_scale_for_dpi(m_base_list_padding, dpi);
+    m_brand_icon_size := nc_scale_for_dpi(c_candidate_brand_icon_size, dpi);
+    rebuild_brand_bitmap;
     m_weight_gap := nc_scale_for_dpi(m_base_weight_gap, dpi);
     m_remove_button_size := nc_scale_for_dpi(m_base_remove_button_size, dpi);
     m_remove_button_gap := nc_scale_for_dpi(m_base_remove_button_gap, dpi);
@@ -1325,6 +1415,8 @@ var
     completion_suffix_width: Integer;
     brand_width: Integer;
     brand_gap: Integer;
+    brand_icon_width: Integer;
+    brand_icon_gap: Integer;
 begin
     item_count := m_candidate_lines.Count;
     if (item_count = 0) and (m_one_key_completion_text = '') then
@@ -1414,7 +1506,21 @@ begin
     completion_height := Max(m_list_item_height,
         main_text_height + list_vertical_padding) + 1;
     Canvas.Font.Assign(m_brand_font);
-    brand_width := Canvas.TextWidth(m_brand_text) + 2;
+    brand_width := Canvas.TextWidth(m_brand_text);
+    brand_icon_width := 0;
+    brand_icon_gap := 0;
+    if (m_brand_bitmap <> nil) or
+        ((m_brand_icon <> nil) and (not m_brand_icon.Empty) and
+        (m_brand_icon.Handle <> 0)) then
+    begin
+        brand_icon_width := m_brand_icon_size;
+        if m_brand_text <> '' then
+        begin
+            brand_icon_gap := nc_scale_for_dpi(
+                c_candidate_brand_icon_gap, m_current_dpi);
+        end;
+    end;
+    brand_width := brand_icon_width + brand_icon_gap + brand_width + 2;
     brand_gap := nc_scale_for_dpi(12, m_current_dpi);
     completion_width := (m_list_padding * 2) + brand_width;
     if m_one_key_completion_text <> '' then
@@ -1582,10 +1688,15 @@ var
     completion_anchor_rect: TRect;
     completion_suffix_rect: TRect;
     brand_rect: TRect;
+    brand_icon_rect: TRect;
+    brand_text_rect: TRect;
     completion_key_text: string;
     completion_key_width: Integer;
     brand_text_width: Integer;
     brand_gap: Integer;
+    brand_icon_width: Integer;
+    brand_icon_gap: Integer;
+    brand_graphics: TGPGraphics;
 begin
     inherited;
     Canvas.Brush.Style := bsSolid;
@@ -1629,9 +1740,23 @@ begin
         completion_rect := m_one_key_completion_rect;
         Canvas.Font.Assign(m_brand_font);
         brand_text_width := Canvas.TextWidth(m_brand_text);
+        brand_icon_width := 0;
+        brand_icon_gap := 0;
+        if (m_brand_bitmap <> nil) or
+            ((m_brand_icon <> nil) and (not m_brand_icon.Empty) and
+            (m_brand_icon.Handle <> 0)) then
+        begin
+            brand_icon_width := m_brand_icon_size;
+            if m_brand_text <> '' then
+            begin
+                brand_icon_gap := nc_scale_for_dpi(
+                    c_candidate_brand_icon_gap, m_current_dpi);
+            end;
+        end;
         brand_rect := completion_rect;
         brand_rect.Right := completion_rect.Right - m_list_padding - 1;
-        brand_rect.Left := brand_rect.Right - brand_text_width;
+        brand_rect.Left := brand_rect.Right - brand_icon_width -
+            brand_icon_gap - brand_text_width;
         brand_gap := nc_scale_for_dpi(12, m_current_dpi);
 
         if m_one_key_completion_text <> '' then
@@ -1714,10 +1839,42 @@ begin
             end;
         end;
 
-        Canvas.Font.Assign(m_brand_font);
-        draw_outlined_canvas_text(Canvas, m_brand_text, brand_rect,
-            DT_RIGHT or DT_VCENTER or DT_SINGLELINE or DT_NOPREFIX,
-            candidate_brand_outline_color(Color), m_brand_font.Color);
+        brand_text_rect := brand_rect;
+        if brand_icon_width > 0 then
+        begin
+            brand_icon_rect := brand_rect;
+            brand_icon_rect.Right := brand_icon_rect.Left + brand_icon_width;
+            brand_icon_rect.Top := completion_rect.Top +
+                ((completion_rect.Height - m_brand_icon_size) div 2);
+            brand_icon_rect.Bottom := brand_icon_rect.Top + m_brand_icon_size;
+            if m_brand_bitmap <> nil then
+            begin
+                brand_graphics := TGPGraphics.Create(Canvas.Handle);
+                try
+                    brand_graphics.SetCompositingQuality(
+                        CompositingQualityHighQuality);
+                    brand_graphics.DrawImage(m_brand_bitmap,
+                        brand_icon_rect.Left, brand_icon_rect.Top);
+                finally
+                    brand_graphics.Free;
+                end;
+            end
+            else
+            begin
+                DrawIconEx(Canvas.Handle, brand_icon_rect.Left,
+                    brand_icon_rect.Top, m_brand_icon.Handle,
+                    brand_icon_rect.Width, brand_icon_rect.Height, 0, 0,
+                    DI_NORMAL);
+            end;
+            brand_text_rect.Left := brand_icon_rect.Right + brand_icon_gap;
+        end;
+        if m_brand_text <> '' then
+        begin
+            Canvas.Font.Assign(m_brand_font);
+            draw_outlined_canvas_text(Canvas, m_brand_text, brand_text_rect,
+                DT_RIGHT or DT_VCENTER or DT_SINGLELINE or DT_NOPREFIX,
+                candidate_brand_outline_color(Color), m_brand_font.Color);
+        end;
     end;
 
     if (m_candidate_lines = nil) or (m_candidate_lines.Count = 0) then

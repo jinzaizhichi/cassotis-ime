@@ -35,6 +35,11 @@ function anchor_looks_like_window_origin(const candidate: TPoint; const base_rec
     const has_base_rect: Boolean): Boolean;
 function anchor_looks_like_window_bottom_right(const candidate: TPoint; const base_rect: TRect;
     const has_base_rect: Boolean): Boolean;
+function normalize_caret_text_extent(const candidate: TRect;
+    const view_rect: TRect; const has_view_rect: Boolean;
+    const fallback_line_height: Integer): TRect;
+function should_use_comless_legacy_placement(const comless_target: Boolean;
+    const source: TncCaretAnchorSource): Boolean;
 function is_origin_anchor_suspicious(const candidate: TPoint; const base_rect: TRect; const has_base_rect: Boolean;
     const cursor_point: TPoint; const cursor_point_valid: Boolean; const terminal_like_target: Boolean;
     const has_composition: Boolean): Boolean;
@@ -151,6 +156,65 @@ begin
         (candidate.X <= base_rect.Right + c_edge_range) and
         (candidate.Y >= base_rect.Bottom - c_edge_range) and
         (candidate.Y <= base_rect.Bottom + c_edge_range);
+end;
+
+function normalize_caret_text_extent(const candidate: TRect;
+    const view_rect: TRect; const has_view_rect: Boolean;
+    const fallback_line_height: Integer): TRect;
+const
+    c_default_line_height = 24;
+    c_min_line_height = 16;
+    c_max_line_height = 64;
+    c_min_plausible_height = 96;
+    c_max_plausible_height = 256;
+var
+    extent_height: Integer;
+    view_height: Integer;
+    plausible_height: Integer;
+    normalized_line_height: Integer;
+begin
+    Result := candidate;
+    extent_height := candidate.Bottom - candidate.Top;
+    if extent_height <= 0 then
+    begin
+        Exit;
+    end;
+
+    plausible_height := c_max_plausible_height;
+    if has_view_rect then
+    begin
+        view_height := view_rect.Bottom - view_rect.Top;
+        if view_height > 0 then
+        begin
+            plausible_height := EnsureRange(view_height div 4,
+                c_min_plausible_height, c_max_plausible_height);
+        end;
+    end;
+    if extent_height <= plausible_height then
+    begin
+        Exit;
+    end;
+
+    // Some TSF clients return a collapsed range whose top is the real caret
+    // but whose bottom is the bottom of the entire editing viewport.
+    normalized_line_height := fallback_line_height;
+    if normalized_line_height <= 0 then
+    begin
+        normalized_line_height := c_default_line_height;
+    end;
+    normalized_line_height := EnsureRange(normalized_line_height,
+        c_min_line_height, c_max_line_height);
+    Result.Bottom := Result.Top + normalized_line_height;
+end;
+
+function should_use_comless_legacy_placement(const comless_target: Boolean;
+    const source: TncCaretAnchorSource): Boolean;
+begin
+    // The above-anchor placement exists for legacy IMM/game fallbacks. A
+    // normal TSF caret must retain the standard below-caret placement even
+    // when the client happens to activate the text service as COM-less.
+    Result := comless_target and
+        (source in [casImm, casComlessFallback]);
 end;
 
 function is_origin_anchor_suspicious(const candidate: TPoint; const base_rect: TRect; const has_base_rect: Boolean;

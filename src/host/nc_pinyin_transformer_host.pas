@@ -1601,8 +1601,6 @@ var
     candidate_text: string;
     valid_candidate: Boolean;
     duplicate: Boolean;
-    started_tick: UInt64;
-    elapsed_ms: UInt64;
 begin
     Result := False;
     SetLength(candidates, 0);
@@ -1648,7 +1646,6 @@ begin
     SetLength(output_scores, c_generator_candidate_count);
     output_count := 0;
     FillChar(error_buffer, SizeOf(error_buffer), 0);
-    started_tick := GetTickCount64;
     m_run_lock.Acquire;
     try
         if run_function_local(session_local, @pinyin_ids[0],
@@ -1671,12 +1668,6 @@ begin
     finally
         m_run_lock.Release;
     end;
-    elapsed_ms := GetTickCount64 - started_tick;
-    if (m_result_timeout_ms > 0) and (elapsed_ms > m_result_timeout_ms) then
-    begin
-        Exit;
-    end;
-
     generated_count := Min(output_count, c_generator_candidate_count);
     SetLength(candidates, generated_count);
     output_count := 0;
@@ -1879,11 +1870,10 @@ begin
     if (m_result_timeout_ms > 0) and
         (elapsed_ms > m_result_timeout_ms) then
     begin
+        { Inference is synchronous and has already completed. Discarding its
+          result here cannot recover latency; it only makes ranking depend on
+          scheduler load. Keep the threshold as an audit signal. }
         audit.timed_out := True;
-        if not m_audit_enabled then
-        begin
-            Exit;
-        end;
     end;
 
     best_raw_score := -MaxSingle;
@@ -1944,7 +1934,7 @@ begin
             best_index := candidate_index;
         end;
     end;
-    if audit.timed_out or (best_index <= 0) then
+    if best_index <= 0 then
     begin
         cache_decision(char_ids, pinyin_ids, boundary_ids,
             numeric_features, candidate_mask, gate_features, False, 0);

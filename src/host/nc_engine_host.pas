@@ -1030,7 +1030,7 @@ begin
     end
     else
     begin
-        if comless_target then
+        if should_use_comless_legacy_placement(comless_target, source) then
         begin
             comless_clearance := scale_candidate_offset(c_default_offset,
                 target_point);
