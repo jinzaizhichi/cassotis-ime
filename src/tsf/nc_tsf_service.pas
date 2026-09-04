@@ -2802,12 +2802,15 @@ end;
 function TncTextService.handle_terminal_ctrl_space_hook_event(
     const message_id: WPARAM; const key_code: Word;
     const injected: Boolean): Boolean;
+const
+    c_chord_consumed = WPARAM(1);
 var
     foreground_process_id: DWORD;
     foreground_window: HWND;
     key_state: TncKeyState;
     key_is_down: Boolean;
     key_is_up: Boolean;
+    hook_disposition: TncTsfTerminalCtrlSpaceDisposition;
 begin
     Result := False;
     if injected or (m_terminal_ctrl_space_hook = 0) or
@@ -2852,10 +2855,24 @@ begin
     end;
 
     key_state := build_key_state;
-    if not nc_tsf_terminal_ctrl_space_hook_should_capture(
+    hook_disposition := nc_tsf_terminal_ctrl_space_disposition(
         m_shortcut_config.input_mode_toggle, m_windows_ctrl_space_hotkey,
-        True, key_code, key_state) then
+        True, key_code, key_state);
+    if hook_disposition = tcsd_ignore then
     begin
+        Exit;
+    end;
+
+    if hook_disposition = tcsd_pass_through then
+    begin
+        // Observe but do not swallow an unconfigured Ctrl+Space. This marker
+        // lets the compartment sink reject Windows' legacy IME toggle, while
+        // still allowing tools such as HotkeyP to remap the physical chord to
+        // Win+Space.
+        m_system_input_mode_prefix_pending := True;
+        m_system_input_mode_prefix_tick := GetTickCount64;
+        PostMessage(m_terminal_ctrl_space_window,
+            c_nc_terminal_ctrl_space_message, 0, 0);
         Exit;
     end;
 
@@ -2872,7 +2889,7 @@ begin
     // have changed since this hook was installed, and doing file or IPC work
     // synchronously inside WH_KEYBOARD_LL would stall the keyboard globally.
     if not PostMessage(m_terminal_ctrl_space_window,
-        c_nc_terminal_ctrl_space_message, 0, 0) then
+        c_nc_terminal_ctrl_space_message, c_chord_consumed, 0) then
     begin
         m_terminal_ctrl_space_key_down := False;
         Result := False;
@@ -2880,6 +2897,10 @@ begin
 end;
 
 procedure TncTextService.terminal_ctrl_space_window_proc(var message: TMessage);
+var
+    chord_was_consumed: Boolean;
+    pass_through_prefix_pending: Boolean;
+    pass_through_prefix_tick: UInt64;
 begin
     if message.Msg <> c_nc_terminal_ctrl_space_message then
     begin
@@ -2890,10 +2911,31 @@ begin
 
     message.Result := 0;
     try
+        chord_was_consumed := message.WParam <> 0;
+        pass_through_prefix_pending := (not chord_was_consumed) and
+            m_system_input_mode_prefix_pending;
+        pass_through_prefix_tick := m_system_input_mode_prefix_tick;
         // The low-level hook bypasses the normal TSF key callbacks, so it must
         // explicitly refresh before deciding whether this chord is still the
         // configured shortcut.
         reload_config_if_needed(True);
+        if not chord_was_consumed then
+        begin
+            // A config refresh clears transient shortcut state. Restore this
+            // marker until Windows either reports its legacy toggle or the
+            // bounded prefix timeout expires.
+            if pass_through_prefix_pending then
+            begin
+                m_system_input_mode_prefix_pending := True;
+                m_system_input_mode_prefix_tick := pass_through_prefix_tick;
+            end;
+            if (m_logger <> nil) and (m_logger.level <= ll_debug) then
+            begin
+                m_logger.debug(
+                    'Unconfigured terminal Ctrl+Space passed through for remapping');
+            end;
+            Exit;
+        end;
         if (m_terminal_ctrl_space_hook = 0) or
             (not nc_tsf_shortcut_is_ctrl_space(
                 m_shortcut_config.input_mode_toggle)) then

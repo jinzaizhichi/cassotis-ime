@@ -23,6 +23,11 @@ type
         tccs_openclose,
         tccs_conversion
     );
+    TncTsfTerminalCtrlSpaceDisposition = (
+        tcsd_ignore,
+        tcsd_pass_through,
+        tcsd_consume
+    );
 
 const
     c_nc_tsf_invalid_sink_cookie = DWORD($FFFFFFFF);
@@ -83,6 +88,12 @@ function nc_tsf_terminal_ctrl_space_hook_should_capture(
     const terminal_has_focus: Boolean;
     const key_code: Word;
     const key_state: TncKeyState): Boolean;
+function nc_tsf_terminal_ctrl_space_disposition(
+    const configured_shortcut: TncShortcut;
+    const windows_ctrl_space_hotkey: Boolean;
+    const terminal_has_focus: Boolean;
+    const key_code: Word;
+    const key_state: TncKeyState): TncTsfTerminalCtrlSpaceDisposition;
 function nc_tsf_is_terminal_compatibility_identity(
     const process_name: string; const window_class_name: string): Boolean;
 function nc_tsf_should_reject_unconfigured_terminal_mode_change(
@@ -380,6 +391,27 @@ begin
         (nc_normalize_shortcut_key_code(key_code) = VK_SPACE) and
         (not key_state.shift_down) and key_state.ctrl_down and
         (not key_state.alt_down);
+end;
+
+function nc_tsf_terminal_ctrl_space_disposition(
+    const configured_shortcut: TncShortcut;
+    const windows_ctrl_space_hotkey: Boolean;
+    const terminal_has_focus: Boolean;
+    const key_code: Word;
+    const key_state: TncKeyState): TncTsfTerminalCtrlSpaceDisposition;
+begin
+    if not nc_tsf_terminal_ctrl_space_hook_should_capture(
+        configured_shortcut, windows_ctrl_space_hotkey,
+        terminal_has_focus, key_code, key_state) then
+    begin
+        Exit(tcsd_ignore);
+    end;
+    if nc_tsf_terminal_ctrl_space_hook_matches(configured_shortcut,
+        terminal_has_focus, key_code, key_state) then
+    begin
+        Exit(tcsd_consume);
+    end;
+    Result := tcsd_pass_through;
 end;
 
 function nc_tsf_is_terminal_compatibility_identity(
