@@ -4,6 +4,7 @@ interface
 
 uses
     Winapi.Windows,
+    Winapi.Messages,
     Winapi.ActiveX,
     Winapi.Imm,
     Winapi.Msctf,
@@ -31,12 +32,15 @@ uses
 
 type
     TncTextService = class(TComObject, ITfTextInputProcessor, ITfTextInputProcessorEx,
-        ITfKeyEventSink, ITfCompositionSink, ITfContextOwnerCompositionSink, ITfDisplayAttributeProvider,
+        ITfKeyEventSink, ITfKeyTraceEventSink, ITfCompositionSink,
+        ITfContextOwnerCompositionSink, ITfDisplayAttributeProvider,
         ITfThreadMgrEventSink, ITfTextEditSink, ITfTextLayoutSink, ITfCompartmentEventSink)
     private
         m_thread_mgr: ITfThreadMgr;
         m_thread_mgr_source: ITfSource;
         m_thread_mgr_event_cookie: DWORD;
+        m_key_trace_source: ITfSource;
+        m_key_trace_cookie: DWORD;
         m_compartment_mgr: ITfCompartmentMgr;
         m_openclose_compartment: ITfCompartment;
         m_openclose_source: ITfSource;
@@ -53,8 +57,9 @@ type
         m_activation_flags: DWORD;
         m_keystroke_mgr: ITfKeystrokeMgr;
         m_key_event_advised: Boolean;
-        m_preserved_input_mode_registered: Boolean;
+        m_preserved_input_mode_owner: TncTsfPreservedKeyOwner;
         m_preserved_input_mode_key: TF_PRESERVEDKEY;
+        m_windows_ctrl_space_hotkey: Boolean;
         m_doc_mgr: ITfDocumentMgr;
         m_context_source: ITfSource;
         m_text_edit_cookie: DWORD;
@@ -67,7 +72,7 @@ type
         m_attr_input_atom: TfGuidAtom;
         m_display_attribute_provider: ITfDisplayAttributeProvider;
         m_config_path: string;
-        m_last_config_write: TDateTime;
+        m_loaded_config_write_time: TDateTime;
         m_last_config_check_tick: UInt64;
         m_log_config: TncLogConfig;
         m_logger: TncLogger;
@@ -115,12 +120,25 @@ type
         m_chord_shortcut_action: TncShortcutAction;
         m_chord_shortcut_key_code: Word;
         m_chord_shortcut_tick: UInt64;
+        m_chord_shortcut_source: TncTsfShortcutEventSource;
+        m_external_input_mode_transition_pending: Boolean;
+        m_external_input_mode_target: TncInputMode;
+        m_external_input_mode_transition_tick: UInt64;
+        m_system_input_mode_prefix_pending: Boolean;
+        m_system_input_mode_prefix_tick: UInt64;
+        m_rejected_modifier_transition_pending: Boolean;
+        m_rejected_modifier_transition_tick: UInt64;
+        m_terminal_ctrl_space_hook: HHOOK;
+        m_terminal_ctrl_space_window: HWND;
+        m_terminal_ctrl_space_key_down: Boolean;
         m_langbar_icon: HICON;
         procedure clear_state;
         procedure unpreserve_input_mode_shortcut;
         procedure refresh_preserved_input_mode_shortcut;
         function begin_chord_shortcut(const action: TncShortcutAction;
-            const key_code: Word): Boolean;
+            const key_code: Word;
+            const source: TncTsfShortcutEventSource = tses_key_sink;
+            const key_down_is_repeat: Boolean = False): Boolean;
         procedure rollback_activation;
         function activate_core(const thread_mgr: ITfThreadMgr;
             client_id: TfClientId; const activation_flags: DWORD): HResult;
@@ -136,6 +154,8 @@ type
             const anchor_score: Integer = 0; const force: Boolean = False);
         procedure unadvise_thread_mgr_sink;
         procedure advise_thread_mgr_sink;
+        procedure unadvise_key_trace_sink;
+        procedure advise_key_trace_sink;
         procedure unadvise_compartment_sinks;
         procedure advise_compartment_sinks;
         function read_compartment_dword(const compartment: ITfCompartment; out value: DWORD): Boolean;
@@ -155,12 +175,28 @@ type
         function get_config_write_time: TDateTime;
         procedure load_engine_config(out config: TncEngineConfig);
         procedure apply_log_config;
-        procedure reload_config_if_needed;
+        procedure reload_config_if_needed(const force_check: Boolean = False);
         procedure save_engine_state_to_config(const input_mode: TncInputMode; const full_width_mode: Boolean;
             const punctuation_full_width: Boolean);
         procedure update_active_state(const active: Boolean);
         function commit_pending_raw_text_before_mode_switch: Boolean;
         procedure execute_shortcut_action(const action: TncShortcutAction);
+        procedure update_system_input_mode_shortcut_prefix(
+            const key_code: Word; const key_state: TncKeyState);
+        procedure clear_system_input_mode_shortcut_prefix;
+        function consume_system_input_mode_shortcut_prefix: Boolean;
+        procedure clear_rejected_modifier_transition;
+        function rejected_modifier_transition_active: Boolean;
+        function current_process_is_terminal_compatibility_host: Boolean;
+        function current_target_is_terminal_compatibility_host: Boolean;
+        procedure refresh_terminal_ctrl_space_hook;
+        procedure remove_terminal_ctrl_space_hook;
+        function handle_terminal_ctrl_space_hook_event(
+            const message_id: WPARAM; const key_code: Word;
+            const injected: Boolean): Boolean;
+        procedure terminal_ctrl_space_window_proc(var message: TMessage);
+        procedure handle_external_input_mode_shortcut;
+        function external_input_mode_transition_active: Boolean;
         procedure toggle_input_mode_by_shortcut;
         procedure toggle_full_width_mode_by_shortcut;
         procedure toggle_punctuation_mode_by_shortcut;
@@ -212,6 +248,8 @@ type
         function OnTestKeyUp(const context: ITfContext; wParam: WPARAM; lParam: LPARAM; out eaten: Integer): HResult; stdcall;
         function OnKeyUp(const context: ITfContext; wParam: WPARAM; lParam: LPARAM; out eaten: Integer): HResult; stdcall;
         function OnPreservedKey(const context: ITfContext; var rguid: TGUID; out eaten: Integer): HResult; stdcall;
+        function OnKeyTraceDown(wParam: WPARAM; lParam: LPARAM): HResult; stdcall;
+        function OnKeyTraceUp(wParam: WPARAM; lParam: LPARAM): HResult; stdcall;
 
         function OnCompositionTerminated(ecWrite: TfEditCookie; const composition: ITfComposition): HResult; stdcall;
 
@@ -235,6 +273,85 @@ type
 implementation
 
 procedure signal_tray_profile_event(const active: Boolean); forward;
+procedure log_tsf_boundary_exception(const operation: string); forward;
+
+type
+    PncLowLevelKeyboardHookData = ^TncLowLevelKeyboardHookData;
+    TncLowLevelKeyboardHookData = record
+        virtual_key: DWORD;
+        scan_code: DWORD;
+        flags: DWORD;
+        timestamp: DWORD;
+        extra_info: ULONG_PTR;
+    end;
+
+const
+    c_nc_terminal_ctrl_space_message = WM_APP + 311;
+    c_nc_low_level_keyboard_injected = $00000010;
+
+threadvar
+    g_terminal_ctrl_space_service: TncTextService;
+
+function nc_terminal_ctrl_space_keyboard_hook(code: Integer; wParam: WPARAM;
+    lParam: LPARAM): LRESULT; stdcall;
+var
+    hook_data: PncLowLevelKeyboardHookData;
+    service: TncTextService;
+begin
+    service := g_terminal_ctrl_space_service;
+    try
+        if (code = HC_ACTION) and (service <> nil) and (lParam <> 0) then
+        begin
+            hook_data := PncLowLevelKeyboardHookData(lParam);
+            if service.handle_terminal_ctrl_space_hook_event(wParam,
+                Word(hook_data^.virtual_key),
+                (hook_data^.flags and c_nc_low_level_keyboard_injected) <> 0) then
+            begin
+                Exit(1);
+            end;
+        end;
+    except
+        log_tsf_boundary_exception('TerminalCtrlSpaceKeyboardHook');
+    end;
+    if service <> nil then
+    begin
+        Result := CallNextHookEx(service.m_terminal_ctrl_space_hook, code,
+            wParam, lParam);
+    end
+    else
+    begin
+        Result := CallNextHookEx(0, code, wParam, lParam);
+    end;
+end;
+
+function nc_imm_get_hot_key(const hot_key_id: DWORD; out modifiers: UINT;
+    out virtual_key: UINT; out keyboard_layout: HKL): BOOL; stdcall;
+    external 'imm32.dll' name 'ImmGetHotKey';
+
+function nc_windows_ime_toggle_owns_shortcut(
+    const shortcut: TncShortcut): Boolean;
+    function hot_key_matches(const hot_key_id: DWORD): Boolean;
+    var
+        modifiers: UINT;
+        virtual_key: UINT;
+        keyboard_layout: HKL;
+    begin
+        modifiers := 0;
+        virtual_key := 0;
+        keyboard_layout := 0;
+        Result := nc_imm_get_hot_key(hot_key_id, modifiers, virtual_key,
+            keyboard_layout) and
+            nc_tsf_shortcut_matches_system_hotkey(shortcut, virtual_key,
+                modifiers);
+    end;
+begin
+    try
+        Result := hot_key_matches(IME_CHOTKEY_IME_NONIME_TOGGLE) or
+            hot_key_matches(IME_THOTKEY_IME_NONIME_TOGGLE);
+    except
+        Result := False;
+    end;
+end;
 
 type
     TncGuiThreadInfo = record
@@ -687,6 +804,7 @@ end;
 
 procedure TncTextService.rollback_activation;
 begin
+    remove_terminal_ctrl_space_hook;
     unpreserve_input_mode_shortcut;
     try
         if m_key_event_advised and (m_keystroke_mgr <> nil) then
@@ -701,6 +819,7 @@ begin
 
     unadvise_context_sinks;
     unadvise_compartment_sinks;
+    unadvise_key_trace_sink;
     unadvise_thread_mgr_sink;
     free_logger;
     clear_state;
@@ -754,6 +873,8 @@ begin
     m_thread_mgr := nil;
     m_thread_mgr_source := nil;
     m_thread_mgr_event_cookie := c_nc_tsf_invalid_sink_cookie;
+    m_key_trace_source := nil;
+    m_key_trace_cookie := c_nc_tsf_invalid_sink_cookie;
     m_compartment_mgr := nil;
     m_openclose_compartment := nil;
     m_openclose_source := nil;
@@ -770,8 +891,9 @@ begin
     m_activation_flags := 0;
     m_keystroke_mgr := nil;
     m_key_event_advised := False;
-    m_preserved_input_mode_registered := False;
+    m_preserved_input_mode_owner := tpko_none;
     FillChar(m_preserved_input_mode_key, SizeOf(m_preserved_input_mode_key), 0);
+    m_windows_ctrl_space_hotkey := False;
     m_doc_mgr := nil;
     m_context_source := nil;
     m_text_edit_cookie := c_nc_tsf_invalid_sink_cookie;
@@ -782,7 +904,7 @@ begin
     m_attr_input_atom := TF_INVALID_GUIDATOM;
     m_display_attribute_provider := nil;
     m_config_path := '';
-    m_last_config_write := 0;
+    m_loaded_config_write_time := 0;
     m_last_config_check_tick := 0;
     m_log_config.enabled := False;
     m_log_config.level := ll_info;
@@ -824,24 +946,37 @@ begin
     m_chord_shortcut_action := Low(TncShortcutAction);
     m_chord_shortcut_key_code := 0;
     m_chord_shortcut_tick := 0;
+    m_chord_shortcut_source := tses_key_sink;
+    m_external_input_mode_transition_pending := False;
+    m_external_input_mode_target := im_chinese;
+    m_external_input_mode_transition_tick := 0;
+    m_system_input_mode_prefix_pending := False;
+    m_system_input_mode_prefix_tick := 0;
+    m_rejected_modifier_transition_pending := False;
+    m_rejected_modifier_transition_tick := 0;
+    m_terminal_ctrl_space_hook := 0;
+    m_terminal_ctrl_space_window := 0;
+    m_terminal_ctrl_space_key_down := False;
 end;
 
 procedure TncTextService.unpreserve_input_mode_shortcut;
 var
+    preserved_owner: TncTsfPreservedKeyOwner;
     preserved_guid: TGUID;
     preserved_key: TF_PRESERVEDKEY;
     hr: HRESULT;
 begin
-    if not m_preserved_input_mode_registered then
+    preserved_owner := m_preserved_input_mode_owner;
+    if preserved_owner = tpko_none then
     begin
         Exit;
     end;
 
     preserved_guid := GUID_NcPreservedKeyInputModeToggle;
     preserved_key := m_preserved_input_mode_key;
-    m_preserved_input_mode_registered := False;
+    m_preserved_input_mode_owner := tpko_none;
     FillChar(m_preserved_input_mode_key, SizeOf(m_preserved_input_mode_key), 0);
-    if m_keystroke_mgr = nil then
+    if (preserved_owner <> tpko_text_service) or (m_keystroke_mgr = nil) then
     begin
         Exit;
     end;
@@ -864,16 +999,22 @@ var
     preserved_guid: TGUID;
     preserved_key: TF_PRESERVEDKEY;
     description: UnicodeString;
+    windows_hotkey_match: Boolean;
     hr: HRESULT;
 begin
     shortcut := m_shortcut_config.input_mode_toggle;
+    m_windows_ctrl_space_hotkey := nc_windows_ime_toggle_owns_shortcut(
+        nc_make_shortcut(VK_SPACE, False, True, False));
     if not nc_tsf_shortcut_to_preserved_key(shortcut, preserved_key) then
     begin
+        clear_system_input_mode_shortcut_prefix;
         unpreserve_input_mode_shortcut;
         Exit;
     end;
 
-    if m_preserved_input_mode_registered and
+    windows_hotkey_match := nc_windows_ime_toggle_owns_shortcut(shortcut);
+
+    if (m_preserved_input_mode_owner <> tpko_none) and
         (m_preserved_input_mode_key.uVKey = preserved_key.uVKey) and
         (m_preserved_input_mode_key.uModifiers = preserved_key.uModifiers) then
     begin
@@ -889,17 +1030,35 @@ begin
     preserved_guid := GUID_NcPreservedKeyInputModeToggle;
     description := 'Cassotis IME input mode toggle';
     try
+        // A Windows IMM hot key and a TSF preserved key are separate
+        // registrations. Try to claim the chord for this text service first;
+        // otherwise Chrome and console hosts can apply the legacy Ctrl+Space
+        // transition before ITfKeyEventSink ever sees Space.
         hr := m_keystroke_mgr.PreserveKey(m_client_id, preserved_guid,
             preserved_key, PWideChar(description), Length(description));
-        if not Failed(hr) then
+        m_preserved_input_mode_owner := nc_tsf_resolve_preserved_key_owner(
+            hr, windows_hotkey_match);
+        if m_preserved_input_mode_owner <> tpko_none then
         begin
             m_preserved_input_mode_key := preserved_key;
-            m_preserved_input_mode_registered := True;
+        end;
+        if m_preserved_input_mode_owner = tpko_text_service then
+        begin
             if (m_logger <> nil) and (m_logger.level <= ll_debug) then
             begin
                 m_logger.debug(Format('Preserved input-mode shortcut=%s key=%d modifiers=0x%s',
                     [nc_shortcut_to_text(shortcut), preserved_key.uVKey,
                     IntToHex(preserved_key.uModifiers, 4)]));
+            end;
+        end
+        else if m_preserved_input_mode_owner = tpko_external then
+        begin
+            if m_logger <> nil then
+            begin
+                m_logger.info(Format(
+                    'Input-mode shortcut=%s could not be preserved hr=0x%s windows_hotkey=%d; using key-trace/compartment fallback',
+                    [nc_shortcut_to_text(shortcut),
+                    IntToHex(Cardinal(hr), 8), Ord(windows_hotkey_match)]));
             end;
         end
         else if m_logger <> nil then
@@ -913,24 +1072,35 @@ begin
 end;
 
 function TncTextService.begin_chord_shortcut(const action: TncShortcutAction;
-    const key_code: Word): Boolean;
-const
-    c_stale_chord_shortcut_ms = 500;
+    const key_code: Word; const source: TncTsfShortcutEventSource;
+    const key_down_is_repeat: Boolean): Boolean;
 var
+    elapsed_ms: UInt64;
     normalized_key_code: Word;
     now_tick: UInt64;
+    same_chord: Boolean;
 begin
     normalized_key_code := nc_normalize_shortcut_key_code(key_code);
     now_tick := GetTickCount64;
-    Result := (not m_chord_shortcut_pending) or
-        (m_chord_shortcut_action <> action) or
-        (m_chord_shortcut_key_code <> normalized_key_code) or
-        (m_chord_shortcut_tick = 0) or
-        ((now_tick - m_chord_shortcut_tick) > c_stale_chord_shortcut_ms);
+    same_chord := m_chord_shortcut_pending and
+        (m_chord_shortcut_action = action) and
+        (m_chord_shortcut_key_code = normalized_key_code);
+    if m_chord_shortcut_tick = 0 then
+    begin
+        elapsed_ms := High(UInt64);
+    end
+    else
+    begin
+        elapsed_ms := now_tick - m_chord_shortcut_tick;
+    end;
+    Result := nc_tsf_should_execute_chord_shortcut(source,
+        m_chord_shortcut_pending, m_chord_shortcut_source, same_chord,
+        elapsed_ms, key_down_is_repeat);
     m_chord_shortcut_pending := True;
     m_chord_shortcut_action := action;
     m_chord_shortcut_key_code := normalized_key_code;
     m_chord_shortcut_tick := now_tick;
+    m_chord_shortcut_source := source;
 end;
 
 procedure TncTextService.mark_session_dirty;
@@ -1264,6 +1434,46 @@ begin
         else
         begin
             m_thread_mgr_event_cookie := c_nc_tsf_invalid_sink_cookie;
+        end;
+    end;
+end;
+
+procedure TncTextService.unadvise_key_trace_sink;
+begin
+    if not nc_tsf_try_unadvise_sink(m_key_trace_source, m_key_trace_cookie) then
+    begin
+        if m_logger <> nil then
+        begin
+            m_logger.warn('Failed to unadvise key trace sink');
+        end;
+    end;
+    m_key_trace_source := nil;
+end;
+
+procedure TncTextService.advise_key_trace_sink;
+var
+    source: ITfSource;
+    iid: TGUID;
+    hr: HRESULT;
+begin
+    unadvise_key_trace_sink;
+    if m_thread_mgr = nil then
+    begin
+        Exit;
+    end;
+
+    if Supports(m_thread_mgr, ITfSource, source) then
+    begin
+        iid := IID_ITfKeyTraceEventSink;
+        hr := source.AdviseSink(iid, Self as ITfKeyTraceEventSink,
+            m_key_trace_cookie);
+        if hr = S_OK then
+        begin
+            m_key_trace_source := source;
+        end
+        else
+        begin
+            m_key_trace_cookie := c_nc_tsf_invalid_sink_cookie;
         end;
     end;
 end;
@@ -1603,6 +1813,7 @@ begin
     end;
 
     advise_thread_mgr_sink;
+    advise_key_trace_sink;
     advise_compartment_sinks;
     m_doc_mgr := nil;
     if (m_thread_mgr <> nil) and (m_thread_mgr.GetFocus(m_doc_mgr) = S_OK) and (m_doc_mgr <> nil) then
@@ -1652,6 +1863,10 @@ begin
     begin
         m_logger.info(Format('TSF activate flags=0x%.8x comless=%d',
             [m_activation_flags, Ord((m_activation_flags and TF_TMAE_COMLESS) <> 0)]));
+        if m_key_trace_source = nil then
+        begin
+            m_logger.warn('TSF key trace sink unavailable; system-owned shortcuts may use compartment fallback');
+        end;
     end;
 
     Result := S_OK;
@@ -1681,6 +1896,7 @@ end;
 
 procedure TncTextService.deactivate_core;
 begin
+    remove_terminal_ctrl_space_hook;
     unpreserve_input_mode_shortcut;
     if m_key_event_advised and (m_keystroke_mgr <> nil) then
     begin
@@ -1691,6 +1907,7 @@ begin
 
     unadvise_context_sinks;
     unadvise_compartment_sinks;
+    unadvise_key_trace_sink;
     unadvise_thread_mgr_sink;
 
     if (m_ipc_client <> nil) and (m_session_id <> '') then
@@ -1768,6 +1985,17 @@ begin
             m_chord_shortcut_pending := False;
             m_chord_shortcut_key_code := 0;
             m_chord_shortcut_tick := 0;
+            m_chord_shortcut_source := tses_key_sink;
+            m_external_input_mode_transition_pending := False;
+            m_external_input_mode_transition_tick := 0;
+            clear_system_input_mode_shortcut_prefix;
+            clear_rejected_modifier_transition;
+        end;
+        if focus <> 0 then
+        begin
+            // Settings are edited in the tray process. Refresh on focus regain
+            // so an already loaded client cannot keep its previous shortcut.
+            reload_config_if_needed(True);
         end;
     except
         log_tsf_boundary_exception('KeyEventSink.OnSetFocus');
@@ -1795,6 +2023,7 @@ begin
     reload_config_if_needed;
     key_state := build_key_state;
     key_code := Word(wParam);
+    update_system_input_mode_shortcut_prefix(key_code, key_state);
     if (m_logger <> nil) and (m_logger.level <= ll_debug) then
     begin
         m_logger.debug(Format('TestKeyDown session=%s key=%d shift=%d ctrl=%d alt=%d caps=%d',
@@ -1814,10 +2043,30 @@ begin
         m_chord_shortcut_pending := False;
         m_chord_shortcut_key_code := 0;
         m_chord_shortcut_tick := 0;
+        m_chord_shortcut_source := tses_key_sink;
     end;
 
     if nc_find_shortcut_action(m_shortcut_config, key_code, key_state, shortcut_action) then
     begin
+        // A stale modifier-only binding must not execute once after Apply. A
+        // forced host refresh also updates the preserved-key registration.
+        reload_config_if_needed(True);
+        if not nc_find_shortcut_action(m_shortcut_config, key_code, key_state,
+            shortcut_action) then
+        begin
+            Result := S_OK;
+            Exit;
+        end;
+        if (shortcut_action = sa_input_mode_toggle) and
+            nc_tsf_should_defer_input_mode_shortcut(
+                m_preserved_input_mode_owner) then
+        begin
+            // The trace sink coordinates the engine state and Windows updates
+            // the TSF compartments. Do not also consume the chord here.
+            eaten := 0;
+            Result := S_OK;
+            Exit;
+        end;
         eaten := 1;
         Result := S_OK;
         Exit;
@@ -1955,6 +2204,8 @@ begin
             Ord(key_state.caps_lock)]));
     end;
 
+    update_system_input_mode_shortcut_prefix(key_code, key_state);
+
     normalized_key_code := nc_normalize_shortcut_key_code(key_code);
     if m_modifier_shortcut_pending and
         (normalized_key_code <> m_modifier_shortcut_key_code) then
@@ -1967,11 +2218,31 @@ begin
         m_chord_shortcut_pending := False;
         m_chord_shortcut_key_code := 0;
         m_chord_shortcut_tick := 0;
+        m_chord_shortcut_source := tses_key_sink;
     end;
 
     if nc_find_shortcut_action(m_shortcut_config, key_code, key_state, shortcut_action) then
     begin
+        reload_config_if_needed(True);
+        if not nc_find_shortcut_action(m_shortcut_config, key_code, key_state,
+            shortcut_action) then
+        begin
+            Result := S_OK;
+            Exit;
+        end;
+        if (shortcut_action = sa_input_mode_toggle) and
+            nc_tsf_should_defer_input_mode_shortcut(
+                m_preserved_input_mode_owner) then
+        begin
+            eaten := 0;
+            Result := S_OK;
+            Exit;
+        end;
         shortcut_value := nc_shortcut_for_action(m_shortcut_config, shortcut_action);
+        if shortcut_action = sa_input_mode_toggle then
+        begin
+            clear_system_input_mode_shortcut_prefix;
+        end;
         if nc_shortcut_is_modifier_only(shortcut_value) then
         begin
             m_modifier_shortcut_pending := True;
@@ -2181,6 +2452,7 @@ begin
         m_chord_shortcut_pending := False;
         m_chord_shortcut_key_code := 0;
         m_chord_shortcut_tick := 0;
+        m_chord_shortcut_source := tses_key_sink;
         eaten := 1;
         Result := S_OK;
         Exit;
@@ -2282,6 +2554,471 @@ begin
     end;
 end;
 
+procedure TncTextService.clear_system_input_mode_shortcut_prefix;
+begin
+    m_system_input_mode_prefix_pending := False;
+    m_system_input_mode_prefix_tick := 0;
+end;
+
+procedure TncTextService.update_system_input_mode_shortcut_prefix(
+    const key_code: Word; const key_state: TncKeyState);
+var
+    normalized_key_code: Word;
+begin
+    normalized_key_code := nc_normalize_shortcut_key_code(key_code);
+    if nc_tsf_is_unconfigured_shift_toggle(
+        m_shortcut_config.input_mode_toggle, key_code, key_state) then
+    begin
+        clear_system_input_mode_shortcut_prefix;
+        m_rejected_modifier_transition_pending := True;
+        m_rejected_modifier_transition_tick := GetTickCount64;
+        if (m_logger <> nil) and (m_logger.level <= ll_debug) then
+        begin
+            m_logger.debug('Unconfigured Shift input-mode transition armed for rejection');
+        end;
+        Exit;
+    end;
+
+    if normalized_key_code = VK_SHIFT then
+    begin
+        clear_rejected_modifier_transition;
+    end
+    else if m_rejected_modifier_transition_pending then
+    begin
+        clear_rejected_modifier_transition;
+    end;
+
+    if not m_windows_ctrl_space_hotkey then
+    begin
+        clear_system_input_mode_shortcut_prefix;
+        Exit;
+    end;
+
+    if (normalized_key_code = VK_CONTROL) and key_state.ctrl_down and
+        (not key_state.shift_down) and (not key_state.alt_down) then
+    begin
+        m_system_input_mode_prefix_pending := True;
+        m_system_input_mode_prefix_tick := GetTickCount64;
+        if (m_logger <> nil) and (m_logger.level <= ll_debug) then
+        begin
+            m_logger.debug('System input-mode shortcut prefix armed');
+        end;
+        Exit;
+    end;
+
+    // Space can be consumed by the Windows IME hotkey before it reaches the
+    // TSF key sink. Any other key proves that the Ctrl press belongs to a
+    // different shortcut, such as Ctrl+C.
+    if m_system_input_mode_prefix_pending and
+        (normalized_key_code <> VK_SPACE) then
+    begin
+        clear_system_input_mode_shortcut_prefix;
+    end;
+end;
+
+function TncTextService.consume_system_input_mode_shortcut_prefix: Boolean;
+var
+    elapsed_ms: UInt64;
+begin
+    if m_system_input_mode_prefix_tick = 0 then
+    begin
+        elapsed_ms := High(UInt64);
+    end
+    else
+    begin
+        elapsed_ms := GetTickCount64 - m_system_input_mode_prefix_tick;
+    end;
+    Result := m_windows_ctrl_space_hotkey and
+        nc_tsf_system_shortcut_prefix_is_active(
+            m_system_input_mode_prefix_pending, elapsed_ms);
+    clear_system_input_mode_shortcut_prefix;
+end;
+
+procedure TncTextService.clear_rejected_modifier_transition;
+begin
+    m_rejected_modifier_transition_pending := False;
+    m_rejected_modifier_transition_tick := 0;
+end;
+
+function TncTextService.rejected_modifier_transition_active: Boolean;
+var
+    elapsed_ms: UInt64;
+begin
+    if (not m_rejected_modifier_transition_pending) or
+        (m_rejected_modifier_transition_tick = 0) then
+    begin
+        Result := False;
+        Exit;
+    end;
+
+    elapsed_ms := GetTickCount64 - m_rejected_modifier_transition_tick;
+    Result := nc_tsf_rejected_modifier_transition_is_active(True, elapsed_ms);
+    if not Result then
+    begin
+        clear_rejected_modifier_transition;
+    end;
+end;
+
+function TncTextService.current_process_is_terminal_compatibility_host: Boolean;
+var
+    process_path_buffer: array[0..MAX_PATH - 1] of Char;
+    process_path: string;
+    path_length: DWORD;
+begin
+    process_path := '';
+    path_length := GetModuleFileName(0, process_path_buffer,
+        Length(process_path_buffer));
+    if path_length > 0 then
+    begin
+        SetString(process_path, process_path_buffer, path_length);
+    end;
+    Result := nc_tsf_is_terminal_compatibility_identity(process_path, '');
+end;
+
+function TncTextService.current_target_is_terminal_compatibility_host: Boolean;
+var
+    class_name_buffer: array[0..255] of Char;
+    class_name: string;
+    class_length: Integer;
+    window_handle: Winapi.Windows.HWND;
+    view: ITfContextView;
+
+    function window_is_terminal_compatibility_host(
+        const candidate_window: Winapi.Windows.HWND): Boolean;
+    begin
+        Result := False;
+        if candidate_window = 0 then
+        begin
+            Exit;
+        end;
+        class_length := GetClassName(candidate_window, class_name_buffer,
+            Length(class_name_buffer));
+        if class_length <= 0 then
+        begin
+            Exit;
+        end;
+        SetString(class_name, class_name_buffer, class_length);
+        Result := nc_tsf_is_terminal_compatibility_identity('', class_name);
+    end;
+begin
+    Result := current_process_is_terminal_compatibility_host;
+    if Result then
+    begin
+        Exit;
+    end;
+
+    if window_is_terminal_compatibility_host(GetForegroundWindow) then
+    begin
+        Result := True;
+        Exit;
+    end;
+
+    window_handle := 0;
+    view := nil;
+    if (m_context <> nil) and (m_context.GetActiveView(view) = S_OK) and
+        (view <> nil) and (view.GetWnd(window_handle) = S_OK) then
+    begin
+        Result := window_is_terminal_compatibility_host(window_handle);
+    end;
+end;
+
+procedure TncTextService.remove_terminal_ctrl_space_hook;
+begin
+    if g_terminal_ctrl_space_service = Self then
+    begin
+        g_terminal_ctrl_space_service := nil;
+    end;
+    if m_terminal_ctrl_space_hook <> 0 then
+    begin
+        UnhookWindowsHookEx(m_terminal_ctrl_space_hook);
+        m_terminal_ctrl_space_hook := 0;
+    end;
+    if m_terminal_ctrl_space_window <> 0 then
+    begin
+        DeallocateHWnd(m_terminal_ctrl_space_window);
+        m_terminal_ctrl_space_window := 0;
+    end;
+    m_terminal_ctrl_space_key_down := False;
+end;
+
+procedure TncTextService.refresh_terminal_ctrl_space_hook;
+var
+    hook_error: DWORD;
+begin
+    if ((not nc_tsf_shortcut_is_ctrl_space(
+        m_shortcut_config.input_mode_toggle)) and
+        (not m_windows_ctrl_space_hotkey)) or
+        (not current_process_is_terminal_compatibility_host) then
+    begin
+        remove_terminal_ctrl_space_hook;
+        Exit;
+    end;
+
+    if (m_terminal_ctrl_space_hook <> 0) and
+        (m_terminal_ctrl_space_window <> 0) and
+        (g_terminal_ctrl_space_service = Self) then
+    begin
+        Exit;
+    end;
+
+    remove_terminal_ctrl_space_hook;
+    try
+        m_terminal_ctrl_space_window := AllocateHWnd(
+            terminal_ctrl_space_window_proc);
+        if m_terminal_ctrl_space_window = 0 then
+        begin
+            Exit;
+        end;
+
+        g_terminal_ctrl_space_service := Self;
+        SetLastError(ERROR_SUCCESS);
+        m_terminal_ctrl_space_hook := SetWindowsHookEx(WH_KEYBOARD_LL,
+            @nc_terminal_ctrl_space_keyboard_hook, HInstance, 0);
+        if m_terminal_ctrl_space_hook = 0 then
+        begin
+            hook_error := GetLastError;
+            g_terminal_ctrl_space_service := nil;
+            DeallocateHWnd(m_terminal_ctrl_space_window);
+            m_terminal_ctrl_space_window := 0;
+            if m_logger <> nil then
+            begin
+                m_logger.warn(Format(
+                    'Terminal Ctrl+Space compatibility hook unavailable error=%d',
+                    [hook_error]));
+            end;
+            Exit;
+        end;
+
+        if (m_logger <> nil) and (m_logger.level <= ll_debug) then
+        begin
+            m_logger.debug('Terminal Ctrl+Space compatibility hook installed');
+        end;
+    except
+        remove_terminal_ctrl_space_hook;
+        log_tsf_boundary_exception('RefreshTerminalCtrlSpaceHook');
+    end;
+end;
+
+function TncTextService.handle_terminal_ctrl_space_hook_event(
+    const message_id: WPARAM; const key_code: Word;
+    const injected: Boolean): Boolean;
+var
+    foreground_process_id: DWORD;
+    foreground_window: HWND;
+    key_state: TncKeyState;
+    key_is_down: Boolean;
+    key_is_up: Boolean;
+begin
+    Result := False;
+    if injected or (m_terminal_ctrl_space_hook = 0) or
+        (m_terminal_ctrl_space_window = 0) or
+        (nc_normalize_shortcut_key_code(key_code) <> VK_SPACE) then
+    begin
+        Exit;
+    end;
+
+    key_is_down := (message_id = WM_KEYDOWN) or
+        (message_id = WM_SYSKEYDOWN);
+    key_is_up := (message_id = WM_KEYUP) or
+        (message_id = WM_SYSKEYUP);
+    if not (key_is_down or key_is_up) then
+    begin
+        Exit;
+    end;
+
+    foreground_window := GetForegroundWindow;
+    foreground_process_id := 0;
+    if foreground_window <> 0 then
+    begin
+        GetWindowThreadProcessId(foreground_window, @foreground_process_id);
+    end;
+
+    // A consumed down must have its matching up consumed even if Ctrl was
+    // released first. If focus moved away meanwhile, clear the edge state but
+    // do not swallow a key-up belonging to another process.
+    if key_is_up and m_terminal_ctrl_space_key_down then
+    begin
+        m_terminal_ctrl_space_key_down := False;
+        Exit(foreground_process_id = GetCurrentProcessId);
+    end;
+    if not key_is_down then
+    begin
+        Exit;
+    end;
+
+    if foreground_process_id <> GetCurrentProcessId then
+    begin
+        Exit;
+    end;
+
+    key_state := build_key_state;
+    if not nc_tsf_terminal_ctrl_space_hook_should_capture(
+        m_shortcut_config.input_mode_toggle, m_windows_ctrl_space_hotkey,
+        True, key_code, key_state) then
+    begin
+        Exit;
+    end;
+
+    // Suppress keyboard auto-repeat while Space remains physically down, but
+    // allow each new Space edge while Ctrl remains held.
+    Result := True;
+    if m_terminal_ctrl_space_key_down then
+    begin
+        Exit;
+    end;
+    m_terminal_ctrl_space_key_down := True;
+
+    // Always defer the decision to the hidden-window callback. Settings may
+    // have changed since this hook was installed, and doing file or IPC work
+    // synchronously inside WH_KEYBOARD_LL would stall the keyboard globally.
+    if not PostMessage(m_terminal_ctrl_space_window,
+        c_nc_terminal_ctrl_space_message, 0, 0) then
+    begin
+        m_terminal_ctrl_space_key_down := False;
+        Result := False;
+    end;
+end;
+
+procedure TncTextService.terminal_ctrl_space_window_proc(var message: TMessage);
+begin
+    if message.Msg <> c_nc_terminal_ctrl_space_message then
+    begin
+        message.Result := DefWindowProc(m_terminal_ctrl_space_window,
+            message.Msg, message.WParam, message.LParam);
+        Exit;
+    end;
+
+    message.Result := 0;
+    try
+        // The low-level hook bypasses the normal TSF key callbacks, so it must
+        // explicitly refresh before deciding whether this chord is still the
+        // configured shortcut.
+        reload_config_if_needed(True);
+        if (m_terminal_ctrl_space_hook = 0) or
+            (not nc_tsf_shortcut_is_ctrl_space(
+                m_shortcut_config.input_mode_toggle)) then
+        begin
+            if (m_logger <> nil) and (m_logger.level <= ll_debug) then
+            begin
+                m_logger.debug(
+                    'Unconfigured terminal Ctrl+Space shortcut suppressed');
+            end;
+            Exit;
+        end;
+
+        clear_system_input_mode_shortcut_prefix;
+        m_chord_shortcut_pending := False;
+        m_chord_shortcut_key_code := 0;
+        m_chord_shortcut_tick := 0;
+        m_chord_shortcut_source := tses_key_sink;
+        toggle_input_mode_by_shortcut;
+        if (m_logger <> nil) and (m_logger.level <= ll_debug) then
+        begin
+            m_logger.debug('Terminal Ctrl+Space compatibility hook handled fresh Space edge');
+        end;
+    except
+        log_tsf_boundary_exception('TerminalCtrlSpaceWindowProc');
+    end;
+end;
+
+function TncTextService.external_input_mode_transition_active: Boolean;
+var
+    elapsed_ms: UInt64;
+begin
+    if (not m_external_input_mode_transition_pending) or
+        (m_external_input_mode_transition_tick = 0) then
+    begin
+        Result := False;
+        Exit;
+    end;
+
+    elapsed_ms := GetTickCount64 - m_external_input_mode_transition_tick;
+    Result := nc_tsf_external_transition_is_active(True, elapsed_ms);
+    if not Result then
+    begin
+        m_external_input_mode_transition_pending := False;
+        m_external_input_mode_transition_tick := 0;
+    end;
+end;
+
+procedure TncTextService.handle_external_input_mode_shortcut;
+var
+    input_mode: TncInputMode;
+    full_width_mode: Boolean;
+    punctuation_full_width: Boolean;
+    next_input_mode: TncInputMode;
+    got_state_from_host: Boolean;
+    state_source: string;
+begin
+    input_mode := m_last_input_mode;
+    full_width_mode := m_last_full_width_mode;
+    punctuation_full_width := m_last_punctuation_full_width;
+    got_state_from_host := False;
+    if (m_ipc_client <> nil) and (m_session_id <> '') then
+    begin
+        got_state_from_host := m_ipc_client.get_state(m_session_id, input_mode,
+            full_width_mode, punctuation_full_width);
+    end;
+
+    if input_mode = im_chinese then
+    begin
+        next_input_mode := im_english;
+    end
+    else
+    begin
+        next_input_mode := im_chinese;
+    end;
+
+    if next_input_mode = im_english then
+    begin
+        commit_pending_raw_text_before_mode_switch;
+    end;
+
+    // Ctrl+Space is a Windows IME/non-IME hotkey on many systems. The trace
+    // sink sees it before Windows consumes Space. Update the engine now, but
+    // let Windows perform its own compartment transition; writing the
+    // compartments here would make the system toggle the state a second time.
+    m_external_input_mode_transition_pending := True;
+    m_external_input_mode_target := next_input_mode;
+    m_external_input_mode_transition_tick := GetTickCount64;
+    if (m_ipc_client <> nil) and (m_session_id <> '') and
+        m_ipc_client.set_state(m_session_id, next_input_mode, full_width_mode,
+            punctuation_full_width, 'key_trace') then
+    begin
+        mark_session_dirty;
+    end;
+
+    m_last_input_mode := next_input_mode;
+    m_last_full_width_mode := full_width_mode;
+    m_last_punctuation_full_width := punctuation_full_width;
+    // The next ordinary key will normalize the compartments after Windows has
+    // completed the system-hotkey dispatch.
+    m_compartment_state_inited := False;
+    save_engine_state_to_config(next_input_mode, full_width_mode,
+        punctuation_full_width);
+
+    if next_input_mode = im_english then
+    begin
+        cancel_composition;
+    end;
+
+    if (m_logger <> nil) and (m_logger.level <= ll_debug) then
+    begin
+        if got_state_from_host then
+        begin
+            state_source := 'host';
+        end
+        else
+        begin
+            state_source := 'local';
+        end;
+        m_logger.debug(Format(
+            'KeyTrace input-mode shortcut=%s target=%d source=%s',
+            [nc_shortcut_to_text(m_shortcut_config.input_mode_toggle),
+            Ord(next_input_mode), state_source]));
+    end;
+end;
+
 procedure TncTextService.toggle_input_mode_by_shortcut;
 var
     input_mode: TncInputMode;
@@ -2323,7 +3060,8 @@ begin
 
     if (m_ipc_client <> nil) and (m_session_id <> '') then
     begin
-        if m_ipc_client.set_state(m_session_id, next_input_mode, full_width_mode, punctuation_full_width) then
+        if m_ipc_client.set_state(m_session_id, next_input_mode,
+            full_width_mode, punctuation_full_width, 'shortcut') then
         begin
             mark_session_dirty;
         end;
@@ -2374,7 +3112,9 @@ begin
     full_width_mode := not full_width_mode;
     if (m_ipc_client <> nil) and (m_session_id <> '') then
     begin
-        if m_ipc_client.set_state(m_session_id, input_mode, full_width_mode, punctuation_full_width) then
+        if m_ipc_client.set_state(m_session_id, input_mode,
+            full_width_mode, punctuation_full_width,
+            'shortcut_full_width') then
         begin
             mark_session_dirty;
         end;
@@ -2419,7 +3159,9 @@ begin
     punctuation_full_width := not punctuation_full_width;
     if (m_ipc_client <> nil) and (m_session_id <> '') then
     begin
-        if m_ipc_client.set_state(m_session_id, input_mode, full_width_mode, punctuation_full_width) then
+        if m_ipc_client.set_state(m_session_id, input_mode,
+            full_width_mode, punctuation_full_width,
+            'shortcut_punctuation') then
         begin
             mark_session_dirty;
         end;
@@ -2488,7 +3230,6 @@ begin
         Exit;
     end;
 
-    m_last_config_write := get_config_write_time;
     if (not variant_applied) and (m_ipc_client <> nil) then
     begin
         m_ipc_client.reload_config(m_session_id);
@@ -2754,17 +3495,21 @@ begin
     eaten := 0;
     Result := S_OK;
     try
-        had_registration := m_preserved_input_mode_registered;
+        had_registration :=
+            m_preserved_input_mode_owner = tpko_text_service;
         invoked_key := m_preserved_input_mode_key;
-        reload_config_if_needed;
-        if had_registration and m_preserved_input_mode_registered and
+        reload_config_if_needed(True);
+        if had_registration and
+            (m_preserved_input_mode_owner = tpko_text_service) and
             (invoked_key.uVKey = m_preserved_input_mode_key.uVKey) and
             (invoked_key.uModifiers = m_preserved_input_mode_key.uModifiers) and
             IsEqualGUID(rguid, GUID_NcPreservedKeyInputModeToggle) then
         begin
             ensure_active_context(context);
+            clear_system_input_mode_shortcut_prefix;
             shortcut := m_shortcut_config.input_mode_toggle;
-            if begin_chord_shortcut(sa_input_mode_toggle, shortcut.key_code) then
+            if begin_chord_shortcut(sa_input_mode_toggle, shortcut.key_code,
+                tses_preserved_key) then
             begin
                 execute_shortcut_action(sa_input_mode_toggle);
             end;
@@ -2778,6 +3523,81 @@ begin
     except
         eaten := 0;
         log_tsf_boundary_exception('KeyEventSink.OnPreservedKey');
+    end;
+end;
+
+function TncTextService.OnKeyTraceDown(wParam: WPARAM;
+    lParam: LPARAM): HResult;
+var
+    key_code: Word;
+    key_state: TncKeyState;
+    key_down_is_repeat: Boolean;
+    shortcut_action: TncShortcutAction;
+begin
+    Result := S_OK;
+    try
+        reload_config_if_needed;
+        key_code := Word(wParam);
+        key_state := build_key_state;
+        key_down_is_repeat := nc_tsf_key_down_is_repeat(lParam);
+        update_system_input_mode_shortcut_prefix(key_code, key_state);
+        if (m_logger <> nil) and (m_logger.level <= ll_debug) and
+            (nc_normalize_shortcut_key_code(key_code) in [VK_CONTROL, VK_SPACE]) then
+        begin
+            m_logger.debug(Format(
+                'KeyTraceDown session=%s key=%d ctrl=%d repeat=%d lparam=0x%s',
+                [m_session_id, key_code, Ord(key_state.ctrl_down),
+                Ord(key_down_is_repeat), IntToHex(NativeUInt(lParam),
+                SizeOf(LPARAM) * 2)]));
+        end;
+        if (m_preserved_input_mode_owner <> tpko_external) or
+            (not nc_windows_ime_toggle_owns_shortcut(
+                m_shortcut_config.input_mode_toggle)) then
+        begin
+            Exit;
+        end;
+
+        if nc_find_shortcut_action(m_shortcut_config, key_code, key_state,
+            shortcut_action) and
+            (shortcut_action = sa_input_mode_toggle) and
+            begin_chord_shortcut(shortcut_action, key_code, tses_key_trace,
+                key_down_is_repeat) then
+        begin
+            clear_system_input_mode_shortcut_prefix;
+            handle_external_input_mode_shortcut;
+        end;
+    except
+        log_tsf_boundary_exception('KeyTraceEventSink.OnKeyTraceDown');
+    end;
+end;
+
+function TncTextService.OnKeyTraceUp(wParam: WPARAM;
+    lParam: LPARAM): HResult;
+var
+    normalized_key_code: Word;
+begin
+    Result := S_OK;
+    try
+        normalized_key_code := nc_normalize_shortcut_key_code(Word(wParam));
+        if (m_logger <> nil) and (m_logger.level <= ll_debug) and
+            (normalized_key_code in [VK_CONTROL, VK_SPACE]) then
+        begin
+            m_logger.debug(Format(
+                'KeyTraceUp session=%s key=%d lparam=0x%s',
+                [m_session_id, Word(wParam), IntToHex(NativeUInt(lParam),
+                SizeOf(LPARAM) * 2)]));
+        end;
+        if m_chord_shortcut_pending and
+            (m_chord_shortcut_source = tses_key_trace) and
+            (normalized_key_code = m_chord_shortcut_key_code) then
+        begin
+            m_chord_shortcut_pending := False;
+            m_chord_shortcut_key_code := 0;
+            m_chord_shortcut_tick := 0;
+            m_chord_shortcut_source := tses_key_sink;
+        end;
+    except
+        log_tsf_boundary_exception('KeyTraceEventSink.OnKeyTraceUp');
     end;
 end;
 
@@ -3082,9 +3902,26 @@ var
     conversion_value: DWORD;
     has_openclose: Boolean;
     has_conversion: Boolean;
+    change_source: TncTsfCompartmentChangeSource;
+    external_transition: Boolean;
+    external_transition_settled: Boolean;
+    rejected_transition: Boolean;
+    terminal_compatibility_target: Boolean;
+    host_state_available: Boolean;
+    host_state_matches_proposed: Boolean;
+    previous_input_mode: TncInputMode;
+    previous_full_width: Boolean;
+    previous_punctuation_full_width: Boolean;
     next_input_mode: TncInputMode;
+    proposed_input_mode: TncInputMode;
     next_full_width: Boolean;
     next_punctuation_full_width: Boolean;
+    state_changed: Boolean;
+    state_synced: Boolean;
+    host_input_mode: TncInputMode;
+    host_full_width: Boolean;
+    host_punctuation_full_width: Boolean;
+    system_shortcut_prefix_consumed: Boolean;
 begin
     if m_compartment_update_depth > 0 then
     begin
@@ -3098,6 +3935,8 @@ begin
         Exit;
     end;
 
+    openclose_value := 0;
+    conversion_value := 0;
     has_openclose := read_compartment_dword(m_openclose_compartment, openclose_value);
     has_conversion := read_compartment_dword(m_conversion_compartment, conversion_value);
     if (not has_openclose) and (not has_conversion) then
@@ -3106,54 +3945,180 @@ begin
         Exit;
     end;
 
-    next_input_mode := m_last_input_mode;
-    if has_openclose then
+    change_source := tccs_unknown;
+    if IsEqualGUID(rguid, GUID_COMPARTMENT_KEYBOARD_OPENCLOSE) then
     begin
-        if openclose_value <> 0 then
-        begin
-            next_input_mode := im_chinese;
-        end
-        else
-        begin
-            next_input_mode := im_english;
-        end;
+        change_source := tccs_openclose;
     end
-    else if has_conversion then
+    else if IsEqualGUID(rguid, GUID_COMPARTMENT_KEYBOARD_INPUTMODE_CONVERSION) then
     begin
-        if (conversion_value and TF_CONVERSIONMODE_NATIVE) <> 0 then
+        change_source := tccs_conversion;
+    end;
+    system_shortcut_prefix_consumed :=
+        (change_source in [tccs_openclose, tccs_conversion]) and
+        consume_system_input_mode_shortcut_prefix;
+    if system_shortcut_prefix_consumed then
+    begin
+        if nc_tsf_should_reject_unconfigured_ctrl_space_toggle(
+            m_shortcut_config.input_mode_toggle,
+            m_windows_ctrl_space_hotkey,
+            system_shortcut_prefix_consumed) then
         begin
-            next_input_mode := im_chinese;
+            m_rejected_modifier_transition_pending := True;
+            m_rejected_modifier_transition_tick := GetTickCount64;
+            if (m_logger <> nil) and (m_logger.level <= ll_debug) then
+            begin
+                m_logger.debug(
+                    'Unconfigured system Ctrl+Space transition armed for rejection');
+            end;
         end
         else
         begin
-            next_input_mode := im_english;
+            // Chromium and some console hosts consume Space as the legacy
+            // Windows IME hotkey before TSF dispatches OnPreservedKey. Toggle
+            // once from the engine state instead of trusting that stale value.
+            handle_external_input_mode_shortcut;
+            if (m_logger <> nil) and (m_logger.level <= ll_debug) then
+            begin
+                m_logger.debug(
+                    'System input-mode shortcut inferred from compartment change');
+            end;
         end;
     end;
-
-    next_full_width := m_last_full_width_mode;
-    next_punctuation_full_width := m_last_punctuation_full_width;
-    if has_conversion then
+    previous_input_mode := m_last_input_mode;
+    previous_full_width := m_last_full_width_mode;
+    previous_punctuation_full_width := m_last_punctuation_full_width;
+    external_transition := external_input_mode_transition_active;
+    proposed_input_mode := nc_tsf_resolve_input_mode(previous_input_mode,
+        change_source, has_openclose, openclose_value, has_conversion,
+        conversion_value);
+    external_transition_settled :=
+        nc_tsf_external_transition_should_settle(external_transition,
+            m_external_input_mode_target, proposed_input_mode);
+    terminal_compatibility_target := False;
+    host_state_available := False;
+    host_state_matches_proposed := False;
+    if (not external_transition) and
+        (proposed_input_mode <> previous_input_mode) then
     begin
-        next_full_width := (conversion_value and TF_CONVERSIONMODE_FULLSHAPE) <> 0;
-        if next_input_mode <> im_english then
+        terminal_compatibility_target :=
+            current_target_is_terminal_compatibility_host;
+        if terminal_compatibility_target then
         begin
-            next_punctuation_full_width := (conversion_value and TF_CONVERSIONMODE_SYMBOL) <> 0;
+            host_input_mode := previous_input_mode;
+            host_full_width := previous_full_width;
+            host_punctuation_full_width := previous_punctuation_full_width;
+            host_state_available := m_ipc_client.get_state(m_session_id,
+                host_input_mode, host_full_width,
+                host_punctuation_full_width);
+            host_state_matches_proposed := host_state_available and
+                (host_input_mode = proposed_input_mode);
+        end;
+    end;
+    rejected_transition := (not external_transition) and
+        rejected_modifier_transition_active;
+    if (not rejected_transition) and
+        nc_tsf_should_reject_unconfigured_terminal_mode_change(
+            m_shortcut_config.input_mode_toggle,
+            terminal_compatibility_target, external_transition,
+            proposed_input_mode <> previous_input_mode,
+            host_state_matches_proposed) then
+    begin
+        rejected_transition := True;
+    end;
+    if rejected_transition then
+    begin
+        // Windows can still apply a legacy Shift or Ctrl+Space IME hotkey
+        // even when Cassotis is bound to another shortcut. Keep the configured
+        // state and restore both compartments without forwarding that
+        // transition to the host.
+        next_input_mode := previous_input_mode;
+        next_full_width := previous_full_width;
+        next_punctuation_full_width := previous_punctuation_full_width;
+    end
+    else if external_transition then
+    begin
+        // The trace sink already selected the target state. Split system
+        // notifications must not undo it or overwrite the saved Chinese
+        // punctuation preference with the temporary English conversion bits.
+        next_input_mode := m_external_input_mode_target;
+        next_full_width := previous_full_width;
+        next_punctuation_full_width := previous_punctuation_full_width;
+    end
+    else
+    begin
+        next_input_mode := proposed_input_mode;
+        next_full_width := previous_full_width;
+        next_punctuation_full_width := nc_tsf_resolve_punctuation_full_width(
+            previous_input_mode, next_input_mode,
+            previous_punctuation_full_width, has_conversion,
+            conversion_value);
+        if has_conversion then
+        begin
+            next_full_width :=
+                (conversion_value and TF_CONVERSIONMODE_FULLSHAPE) <> 0;
         end;
     end;
 
-    if m_ipc_client.set_state(m_session_id, next_input_mode, next_full_width, next_punctuation_full_width) then
+    state_changed := (next_input_mode <> previous_input_mode) or
+        (next_full_width <> previous_full_width) or
+        (next_punctuation_full_width <> previous_punctuation_full_width);
+    state_synced := not state_changed;
+    if rejected_transition then
     begin
-        mark_session_dirty;
+        m_compartment_state_inited := False;
+        apply_engine_state_to_compartments(previous_input_mode,
+            previous_full_width, previous_punctuation_full_width);
+    end
+    else if state_changed then
+    begin
+        state_synced := m_ipc_client.set_state(m_session_id, next_input_mode,
+            next_full_width, next_punctuation_full_width, 'compartment');
+        if state_synced then
+        begin
+            mark_session_dirty;
+        end;
+    end;
+
+    if state_synced then
+    begin
         m_last_input_mode := next_input_mode;
         m_last_full_width_mode := next_full_width;
         m_last_punctuation_full_width := next_punctuation_full_width;
-        m_compartment_state_inited := True;
-        save_engine_state_to_config(next_input_mode, next_full_width, next_punctuation_full_width);
-
+        // Never write compartments back from their own notification callback.
+        // A trace-assisted system shortcut is normalized by the next ordinary
+        // key after Windows has finished dispatching the chord.
+        m_compartment_state_inited := not external_transition;
+        if state_changed then
+        begin
+            save_engine_state_to_config(next_input_mode, next_full_width,
+                next_punctuation_full_width);
+        end;
         if next_input_mode = im_english then
         begin
             cancel_composition;
         end;
+        if external_transition_settled then
+        begin
+            m_external_input_mode_transition_pending := False;
+            m_external_input_mode_transition_tick := 0;
+        end;
+    end;
+
+    if (m_logger <> nil) and (m_logger.level <= ll_debug) then
+    begin
+        m_logger.debug(Format(
+            'Compartment change source=%d open=%d/%d conversion=%d/0x%s pending=%d settled=%d rejected=%d terminal=%d host=%d/%d target=%d state=%d/%d/%d changed=%d synced=%d',
+            [Ord(change_source), Ord(has_openclose), openclose_value,
+            Ord(has_conversion), IntToHex(conversion_value, 8),
+            Ord(external_transition), Ord(external_transition_settled),
+            Ord(rejected_transition),
+            Ord(terminal_compatibility_target), Ord(host_state_available),
+            Ord(host_state_matches_proposed),
+            Ord(m_external_input_mode_target),
+            Ord(next_input_mode), Ord(next_full_width),
+            Ord(next_punctuation_full_width), Ord(state_changed),
+            Ord(state_synced)]));
     end;
 
     Result := S_OK;
@@ -3250,6 +4215,10 @@ end;
 procedure TncTextService.load_engine_config(out config: TncEngineConfig);
 var
     config_manager: TncConfigManager;
+    host_shortcut_config: TncShortcutConfig;
+    host_input_mode: TncInputMode;
+    host_full_width_mode: Boolean;
+    host_punctuation_full_width: Boolean;
 begin
     config := nc_default_engine_config;
     config_manager := nil;
@@ -3272,9 +4241,28 @@ begin
         m_log_config.log_path := '';
     end;
 
+    // TMemIniFile can silently return defaults when a packaged client can see
+    // the shared path metadata but cannot open its contents. The host process
+    // therefore remains authoritative even when FileExists returned true.
+    if (m_ipc_client <> nil) and (m_session_id <> '') then
+    begin
+        if m_ipc_client.get_shortcut_config(m_session_id,
+            host_shortcut_config) then
+        begin
+            config.shortcuts := host_shortcut_config;
+        end;
+        if m_ipc_client.get_state(m_session_id, host_input_mode,
+            host_full_width_mode, host_punctuation_full_width) then
+        begin
+            config.input_mode := host_input_mode;
+            config.full_width_mode := host_full_width_mode;
+            config.punctuation_full_width := host_punctuation_full_width;
+        end;
+    end;
+
     m_shortcut_config := config.shortcuts;
     nc_normalize_shortcut_config(m_shortcut_config);
-    m_last_config_write := get_config_write_time;
+    m_loaded_config_write_time := get_config_write_time;
     m_last_config_check_tick := GetTickCount64;
     try
         apply_log_config;
@@ -3283,6 +4271,7 @@ begin
         free_logger;
     end;
     refresh_preserved_input_mode_shortcut;
+    refresh_terminal_ctrl_space_hook;
 end;
 
 procedure TncTextService.apply_log_config;
@@ -3313,7 +4302,7 @@ begin
     m_logger.set_level(m_log_config.level);
 end;
 
-procedure TncTextService.reload_config_if_needed;
+procedure TncTextService.reload_config_if_needed(const force_check: Boolean);
 const
     c_config_reload_check_interval_ms = 1000;
 var
@@ -3326,6 +4315,15 @@ begin
         Exit;
     end;
 
+    // A forced refresh is used when a key matches the cached shortcut or when
+    // Terminal's low-level compatibility hook fires. Read the host-owned
+    // shortcut state even when the file timestamp has not advanced yet.
+    if force_check then
+    begin
+        load_engine_config(engine_config);
+        Exit;
+    end;
+
     now_tick := GetTickCount64;
     if (m_last_config_check_tick <> 0) and
         ((now_tick - m_last_config_check_tick) < c_config_reload_check_interval_ms) then
@@ -3335,7 +4333,11 @@ begin
     m_last_config_check_tick := now_tick;
 
     current_write_time := get_config_write_time;
-    if current_write_time <= m_last_config_write then
+    if current_write_time = 0 then
+    begin
+        Exit;
+    end;
+    if current_write_time = m_loaded_config_write_time then
     begin
         Exit;
     end;
@@ -3370,7 +4372,10 @@ begin
                 engine_config.punctuation_full_width := punctuation_full_width;
                 config_manager.save_engine_state_config(input_mode, full_width_mode,
                     punctuation_full_width);
-                m_last_config_write := get_config_write_time;
+                // Do not advance m_loaded_config_write_time here. This write only
+                // persists runtime state; treating it as a complete config
+                // reload can permanently hide shortcut changes made by the
+                // settings process immediately beforehand.
             end;
         finally
             config_manager.Free;

@@ -170,6 +170,8 @@ type
         function get_last_lookup_perf_info: string;
         function get_state(const session_id: string; out input_mode: TncInputMode; out full_width_mode: Boolean;
             out punctuation_full_width: Boolean): Boolean;
+        function get_shortcut_config(const session_id: string;
+            out shortcut_config: TncShortcutConfig): Boolean;
         function get_dictionary_variant(const session_id: string; out dictionary_variant: TncDictionaryVariant): Boolean;
         function set_state(const session_id: string; const input_mode: TncInputMode; const full_width_mode: Boolean;
             const punctuation_full_width: Boolean): Boolean;
@@ -2473,6 +2475,18 @@ begin
         end
         else
         begin
+            // A rejected modifier chord still has to return the current mode
+            // state. Leaving the out parameters at their defaults makes the
+            // TSF side write "Chinese / half-width / English punctuation"
+            // back to the compartments merely because Ctrl was pressed.
+            m_lock.Acquire;
+            try
+                input_mode := m_config.input_mode;
+                full_width_mode := m_config.full_width_mode;
+                punctuation_full_width := m_config.punctuation_full_width;
+            finally
+                m_lock.Release;
+            end;
             Result := True;
             Exit;
         end;
@@ -2812,6 +2826,26 @@ begin
     finally
         m_lock.Release;
     end;
+    Result := True;
+end;
+
+function TncEngineHost.get_shortcut_config(const session_id: string;
+    out shortcut_config: TncShortcutConfig): Boolean;
+begin
+    shortcut_config := nc_default_shortcut_config;
+    if session_id = '' then
+    begin
+        Exit(False);
+    end;
+
+    reload_config_if_needed;
+    m_lock.Acquire;
+    try
+        shortcut_config := m_config.shortcuts;
+    finally
+        m_lock.Release;
+    end;
+    nc_normalize_shortcut_config(shortcut_config);
     Result := True;
 end;
 
@@ -3664,6 +3698,8 @@ var
     caret_source: TncCaretAnchorSource;
     caret_score: Integer;
     active_flag: Boolean;
+    shortcut_config: TncShortcutConfig;
+    state_source: string;
 begin
     Result := 'ERROR'#9'bad_request';
     try
@@ -3830,6 +3866,31 @@ begin
             Exit;
         end;
 
+        if SameText(cmd, 'GET_SHORTCUTS') then
+        begin
+            if m_host.get_shortcut_config(session_id, shortcut_config) then
+            begin
+                Result := 'OK'#9 +
+                    nc_shortcut_to_text(shortcut_config.input_mode_toggle) + #9 +
+                    nc_shortcut_to_text(shortcut_config.punctuation_toggle) + #9 +
+                    nc_shortcut_to_text(shortcut_config.dictionary_variant_toggle) + #9 +
+                    nc_shortcut_to_text(shortcut_config.full_width_toggle) + #9 +
+                    nc_shortcut_to_text(shortcut_config.open_settings);
+                if host_log_enabled_for(ll_debug) then
+                begin
+                    host_log_debug(Format(
+                        'shortcut_config session=%s input_mode=%s',
+                        [session_id,
+                        nc_shortcut_to_text(shortcut_config.input_mode_toggle)]));
+                end;
+            end
+            else
+            begin
+                Result := 'ERROR'#9'failed';
+            end;
+            Exit;
+        end;
+
         if SameText(cmd, 'GET_VARIANT') then
         begin
             if m_host.get_dictionary_variant(session_id, dictionary_variant) then
@@ -3914,6 +3975,18 @@ begin
             input_mode := TncInputMode(mode_value);
             full_width_mode := flag_to_bool(fields[3]);
             punctuation_full_width := flag_to_bool(fields[4]);
+            state_source := '';
+            if Length(fields) >= 6 then
+            begin
+                state_source := decode_ipc_text(fields[5]);
+            end;
+            if host_log_enabled_for(ll_debug) then
+            begin
+                host_log_debug(Format(
+                    'set_state session=%s mode=%d full=%d punctuation=%d source=%s',
+                    [session_id, Ord(input_mode), Ord(full_width_mode),
+                    Ord(punctuation_full_width), state_source]));
+            end;
             if m_host.set_state(session_id, input_mode, full_width_mode, punctuation_full_width) then
             begin
                 Result := 'OK';
@@ -4001,6 +4074,13 @@ begin
             if m_host.process_key(session_id, Word(key_code), key_state, handled, commit_text, display_text, input_mode,
                 full_width_mode, punctuation_full_width) then
             begin
+                if host_log_enabled_for(ll_debug) then
+                begin
+                    host_log_debug(Format(
+                        'process_key result session=%s handled=%d mode=%d full=%d punctuation=%d',
+                        [session_id, Ord(handled), Ord(input_mode),
+                        Ord(full_width_mode), Ord(punctuation_full_width)]));
+                end;
                 Result := 'OK'#9 + bool_to_flag(handled) + #9 + encode_ipc_text(commit_text) + #9 +
                     encode_ipc_text(display_text) + #9 + IntToStr(Ord(input_mode)) + #9 + bool_to_flag(full_width_mode) +
                     #9 + bool_to_flag(punctuation_full_width) + #9 + encode_ipc_text(m_host.get_last_lookup_perf_info);

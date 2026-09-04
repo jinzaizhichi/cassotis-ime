@@ -30,6 +30,7 @@ uses
     nc_dpi_scale,
     nc_version_info,
     nc_shortcut,
+    nc_status_widget_policy,
     nc_settings_form,
     nc_types;
 
@@ -817,6 +818,7 @@ var
     period_size: Single;
     dpi: Integer;
     show_full_width_punct: Boolean;
+    punctuation_enabled: Boolean;
 begin
     if not (Sender is TPaintBox) then
     begin
@@ -827,11 +829,21 @@ begin
     paint_box.Canvas.Brush.Color := m_status_panel.Color;
     paint_box.Canvas.FillRect(paint_box.ClientRect);
     paint_box.Canvas.Brush.Style := bsClear;
-    paint_box.Canvas.Font.Color := RGB(100, 72, 24);
     SetBkMode(paint_box.Canvas.Handle, TRANSPARENT);
-    mark_color := MakeColor(255, 100, 72, 24);
+    punctuation_enabled := nc_status_widget_control_enabled(
+        m_engine_config.input_mode, swc_punctuation);
+    if punctuation_enabled then
+    begin
+        paint_box.Canvas.Font.Color := RGB(100, 72, 24);
+        mark_color := MakeColor(255, 100, 72, 24);
+    end
+    else
+    begin
+        paint_box.Canvas.Font.Color := RGB(132, 139, 148);
+        mark_color := MakeColor(255, 132, 139, 148);
+    end;
     dpi := get_control_dpi(paint_box);
-    show_full_width_punct := (m_engine_config.input_mode <> im_english) and
+    show_full_width_punct := punctuation_enabled and
         m_engine_config.punctuation_full_width;
 
     if show_full_width_punct then
@@ -972,7 +984,11 @@ begin
 
     if (source = m_status_label_variant) and status_point_in_control(m_status_label_variant, cursor_point) then
     begin
-        on_dictionary_variant_click(m_status_label_variant);
+        if nc_status_widget_control_enabled(m_engine_config.input_mode,
+            swc_dictionary_variant) then
+        begin
+            on_dictionary_variant_click(m_status_label_variant);
+        end;
         Exit;
     end;
 
@@ -984,7 +1000,11 @@ begin
 
     if (source = m_status_label_punct) and status_point_in_control(m_status_label_punct, cursor_point) then
     begin
-        on_punct_click(m_status_label_punct);
+        if nc_status_widget_control_enabled(m_engine_config.input_mode,
+            swc_punctuation) then
+        begin
+            on_punct_click(m_status_label_punct);
+        end;
         Exit;
     end;
 end;
@@ -1770,6 +1790,7 @@ var
     scheme_text: string;
     scheme_hint: string;
     full_width_text: string;
+    chinese_controls_enabled: Boolean;
 begin
     if m_status_form = nil then
     begin
@@ -1850,12 +1871,25 @@ begin
     m_status_label_variant.Caption := variant_text;
     m_status_label_scheme.Caption := scheme_text;
     m_status_label_scheme.Hint := scheme_hint;
-    if m_engine_config.input_mode = im_chinese then
+    chinese_controls_enabled := nc_status_widget_control_enabled(
+        m_engine_config.input_mode, swc_dictionary_variant);
+    m_status_label_variant.Enabled := chinese_controls_enabled;
+    m_status_label_scheme.Enabled := nc_status_widget_control_enabled(
+        m_engine_config.input_mode, swc_pinyin_scheme);
+    m_status_label_punct.Enabled := nc_status_widget_control_enabled(
+        m_engine_config.input_mode, swc_punctuation);
+    if chinese_controls_enabled then
     begin
+        m_status_label_variant.Cursor := crHandPoint;
+        m_status_label_punct.Cursor := crHandPoint;
+        m_status_label_variant.Font.Color := RGB(70, 78, 92);
         m_status_label_scheme.Font.Color := RGB(48, 89, 94);
     end
     else
     begin
+        m_status_label_variant.Cursor := crDefault;
+        m_status_label_punct.Cursor := crDefault;
+        m_status_label_variant.Font.Color := RGB(132, 139, 148);
         m_status_label_scheme.Font.Color := RGB(132, 139, 148);
     end;
     m_status_label_full_width.Caption := full_width_text;
@@ -2593,6 +2627,20 @@ end;
 
 procedure TncTrayHost.status_label_mouse_enter(Sender: TObject);
 begin
+    if ((Sender = m_status_label_variant) and
+        (not nc_status_widget_control_enabled(m_engine_config.input_mode,
+            swc_dictionary_variant))) or
+        ((Sender = m_status_label_scheme) and
+        (not nc_status_widget_control_enabled(m_engine_config.input_mode,
+            swc_pinyin_scheme))) or
+        ((Sender = m_status_label_punct) and
+        (not nc_status_widget_control_enabled(m_engine_config.input_mode,
+            swc_punctuation))) then
+    begin
+        hide_status_hint;
+        Exit;
+    end;
+
     if Sender is TControl then
     begin
         show_status_hint(TControl(Sender));

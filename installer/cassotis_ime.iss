@@ -57,17 +57,17 @@ Source: "{#RuntimeDir}\cassotis_ime_svr32.dll"; DestDir: "{#InstallRuntimeDir}";
 Source: "{#RuntimeDir}\cassotis_ime_profile_reg.exe"; DestDir: "{#InstallRuntimeDir}"; Flags: ignoreversion onlyifdoesntexist
 Source: "{#RuntimeDir}\cassotis_ime_profile_reg.exe"; Flags: dontcopy
 Source: "{#RuntimeDir}\sqlite3_64.dll"; DestDir: "{#InstallRuntimeDir}"; Flags: ignoreversion onlyifdoesntexist
-Source: "{#RuntimeDir}\cassotis_pinyin_transformer_ort.dll"; DestDir: "{#InstallRuntimeDir}"; Flags: ignoreversion
+Source: "{#RuntimeDir}\cassotis_pinyin_transformer_ort.dll"; DestDir: "{#InstallRuntimeDir}"; Flags: ignoreversion onlyifdoesntexist
 Source: "{#RuntimeDir}\onnxruntime.dll"; DestDir: "{#InstallRuntimeDir}"; Flags: ignoreversion onlyifdoesntexist
 Source: "{#RuntimeDir}\onnxruntime_providers_shared.dll"; DestDir: "{#InstallRuntimeDir}"; Flags: ignoreversion onlyifdoesntexist
-Source: "{#RuntimeDir}\pinyin_transformer\pinyin_conditional_scorer_int8.onnx"; DestDir: "{#InstallRuntimeDir}\pinyin_transformer"; Flags: ignoreversion
-Source: "{#RuntimeDir}\pinyin_transformer\pinyin_parallel_generator_int8.onnx"; DestDir: "{#InstallRuntimeDir}\pinyin_transformer"; Flags: ignoreversion
-Source: "{#RuntimeDir}\pinyin_transformer\pinyin_parallel_allowed.bin"; DestDir: "{#InstallRuntimeDir}\pinyin_transformer"; Flags: ignoreversion
-Source: "{#RuntimeDir}\pinyin_transformer\vocab.json"; DestDir: "{#InstallRuntimeDir}\pinyin_transformer"; Flags: ignoreversion
-Source: "{#RuntimeDir}\local_completion\local_completion_path_ranker_int8.onnx"; DestDir: "{#InstallRuntimeDir}\local_completion"; Flags: ignoreversion
-Source: "{#RuntimeDir}\local_completion\local_completion_generator_int8.onnx"; DestDir: "{#InstallRuntimeDir}\local_completion"; Flags: ignoreversion
-Source: "{#RuntimeDir}\local_completion\local_completion_index.bin"; DestDir: "{#InstallRuntimeDir}\local_completion"; Flags: ignoreversion
-Source: "{#RuntimeDir}\local_completion\model_manifest.json"; DestDir: "{#InstallRuntimeDir}\local_completion"; Flags: ignoreversion
+Source: "{#RuntimeDir}\pinyin_transformer\pinyin_conditional_scorer_int8.onnx"; DestDir: "{#InstallRuntimeDir}\pinyin_transformer"; Flags: ignoreversion onlyifdoesntexist
+Source: "{#RuntimeDir}\pinyin_transformer\pinyin_parallel_generator_int8.onnx"; DestDir: "{#InstallRuntimeDir}\pinyin_transformer"; Flags: ignoreversion onlyifdoesntexist
+Source: "{#RuntimeDir}\pinyin_transformer\pinyin_parallel_allowed.bin"; DestDir: "{#InstallRuntimeDir}\pinyin_transformer"; Flags: ignoreversion onlyifdoesntexist
+Source: "{#RuntimeDir}\pinyin_transformer\vocab.json"; DestDir: "{#InstallRuntimeDir}\pinyin_transformer"; Flags: ignoreversion onlyifdoesntexist
+Source: "{#RuntimeDir}\local_completion\local_completion_path_ranker_int8.onnx"; DestDir: "{#InstallRuntimeDir}\local_completion"; Flags: ignoreversion onlyifdoesntexist
+Source: "{#RuntimeDir}\local_completion\local_completion_generator_int8.onnx"; DestDir: "{#InstallRuntimeDir}\local_completion"; Flags: ignoreversion onlyifdoesntexist
+Source: "{#RuntimeDir}\local_completion\local_completion_index.bin"; DestDir: "{#InstallRuntimeDir}\local_completion"; Flags: ignoreversion onlyifdoesntexist
+Source: "{#RuntimeDir}\local_completion\model_manifest.json"; DestDir: "{#InstallRuntimeDir}\local_completion"; Flags: ignoreversion onlyifdoesntexist
 Source: "{#SourceRoot}\third_party\onnxruntime\LICENSE"; DestDir: "{app}\licenses\onnxruntime"; Flags: ignoreversion
 Source: "{#SourceRoot}\third_party\onnxruntime\ThirdPartyNotices.txt"; DestDir: "{app}\licenses\onnxruntime"; Flags: ignoreversion
 

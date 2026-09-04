@@ -728,12 +728,19 @@ begin
 end;
 
 function get_known_local_app_data_directory: string;
+const
+    // Packaged clients such as Windows Terminal can redirect LocalAppData to
+    // their package store. The IME config belongs to the user-wide desktop
+    // installation and must be resolved outside that package boundary.
+    c_kf_flag_no_package_redirection = $00010000;
 var
     path_ptr: PWideChar;
 begin
     Result := '';
     path_ptr := nil;
-    if Succeeded(SHGetKnownFolderPath(FOLDERID_LocalAppData, 0, 0, path_ptr)) and (path_ptr <> nil) then
+    if Succeeded(SHGetKnownFolderPath(FOLDERID_LocalAppData,
+        c_kf_flag_no_package_redirection, 0, path_ptr)) and
+        (path_ptr <> nil) then
     begin
         try
             Result := Trim(string(path_ptr));

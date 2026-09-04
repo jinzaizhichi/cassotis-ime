@@ -32,10 +32,13 @@ type
             out full_width_mode: Boolean; out punctuation_full_width: Boolean; out lookup_perf_info: string): Boolean;
         function get_state(const session_id: string; out input_mode: TncInputMode; out full_width_mode: Boolean;
             out punctuation_full_width: Boolean): Boolean;
+        function get_shortcut_config(const session_id: string;
+            out shortcut_config: TncShortcutConfig): Boolean;
         function get_dictionary_variant(const session_id: string; out dictionary_variant: TncDictionaryVariant): Boolean;
         function get_active(const session_id: string; out active: Boolean): Boolean;
         function set_state(const session_id: string; const input_mode: TncInputMode; const full_width_mode: Boolean;
-            const punctuation_full_width: Boolean): Boolean;
+            const punctuation_full_width: Boolean;
+            const source: string = ''): Boolean;
         function set_dictionary_variant(const session_id: string; const dictionary_variant: TncDictionaryVariant): Boolean;
         function set_active(const session_id: string; const active: Boolean): Boolean;
         function release_session(const session_id: string): Boolean;
@@ -57,11 +60,17 @@ function build_set_caret_request(const session_id: string;
     const point: TPoint; const has_caret: Boolean; const line_height: Integer;
     const source: TncCaretAnchorSource; const anchor_score: Integer;
     const terminal_like_target: Boolean; const comless_target: Boolean): string;
+function build_set_state_request(const session_id: string;
+    const input_mode: TncInputMode; const full_width_mode: Boolean;
+    const punctuation_full_width: Boolean; const source: string = ''): string;
+function try_parse_shortcut_config_response(const response_text: string;
+    out shortcut_config: TncShortcutConfig): Boolean;
 
 implementation
 
 uses
-    nc_ipc_common;
+    nc_ipc_common,
+    nc_shortcut;
 
 const
     c_pipe_timeout_ms = 220;
@@ -487,6 +496,57 @@ begin
     Result := False;
 end;
 
+function try_parse_shortcut_config_response(const response_text: string;
+    out shortcut_config: TncShortcutConfig): Boolean;
+var
+    fields: TArray<string>;
+    parsed_config: TncShortcutConfig;
+begin
+    shortcut_config := nc_default_shortcut_config;
+    fields := response_text.Split([#9], TStringSplitOptions.None);
+    if (Length(fields) < 6) or (not SameText(fields[0], 'OK')) then
+    begin
+        Exit(False);
+    end;
+
+    parsed_config.signature := c_nc_shortcut_config_signature;
+    if (not nc_try_parse_shortcut(fields[1], parsed_config.input_mode_toggle)) or
+        (not nc_try_parse_shortcut(fields[2], parsed_config.punctuation_toggle)) or
+        (not nc_try_parse_shortcut(fields[3], parsed_config.dictionary_variant_toggle)) or
+        (not nc_try_parse_shortcut(fields[4], parsed_config.full_width_toggle)) or
+        (not nc_try_parse_shortcut(fields[5], parsed_config.open_settings)) or
+        nc_shortcut_config_has_duplicates(parsed_config) then
+    begin
+        Exit(False);
+    end;
+
+    shortcut_config := parsed_config;
+    Result := True;
+end;
+
+function TncIpcClient.get_shortcut_config(const session_id: string;
+    out shortcut_config: TncShortcutConfig): Boolean;
+var
+    request_text: string;
+    response_text: string;
+begin
+    shortcut_config := nc_default_shortcut_config;
+    if session_id = '' then
+    begin
+        m_last_error := ERROR_INVALID_PARAMETER;
+        Exit(False);
+    end;
+
+    request_text := 'GET_SHORTCUTS'#9 + session_id;
+    if not call_pipe(request_text, response_text) then
+    begin
+        Exit(False);
+    end;
+
+    Result := try_parse_shortcut_config_response(response_text,
+        shortcut_config);
+end;
+
 function TncIpcClient.get_dictionary_variant(const session_id: string; out dictionary_variant: TncDictionaryVariant): Boolean;
 var
     request_text: string;
@@ -545,7 +605,7 @@ begin
 end;
 
 function TncIpcClient.set_state(const session_id: string; const input_mode: TncInputMode; const full_width_mode: Boolean;
-    const punctuation_full_width: Boolean): Boolean;
+    const punctuation_full_width: Boolean; const source: string): Boolean;
 var
     request_text: string;
     response_text: string;
@@ -558,8 +618,8 @@ begin
         Exit;
     end;
 
-    request_text := Format('SET_STATE'#9'%s'#9'%d'#9'%d'#9'%d',
-        [session_id, Ord(input_mode), Ord(full_width_mode), Ord(punctuation_full_width)]);
+    request_text := build_set_state_request(session_id, input_mode,
+        full_width_mode, punctuation_full_width, source);
     if not call_pipe(request_text, response_text) then
     begin
         Result := False;
@@ -568,6 +628,19 @@ begin
 
     fields := response_text.Split([#9], TStringSplitOptions.None);
     Result := (Length(fields) >= 1) and SameText(fields[0], 'OK');
+end;
+
+function build_set_state_request(const session_id: string;
+    const input_mode: TncInputMode; const full_width_mode: Boolean;
+    const punctuation_full_width: Boolean; const source: string): string;
+begin
+    Result := Format('SET_STATE'#9'%s'#9'%d'#9'%d'#9'%d',
+        [session_id, Ord(input_mode), Ord(full_width_mode),
+        Ord(punctuation_full_width)]);
+    if source <> '' then
+    begin
+        Result := Result + #9 + encode_ipc_text(source);
+    end;
 end;
 
 function TncIpcClient.set_dictionary_variant(const session_id: string;

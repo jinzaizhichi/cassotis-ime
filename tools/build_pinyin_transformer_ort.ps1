@@ -2,10 +2,142 @@ param(
     [string]$Configuration = 'Release',
     [string]$VcVarsPath = '',
     [switch]$EnableExperimentalContextualRecall,
-    [switch]$EnableExperimentalTop32CrossRanker
+    [switch]$EnableExperimentalTop32CrossRanker,
+    [switch]$StopLockingRuntime
 )
 
 $ErrorActionPreference = 'Stop'
+
+function get_processes_loading_module([string]$module_path) {
+    $full_module_path = [System.IO.Path]::GetFullPath($module_path)
+    $result = @()
+    foreach ($process in @(Get-Process -ErrorAction SilentlyContinue)) {
+        try {
+            foreach ($module in @($process.Modules)) {
+                if ([string]::Equals(
+                    [System.IO.Path]::GetFullPath($module.FileName),
+                    $full_module_path,
+                    [System.StringComparison]::OrdinalIgnoreCase)) {
+                    $executable_path = ''
+                    try {
+                        $executable_path = $process.Path
+                    }
+                    catch {
+                    }
+                    $result += [PSCustomObject]@{
+                        name = $process.ProcessName
+                        pid = $process.Id
+                        path = $executable_path
+                    }
+                    break
+                }
+            }
+        }
+        catch {
+        }
+    }
+    return @($result)
+}
+
+function format_locking_processes([object[]]$processes) {
+    if ($processes.Count -eq 0) {
+        return 'none detected'
+    }
+    return (($processes | ForEach-Object {
+        if ([string]::IsNullOrWhiteSpace($_.path)) {
+            '{0} (PID {1})' -f $_.name, $_.pid
+        }
+        else {
+            '{0} (PID {1}, {2})' -f $_.name, $_.pid, $_.path
+        }
+    }) -join '; ')
+}
+
+function stop_locking_runtime_processes([string]$target_path, [object[]]$processes) {
+    $allowed_names = @(
+        'cassotis_ime_host',
+        'cassotis_ime_host32',
+        'cassotis_ime_tray_host',
+        'cassotis_ime_tray_host32'
+    )
+    $unsupported = @($processes | Where-Object { $_.name -notin $allowed_names })
+    if ($unsupported.Count -gt 0) {
+        throw ('Cannot replace {0}; stop the process loading it and retry: {1}' -f
+            $target_path, (format_locking_processes $unsupported))
+    }
+
+    foreach ($process in $processes) {
+        Write-Host ('[pinyin-transformer] stopping lock holder: {0} (PID {1})' -f
+            $process.name, $process.pid)
+        Stop-Process -Id $process.pid -Force -ErrorAction SilentlyContinue
+    }
+    foreach ($process in $processes) {
+        try {
+            Wait-Process -Id $process.pid -Timeout 3 -ErrorAction SilentlyContinue
+        }
+        catch {
+        }
+    }
+}
+
+function publish_runtime_dll(
+    [string]$staged_path,
+    [string]$target_path,
+    [bool]$stop_locking_runtime
+) {
+    $target_directory = Split-Path -Parent $target_path
+    $publish_id = '{0}.{1}' -f $PID, [Guid]::NewGuid().ToString('N')
+    $pending_path = Join-Path $target_directory (
+        '.cassotis_pinyin_transformer_ort.{0}.pending' -f $publish_id)
+    $backup_path = Join-Path $target_directory (
+        '.cassotis_pinyin_transformer_ort.{0}.backup' -f $publish_id)
+    Copy-Item -LiteralPath $staged_path -Destination $pending_path -Force
+
+    try {
+        $last_error = ''
+        for ($attempt = 1; $attempt -le 20; $attempt++) {
+            $lockers = @(get_processes_loading_module $target_path)
+            if ($lockers.Count -gt 0) {
+                if (-not $stop_locking_runtime) {
+                    throw (('Cannot replace {0}; it is loaded by: {1}. ' +
+                        'Stop that process or use -StopLockingRuntime.') -f
+                        $target_path, (format_locking_processes $lockers))
+                }
+                stop_locking_runtime_processes $target_path $lockers
+            }
+
+            try {
+                if (Test-Path -LiteralPath $target_path) {
+                    [System.IO.File]::Replace($pending_path, $target_path, $backup_path)
+                    Remove-Item -LiteralPath $backup_path -Force -ErrorAction SilentlyContinue
+                }
+                else {
+                    [System.IO.File]::Move($pending_path, $target_path)
+                }
+                return
+            }
+            catch {
+                $last_error = $_.Exception.Message
+                if ($attempt -lt 20) {
+                    Start-Sleep -Milliseconds 200
+                }
+            }
+        }
+
+        $remaining_lockers = @(get_processes_loading_module $target_path)
+        throw (('Cannot publish {0} after 20 attempts. Last error: {1}. ' +
+            'Detected lock holders: {2}') -f $target_path, $last_error,
+            (format_locking_processes $remaining_lockers))
+    }
+    finally {
+        if (Test-Path -LiteralPath $pending_path) {
+            Remove-Item -LiteralPath $pending_path -Force -ErrorAction SilentlyContinue
+        }
+        if (Test-Path -LiteralPath $backup_path) {
+            Remove-Item -LiteralPath $backup_path -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
 
 $root = Split-Path -Parent $PSScriptRoot
 $source = Join-Path $root 'src\host\native\nc_pinyin_transformer_ort.cpp'
@@ -13,7 +145,9 @@ $include = Join-Path $root 'third_party\onnxruntime\include'
 $onnxLibrary = Join-Path $root 'third_party\onnxruntime\win64\onnxruntime.lib'
 $versionProps = Join-Path $root 'version.props'
 $output = Join-Path $root 'out\cassotis_pinyin_transformer_ort.dll'
-$intermediateDir = Join-Path $root 'out\_tmp_build\pinyin_transformer_ort'
+$build_id = '{0}_{1}' -f $PID, [Guid]::NewGuid().ToString('N')
+$intermediateDir = Join-Path $root ('out\_tmp_build\pinyin_transformer_ort\' + $build_id)
+$stagedOutput = Join-Path $intermediateDir 'cassotis_pinyin_transformer_ort.dll'
 $object = Join-Path $intermediateDir 'cassotis_pinyin_transformer_ort.obj'
 $importLibrary = Join-Path $intermediateDir 'cassotis_pinyin_transformer_ort.lib'
 $pdb = Join-Path $intermediateDir 'cassotis_pinyin_transformer_ort.pdb'
@@ -104,30 +238,46 @@ $command = 'call "{0}" >nul && rc.exe /nologo /fo"{9}" "{10}" && ' +
     '/I"{2}" "{3}" /Fo"{4}" /link /LTCG /OUT:"{5}" ' +
     '/IMPLIB:"{6}" /PDB:"{7}" "{8}" "{9}"'
 $command = $command -f $vcvars, $optimization, $include, $source, $object,
-    $output, $importLibrary, $pdb, $onnxLibrary, $resource, $resourceScript,
+    $stagedOutput, $importLibrary, $pdb, $onnxLibrary, $resource, $resourceScript,
     $experimentalDefine
 
-& cmd.exe /d /s /c $command
-if ($LASTEXITCODE -ne 0) {
-    throw "Native ONNX wrapper build failed with exit code $LASTEXITCODE"
-}
+try {
+    & cmd.exe /d /s /c $command
+    if ($LASTEXITCODE -ne 0) {
+        throw "Native ONNX wrapper build failed with exit code $LASTEXITCODE"
+    }
 
-$builtVersionInfo = (Get-Item -LiteralPath $output).VersionInfo
-if (($builtVersionInfo.FileVersion.Trim() -ne $versionQuad) -or
-    ($builtVersionInfo.ProductVersion.Trim() -ne $versionQuad)) {
-    throw "Native ONNX wrapper version resource mismatch: expected $versionQuad, " +
-        "got file=$($builtVersionInfo.FileVersion) product=$($builtVersionInfo.ProductVersion)"
-}
+    $builtVersionInfo = (Get-Item -LiteralPath $stagedOutput).VersionInfo
+    if (($builtVersionInfo.FileVersion.Trim() -ne $versionQuad) -or
+        ($builtVersionInfo.ProductVersion.Trim() -ne $versionQuad)) {
+        throw "Native ONNX wrapper version resource mismatch: expected $versionQuad, " +
+            "got file=$($builtVersionInfo.FileVersion) product=$($builtVersionInfo.ProductVersion)"
+    }
 
-# Keep only the runtime DLL in out; linker artifacts are not release inputs.
-$staleReleaseArtifacts = @(
-    (Join-Path $root 'out\cassotis_pinyin_transformer_ort.exp'),
-    (Join-Path $root 'out\cassotis_pinyin_transformer_ort.lib'),
-    (Join-Path $root 'out\cassotis_pinyin_transformer_ort.obj')
-)
-foreach ($artifact in $staleReleaseArtifacts) {
-    if (Test-Path -LiteralPath $artifact) {
-        Remove-Item -LiteralPath $artifact -Force
+    publish_runtime_dll $stagedOutput $output $StopLockingRuntime.IsPresent
+
+    $publishedVersionInfo = (Get-Item -LiteralPath $output).VersionInfo
+    if (($publishedVersionInfo.FileVersion.Trim() -ne $versionQuad) -or
+        ($publishedVersionInfo.ProductVersion.Trim() -ne $versionQuad)) {
+        throw "Published native ONNX wrapper version resource mismatch: expected $versionQuad, " +
+            "got file=$($publishedVersionInfo.FileVersion) product=$($publishedVersionInfo.ProductVersion)"
+    }
+
+    # Keep only the runtime DLL in out; linker artifacts are not release inputs.
+    $staleReleaseArtifacts = @(
+        (Join-Path $root 'out\cassotis_pinyin_transformer_ort.exp'),
+        (Join-Path $root 'out\cassotis_pinyin_transformer_ort.lib'),
+        (Join-Path $root 'out\cassotis_pinyin_transformer_ort.obj')
+    )
+    foreach ($artifact in $staleReleaseArtifacts) {
+        if (Test-Path -LiteralPath $artifact) {
+            Remove-Item -LiteralPath $artifact -Force
+        }
+    }
+}
+finally {
+    if (Test-Path -LiteralPath $intermediateDir) {
+        Remove-Item -LiteralPath $intermediateDir -Recurse -Force -ErrorAction SilentlyContinue
     }
 }
 

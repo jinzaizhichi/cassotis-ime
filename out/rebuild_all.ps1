@@ -501,7 +501,8 @@ function get_processes_using_dll_by_module_scan([string]$dll_name, [string]$dll_
             {
                 $module_name = [System.IO.Path]::GetFileName($module.FileName).ToLowerInvariant()
                 $module_path = $module.FileName.ToLowerInvariant()
-                if (($module_name -eq $target_name) -or (($target_path -ne '') -and ($module_path -eq $target_path)))
+                if ((($target_path -ne '') -and ($module_path -eq $target_path)) -or
+                    (($target_path -eq '') -and ($module_name -eq $target_name)))
                 {
                     $result += [PSCustomObject]@{
                         name = $proc.ProcessName + '.exe'
@@ -725,6 +726,115 @@ function stop_engine_host
         {
         }
     }
+
+    foreach ($proc in $procs)
+    {
+        try
+        {
+            $null = $proc.WaitForExit(3000)
+        }
+        catch
+        {
+        }
+    }
+}
+
+function test_same_file_content([string]$source_path, [string]$target_path)
+{
+    if ((-not (Test-Path -LiteralPath $source_path)) -or
+        (-not (Test-Path -LiteralPath $target_path)))
+    {
+        return $false
+    }
+
+    try
+    {
+        $source_info = Get-Item -LiteralPath $source_path
+        $target_info = Get-Item -LiteralPath $target_path
+        if ($source_info.Length -ne $target_info.Length)
+        {
+            return $false
+        }
+
+        $source_hash = (Get-FileHash -LiteralPath $source_path -Algorithm SHA256).Hash
+        $target_hash = (Get-FileHash -LiteralPath $target_path -Algorithm SHA256).Hash
+        return $source_hash -eq $target_hash
+    }
+    catch
+    {
+        return $false
+    }
+}
+
+function publish_runtime_file([string]$source_path, [string]$target_path)
+{
+    if (test_same_file_content $source_path $target_path)
+    {
+        Write-Host ("Runtime file unchanged: {0}" -f $target_path)
+        return
+    }
+
+    $target_dir = Split-Path -Parent $target_path
+    $target_name = [System.IO.Path]::GetFileName($target_path)
+    $publish_id = "{0}.{1}" -f $PID, [Guid]::NewGuid().ToString('N')
+    $pending_path = Join-Path $target_dir (".{0}.{1}.pending" -f $target_name, $publish_id)
+    $backup_path = Join-Path $target_dir (".{0}.{1}.backup" -f $target_name, $publish_id)
+    Copy-Item -LiteralPath $source_path -Destination $pending_path -Force
+
+    try
+    {
+        $last_error = ''
+        for ($attempt = 1; $attempt -le 20; $attempt++)
+        {
+            stop_engine_host
+            try
+            {
+                if (Test-Path -LiteralPath $target_path)
+                {
+                    [System.IO.File]::Replace($pending_path, $target_path, $backup_path)
+                    Remove-Item -LiteralPath $backup_path -Force -ErrorAction SilentlyContinue
+                }
+                else
+                {
+                    [System.IO.File]::Move($pending_path, $target_path)
+                }
+                Write-Host ("Published runtime file: {0}" -f $target_path)
+                return
+            }
+            catch
+            {
+                $last_error = $_.Exception.Message
+                if ($attempt -lt 20)
+                {
+                    Start-Sleep -Milliseconds 200
+                }
+            }
+        }
+
+        $lockers = @(get_processes_using_dll_by_module_scan $target_name $target_path)
+        $locker_text = if ($lockers.Count -eq 0)
+        {
+            'none detected'
+        }
+        else
+        {
+            ($lockers | ForEach-Object { "{0} (PID {1})" -f $_.name, $_.pid }) -join '; '
+        }
+        throw (("Failed to publish runtime file '{0}' after 20 attempts. " +
+            "Last error: {1}. Detected lock holders: {2}") -f
+            $target_path, $last_error, $locker_text)
+    }
+    finally
+    {
+        if (Test-Path -LiteralPath $pending_path)
+        {
+            Remove-Item -LiteralPath $pending_path -Force -ErrorAction SilentlyContinue
+        }
+        if (Test-Path -LiteralPath $backup_path)
+        {
+            Remove-Item -LiteralPath $backup_path -Force -ErrorAction SilentlyContinue
+        }
+    }
 }
 
 function is_terminal_shell_process([string]$image_name)
@@ -933,7 +1043,7 @@ function copy_sqlite_binaries
 
     if (Test-Path -LiteralPath $sqlite64_source)
     {
-        Copy-Item -Force -LiteralPath $sqlite64_source -Destination $sqlite64_target
+        publish_runtime_file $sqlite64_source $sqlite64_target
     }
     else
     {
@@ -970,13 +1080,15 @@ function build_and_copy_pinyin_transformer_runtime
         }
     }
 
-    & $native_build -Configuration Release
+    # The TSF client can relaunch the host while cl.exe is compiling. Link to a
+    # staging file first, then stop only the process holding this output DLL.
+    & $native_build -Configuration Release -StopLockingRuntime
     if ($LASTEXITCODE -ne 0)
     {
         throw "Pinyin Transformer native wrapper build failed with exit code $LASTEXITCODE"
     }
-    Copy-Item -Force -LiteralPath (Join-Path $runtime_source 'onnxruntime.dll') -Destination $script_dir
-    Copy-Item -Force -LiteralPath (Join-Path $runtime_source 'onnxruntime_providers_shared.dll') -Destination $script_dir
+    publish_runtime_file (Join-Path $runtime_source 'onnxruntime.dll') (Join-Path $script_dir 'onnxruntime.dll')
+    publish_runtime_file (Join-Path $runtime_source 'onnxruntime_providers_shared.dll') (Join-Path $script_dir 'onnxruntime_providers_shared.dll')
     foreach ($legacy_name in @(
         'nc_pinyin_transformer_ort.dll',
         'cassotis_onnxruntime.dll',

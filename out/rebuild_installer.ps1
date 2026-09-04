@@ -69,9 +69,7 @@ if ([string]::IsNullOrWhiteSpace($Version)) {
     $Version = get-shared-version -VersionPropsPath $versionPropsPath
 }
 
-$requiredFiles = @(
-    'cassotis_ime_yanquan.ico',
-    'version.props',
+$runtimePayloadFiles = @(
     'out\cassotis_ime_host.exe',
     'out\cassotis_ime_tray_host.exe',
     'out\cassotis_ime_svr.dll',
@@ -86,8 +84,15 @@ $requiredFiles = @(
     'out\pinyin_transformer\pinyin_parallel_allowed.bin',
     'out\pinyin_transformer\vocab.json',
     'out\local_completion\local_completion_path_ranker_int8.onnx',
+    'out\local_completion\local_completion_generator_int8.onnx',
     'out\local_completion\local_completion_index.bin',
-    'out\local_completion\model_manifest.json',
+    'out\local_completion\model_manifest.json'
+)
+
+$requiredFiles = @(
+    'cassotis_ime_yanquan.ico',
+    'version.props'
+) + $runtimePayloadFiles + @(
     'third_party\onnxruntime\LICENSE',
     'third_party\onnxruntime\ThirdPartyNotices.txt'
 )
@@ -96,24 +101,7 @@ foreach ($relativePath in $requiredFiles) {
     require-path (Join-Path $resolvedSourceRoot $relativePath)
 }
 
-$runtimeFingerprintFiles = @(
-    'out\cassotis_ime_host.exe',
-    'out\cassotis_ime_tray_host.exe',
-    'out\cassotis_ime_svr.dll',
-    'out\cassotis_ime_svr32.dll',
-    'out\cassotis_ime_profile_reg.exe',
-    'out\sqlite3_64.dll',
-    'out\cassotis_pinyin_transformer_ort.dll',
-    'out\onnxruntime.dll',
-    'out\onnxruntime_providers_shared.dll',
-    'out\pinyin_transformer\pinyin_conditional_scorer_int8.onnx',
-    'out\pinyin_transformer\pinyin_parallel_generator_int8.onnx',
-    'out\pinyin_transformer\pinyin_parallel_allowed.bin',
-    'out\pinyin_transformer\vocab.json',
-    'out\local_completion\local_completion_path_ranker_int8.onnx',
-    'out\local_completion\local_completion_index.bin',
-    'out\local_completion\model_manifest.json'
-)
+$runtimeFingerprintFiles = $runtimePayloadFiles
 $fingerprintSource = ($runtimeFingerprintFiles | ForEach-Object {
     (Get-FileHash -LiteralPath (Join-Path $resolvedSourceRoot $_) -Algorithm SHA256).Hash
 }) -join "`n"
