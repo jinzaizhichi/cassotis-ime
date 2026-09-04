@@ -1,10 +1,12 @@
 # Cassotis Corpus Benchmarks
 
-Cassotis publishes six fixed corpus benchmarks for tracking decoding quality and engine performance across releases: the Long Sentence Benchmark-16300, the Short-word Context Benchmark-65000, the One-key Completion Context Benchmark-12831, the Medium-input One-key Completion Benchmark-10840, the Long-sentence One-key Completion Benchmark-16300, and the Document-copy Completion Replay Benchmark-386. They turn release quality into reproducible measurements instead of relying only on hand-picked examples.
+Cassotis publishes four fixed corpus benchmarks: the Long Sentence Benchmark-16300, the Short-word Context Benchmark-65000, the One-key Completion Context Benchmark-12831, and the Long-sentence One-key Completion Benchmark-16300. They track decoding quality and engine performance across releases as reproducible measurements instead of relying only on hand-picked examples.
+
+The Medium-input One-key Completion Benchmark-10840 and Document-copy Completion Replay Benchmark-386 remain internal feature and regression suites rather than published release metrics. `run_document_context_benchmark.ps1` is also an internal diagnostic tool. `run_changju_latency_16300.ps1` is the latency runner for the existing long-sentence benchmark, while `run_completion_benchmark_all.ps1` is only an aggregate runner; neither defines another benchmark.
 
 ## Shared Corpus Source
 
-All six benchmarks are derived from the developer's own novel, [**Elegance in Timelessness**](https://www.qidian.com/book/1037259117/) (Chinese title: [**永恒的舞动**](https://www.qidian.com/book/1037259117/)).
+The published benchmarks and internal feature suites are all derived from the developer's own novel, [**Elegance in Timelessness**](https://www.qidian.com/book/1037259117/) (Chinese title: [**永恒的舞动**](https://www.qidian.com/book/1037259117/)).
 
 Benchmark-16300 fixes 16,300 eligible sentences, while Benchmark-65000 fixes 65,000 short-word occurrences. The short-word completion benchmark derives 12,831 incremental completion opportunities from the same short-word cases. The medium-input and long-sentence completion benchmarks reuse the long-sentence corpus to derive 10,840 mid-composition opportunities and 16,300 near-tail opportunities respectively. The document-copy replay benchmark fixes 386 chronological opportunities whose target continuation has already appeared earlier in the same document. Benchmark cases are kept separate from the corresponding model-training data.
 
@@ -111,7 +113,7 @@ Because each corpus position has only one reference target, a different but ling
 
 Latency covers dictionary lookup, context/language-model scoring, completion selection, and hysteresis only. It excludes process and dictionary cold start, TSF/host communication, candidate-window rendering, real inter-key timing, and learning writes after acceptance. The engine is reset before each source case; adjacent prefixes of the same target are processed consecutively, while the dictionary connection and runtime caches remain open for the complete run.
 
-## Medium-input One-key Completion Benchmark-10840
+## Internal: Medium-input One-key Completion Benchmark-10840
 
 ### Case Construction and Scoring
 
@@ -123,7 +125,7 @@ This benchmark covers the gap between short-word completion and near-tail long-s
 - Count a hit when the prompt strictly extends the intended typed prefix and the displayed text remains a prefix of the reference sentence.
 - Use deterministic benchmark mode, a snapshot of the simplified base dictionary, and an empty user dictionary. Benchmark cases remain isolated from model-training data.
 
-The public report records five metrics:
+The internal report records five metrics:
 
 - `Completion Hit`: correct local continuations divided by all 10,840 opportunities.
 - `Prompt Precision`: correct local continuations divided by opportunities where a prompt was displayed.
@@ -164,7 +166,7 @@ The detailed report additionally retains average keys saved per hit, incremental
 
 The dictionary and both runtime models are loaded and warmed before scored cases begin. Latency starts immediately before assigning the scored Pinyin prefix and includes long-sentence decoding, exact/transition lookup, language-model scoring, hysteresis, and accepted local-model refinement. Model work that abstains or times out is asynchronous and does not delay the visible static result, so it is not added to visible latency. The measurement excludes process and model cold start, the preceding stability probe, report output, TSF-to-Host IPC, rendering, real inter-key timing, and learning writes. The engine is reset before every source sentence while dictionary connections, model sessions, and runtime caches remain open for the complete run.
 
-## Document-copy Completion Replay Benchmark-386
+## Internal: Document-copy Completion Replay Benchmark-386
 
 ### Case Construction and Scoring
 
@@ -177,7 +179,7 @@ This benchmark measures document-local copy completion without leaking future te
 - Feed the historical snapshot, document identity, current Pinyin prefix, and ordinary engine candidates through the same document-copy selection path used by the Host.
 - Disable the asynchronous local-completion runtime for this dedicated layer benchmark. Existing static completion remains the fallback when document-copy evidence abstains.
 
-The public report records four metrics:
+The internal report records four metrics:
 
 - `Document-copy Hit`: strict reference-matching document-copy prompts divided by all 386 opportunities.
 - `Prompt Precision`: strict reference-matching prompts divided by every prompt actually displayed, including fallback prompts.
@@ -203,7 +205,7 @@ These values quantify complete-query engine performance and long-tail cost. They
 
 ## Result Publication
 
-Version-specific results are published in `README.md`. The short-word completion benchmark begins with `v1.15.0`. Long-sentence completion results through `v1.17.0` used the legacy whole-sentence exact criterion; the local-continuation criterion starts with the next formally evaluated release and is not backfilled. This document defines their shared source, case construction, accuracy scoring, and latency protocols.
+Version-specific results for the four published benchmarks appear in `README.md`. Medium-input and document-copy replay results are used only for internal development and regression checks and are not listed in the public release tables. The short-word completion benchmark begins with `v1.15.0`. Long-sentence completion results through `v1.17.0` used the legacy whole-sentence exact criterion; the local-continuation criterion starts with the next formally evaluated release and is not backfilled. This document defines their shared source, case construction, accuracy scoring, and latency protocols.
 
 ## Notes
 
