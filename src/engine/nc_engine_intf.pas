@@ -136597,14 +136597,11 @@ var
             Exit;
         end;
         candidate_index_local := ordered_indices[best_position_local];
-        strict_threshold_local := c_long_exact_anchor_pairwise_threshold;
-        if rank_features[candidate_index_local].complete_pool_anchor_exact_rank >= 4 then
-        begin
-            { Lower-ranked exact words expand recall, but the ranker was trained
-              on rank 1-3 anchors. Keep unseen ranks out of Top1 until a model
-              trained with their hard negatives explicitly approves them. }
-            strict_threshold_local := 1.0E308;
-        end;
+        { Stage tracing on the current runtime distribution shows that this
+          narrow exact-anchor model is useful as a recall/second-slot lane but
+          loses Top1 accuracy when it makes the final decision itself. Keep the
+          exact path for the later bidirectional and unified arbiters instead. }
+        strict_threshold_local := 1.0E308;
         move_result_local := apply_long_exact_anchor_pairwise_index_move(
             ordered_indices, best_position_local, best_score_local,
             strict_threshold_local,
@@ -190842,7 +190839,8 @@ function TncEngine.get_long_neural_completion_request(
 begin
     request := Default(TncLongNeuralCompletionRequest);
     Result := m_has_long_neural_completion_request and
-        (m_one_key_completion.text = '') and
+        ((m_one_key_completion.text = '') or
+        (m_one_key_completion.source = okcs_long_transition)) and
         (m_long_neural_completion_request.query_prefix <> '') and
         (m_long_neural_completion_request.query_syllables <> '') and
         (m_long_neural_completion_request.top1_text <> '') and
@@ -190856,6 +190854,9 @@ end;
 function TncEngine.apply_long_neural_completion(
     const request: TncLongNeuralCompletionRequest;
     const completion_result: TncLongNeuralCompletionResult): Boolean;
+const
+    c_static_challenge_min_confidence: Single = -2.5;
+    c_static_single_character_min_confidence: Single = 0.0;
 var
     suffix_segments: TArray<string>;
     pinyin_segments: TArray<string>;
@@ -190951,7 +190952,9 @@ var
     end;
 begin
     Result := False;
-    if (m_dictionary = nil) or (m_one_key_completion.text <> '') or
+    if (m_dictionary = nil) or
+        ((m_one_key_completion.text <> '') and
+        (m_one_key_completion.source <> okcs_long_transition)) or
         (not m_has_long_neural_completion_request) or
         (not same_request(request, m_long_neural_completion_request)) or
         (completion_result.base_rank < 1) or
@@ -190960,6 +190963,15 @@ begin
         (completion_result.replace_units > 6) or
         (request.phonetic_only and
         (completion_result.replace_units = 0)) then
+    begin
+        Exit;
+    end;
+    // Static long-transition hints remain visible immediately. The async
+    // model may replace one only inside the confidence range that improved
+    // both calibration and held-out benchmark partitions.
+    if (m_one_key_completion.source = okcs_long_transition) and
+        (completion_result.confidence <
+        c_static_challenge_min_confidence) then
     begin
         Exit;
     end;
@@ -191031,6 +191043,16 @@ begin
     begin
         Exit;
     end;
+    if (m_one_key_completion.source = okcs_long_transition) and
+        (Length(suffix_text) = 1) and
+        (completion_result.confidence <
+        c_static_single_character_min_confidence) then
+    begin
+        // A one-character neural suffix saves little and was the only class
+        // that regressed the medium-input validation folds. Require positive
+        // confidence before replacing a longer, immediately available hint.
+        Exit;
+    end;
 
     if Length(base_text) < completion_result.replace_units then
     begin
@@ -191050,6 +191072,15 @@ begin
     if trimmed_anchor_path = '' then
     begin
         trimmed_anchor_path := trimmed_base_path;
+    end;
+    if SameText(m_one_key_completion.text,
+        trimmed_base_text + suffix_text) and
+        SameText(m_one_key_completion.full_pinyin,
+        request.query_prefix + continuation_pinyin) then
+    begin
+        // Keep the already-visible static result and avoid an asynchronous
+        // repaint when the model reaches the same completion.
+        Exit;
     end;
 
     m_one_key_completion := Default(TncOneKeyCompletion);
