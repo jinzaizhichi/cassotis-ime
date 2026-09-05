@@ -54,6 +54,18 @@ This file lists third-party software/data used by Cassotis IME and the related l
 - Embarcadero Delphi 10.4 is required to build this project.
 - Delphi itself is not bundled in this repository and is licensed separately by Embarcadero.
 
+## 6) MacBERT-Derived Local Correction
+
+- Source: [hfl/chinese-macbert-base](https://huggingface.co/hfl/chinese-macbert-base),
+  revision `a986e004d2a7f2a1c2f5a3edef4e20604a974ed1`.
+- Local artifact: `data/models/local_repair/`.
+- License: Apache-2.0; redistributed notices are in `third_party/macbert/`.
+- Changes: independent IME-draft fine-tuning, six-layer student distillation,
+  dictionary-reading constraints, cacheable document attention, INT8 export.
+  These are modified model weights, not an unmodified upstream checkpoint.
+- The offline teacher and training documents are not bundled. CPU inference
+  takes place in the host only; neither model loading nor inference runs in TSF.
+
 ## GPL-3.0 Notice
 
 This project is licensed under GPL-3.0. The redistributed third-party items listed above are generally GPL-compatible:

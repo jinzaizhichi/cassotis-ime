@@ -8,7 +8,8 @@ uses
     System.Classes,
     System.SyncObjs,
     System.Generics.Collections,
-    nc_engine_intf;
+    nc_engine_intf,
+    nc_local_repair_host;
 
 type
     TncPinyinTransformerHostReranker = class;
@@ -49,7 +50,7 @@ type
     end;
 
     TncPinyinTransformerHostReranker = class(TInterfacedObject,
-        IncLongNeuralReranker)
+        IncLongNeuralReranker, IncLongLocalRepair)
     private type
         TncPtCreate = function(const model_path: PWideChar;
             const intra_threads: Integer; const error_text: PWideChar;
@@ -75,6 +76,7 @@ type
         TncPgDestroy = procedure(const handle: Pointer); cdecl;
     private
         m_base_directory: string;
+        m_local_repair: TncLocalRepairHost;
         m_state_lock: TCriticalSection;
         m_run_lock: TCriticalSection;
         m_loader: TncPinyinTransformerLoadThread;
@@ -166,6 +168,11 @@ type
         function try_select(const query_text: string;
             const candidates: TncLongFinalCandidateDebugArray;
             out selected_index: Integer): Boolean;
+        procedure set_document_context(const document_key, preceding_text: string);
+        function try_repair(const query_text, draft_text: string;
+            const document_key, preceding_text: string;
+            out repaired_text, aligned_pinyin: string;
+            out minimum_word_ratio: Double): Boolean;
         function ready: Boolean;
         function wait_until_ready(const timeout_ms: Cardinal): Boolean;
         function last_error: string;
@@ -719,6 +726,7 @@ begin
     inherited create;
     m_base_directory := ExcludeTrailingPathDelimiter(
         ExpandFileName(base_directory));
+    m_local_repair := TncLocalRepairHost.Create(m_base_directory, result_timeout_ms);
     m_state_lock := TCriticalSection.Create;
     m_run_lock := TCriticalSection.Create;
     m_loader := nil;
@@ -766,11 +774,16 @@ begin
     else
     begin
         load_model;
+        // Synchronous callers measure a fully warmed runtime, not whichever
+        // optional model happened to finish first. Interactive loading stays async.
+        if not m_local_repair.wait_until_ready(60000) then
+            raise Exception.Create('Local repair initialization timed out');
     end;
 end;
 
 destructor TncPinyinTransformerHostReranker.Destroy;
 begin
+    m_local_repair.Free;
     if m_loader <> nil then
     begin
         m_loader.detach_owner;
@@ -1799,6 +1812,11 @@ begin
     begin
         QueryPerformanceCounter(profile_end_tick);
         Inc(m_profile_calls);
+        if ((m_profile_calls mod 1024) = 0) and (m_profile_frequency > 0) then
+            log_message('INFO', Format(
+                'profile progress calls=%d gate_passes=%d inference_total_ms=%.3f',
+                [m_profile_calls, m_profile_gate_passes,
+                m_profile_inference_ticks * 1000.0 / m_profile_frequency]));
         Inc(m_profile_build_ticks, profile_end_tick - profile_tick);
         profile_tick := profile_end_tick;
     end;
@@ -2066,11 +2084,33 @@ begin
         end;
         if Result or finished then
         begin
+            if Result and (m_local_repair <> nil) then
+                Result := m_local_repair.wait_until_ready(timeout_ms);
             Exit;
         end;
         Sleep(5);
     until (GetTickCount64 - started_tick) >= timeout_ms;
     Result := ready;
+end;
+
+procedure TncPinyinTransformerHostReranker.set_document_context(
+    const document_key, preceding_text: string);
+begin
+    if m_local_repair <> nil then
+        m_local_repair.set_document_context(document_key, preceding_text);
+end;
+
+function TncPinyinTransformerHostReranker.try_repair(
+    const query_text, draft_text: string;
+    const document_key, preceding_text: string;
+    out repaired_text, aligned_pinyin: string; out minimum_word_ratio: Double): Boolean;
+begin
+    repaired_text := '';
+    aligned_pinyin := '';
+    minimum_word_ratio := 1;
+    Result := (m_local_repair <> nil) and
+        m_local_repair.try_repair(query_text, draft_text, document_key,
+            preceding_text, repaired_text, aligned_pinyin, minimum_word_ratio);
 end;
 
 function TncPinyinTransformerHostReranker.last_error: string;

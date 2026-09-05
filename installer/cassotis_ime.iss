@@ -68,6 +68,13 @@ Source: "{#RuntimeDir}\local_completion\local_completion_path_ranker_int8.onnx";
 Source: "{#RuntimeDir}\local_completion\local_completion_generator_int8.onnx"; DestDir: "{#InstallRuntimeDir}\local_completion"; Flags: ignoreversion onlyifdoesntexist
 Source: "{#RuntimeDir}\local_completion\local_completion_index.bin"; DestDir: "{#InstallRuntimeDir}\local_completion"; Flags: ignoreversion onlyifdoesntexist
 Source: "{#RuntimeDir}\local_completion\model_manifest.json"; DestDir: "{#InstallRuntimeDir}\local_completion"; Flags: ignoreversion onlyifdoesntexist
+Source: "{#RuntimeDir}\local_repair\context_int8.onnx"; DestDir: "{#InstallRuntimeDir}\local_repair"; Flags: ignoreversion onlyifdoesntexist
+Source: "{#RuntimeDir}\local_repair\query_int8.onnx"; DestDir: "{#InstallRuntimeDir}\local_repair"; Flags: ignoreversion onlyifdoesntexist
+Source: "{#RuntimeDir}\local_repair\vocab.json"; DestDir: "{#InstallRuntimeDir}\local_repair"; Flags: ignoreversion onlyifdoesntexist
+Source: "{#RuntimeDir}\local_repair\readings.json"; DestDir: "{#InstallRuntimeDir}\local_repair"; Flags: ignoreversion onlyifdoesntexist
+Source: "{#RuntimeDir}\local_repair\runtime_manifest.json"; DestDir: "{#InstallRuntimeDir}\local_repair"; Flags: ignoreversion onlyifdoesntexist
+Source: "{#SourceRoot}\third_party\macbert\LICENSE"; DestDir: "{app}\licenses\macbert"; Flags: ignoreversion
+Source: "{#SourceRoot}\third_party\macbert\NOTICE"; DestDir: "{app}\licenses\macbert"; Flags: ignoreversion
 Source: "{#SourceRoot}\third_party\onnxruntime\LICENSE"; DestDir: "{app}\licenses\onnxruntime"; Flags: ignoreversion
 Source: "{#SourceRoot}\third_party\onnxruntime\ThirdPartyNotices.txt"; DestDir: "{app}\licenses\onnxruntime"; Flags: ignoreversion
 

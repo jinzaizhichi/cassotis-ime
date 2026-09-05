@@ -451,6 +451,15 @@ type
             out selected_index: Integer): Boolean;
     end;
 
+    IncLongLocalRepair = interface
+        ['{C94752D8-309D-4F6D-9990-4CC9B38D4473}']
+        procedure set_document_context(const document_key, preceding_text: string);
+        function try_repair(const query_text, draft_text: string;
+            const document_key, preceding_text: string;
+            out repaired_text, aligned_pinyin: string;
+            out minimum_word_ratio: Double): Boolean;
+    end;
+
     TncLongRankingStageDebug = record
         stage_name: string;
         top1_text: string;
@@ -774,6 +783,8 @@ type
             TncLongCompletePoolRuntimeCandidateArray;
         m_runtime_long_retained_exact_edges: TncLongRetainedExactEdgeArray;
         m_long_neural_reranker: IncLongNeuralReranker;
+        m_long_local_repair: IncLongLocalRepair;
+        m_local_repair_query_key, m_local_repair_text, m_local_repair_draft: string;
         m_long_complete_pool_pairwise_text: string;
         m_long_complete_pool_pairwise_insert_rank: Integer;
         m_debug_long_chain_beam_width: Integer;
@@ -828,6 +839,8 @@ type
             const page_size: Integer): Integer;
         function get_page_count_internal(const page_size: Integer): Integer;
         procedure normalize_page_and_selection;
+        procedure apply_visible_local_repair(var candidates: TncCandidateList;
+            var source_indices: TArray<Integer>; const expected_units: Integer);
         function get_source_rank(const source: TncCandidateSource): Integer;
         function get_context_variants(const context_text: string): TArray<string>;
         function get_session_text_bonus(const candidate_text: string): Integer;
@@ -1188,6 +1201,7 @@ function nc_search_budget_should_stop(const mode: TncSearchBudgetMode;
 implementation
 
 uses
+    nc_local_repair_guard,
     nc_long_search_ranker_model,
     nc_long_edge_retention_model,
     nc_long_exact_edge_lattice_ranker_model,
@@ -4285,8 +4299,13 @@ begin
         (not preserve_document_context) then
     begin
         m_document_context_model.clear;
+        if m_long_local_repair <> nil then
+            m_long_local_repair.set_document_context('', '');
     end;
     m_segment_left_context := '';
+    m_local_repair_query_key := '';
+    m_local_repair_text := '';
+    m_local_repair_draft := '';
     m_context_db_bonus_cache_key := '';
     SetLength(m_candidates, 0);
     SetLength(m_visible_candidates_cache, 0);
@@ -5012,6 +5031,17 @@ procedure TncEngine.set_long_neural_reranker(
     const reranker: IncLongNeuralReranker);
 begin
     m_long_neural_reranker := reranker;
+    m_long_local_repair := nil;
+    m_local_repair_query_key := '';
+    m_local_repair_text := '';
+    m_local_repair_draft := '';
+    Supports(reranker, IncLongLocalRepair, m_long_local_repair);
+    if (m_long_local_repair <> nil) and (m_document_context_model <> nil) then
+    begin
+        m_long_local_repair.set_document_context(
+            m_document_context_model.document_key,
+            m_document_context_model.semantic_tail);
+    end;
 end;
 
 function TncEngine.detach_dictionary_provider: TncDictionaryProvider;
@@ -5450,6 +5480,12 @@ begin
         end;
         m_document_context_model.set_snapshot(document_key,
             next_document_snapshot);
+        if m_long_local_repair <> nil then
+        begin
+            m_long_local_repair.set_document_context(
+                m_document_context_model.document_key,
+                m_document_context_model.semantic_tail);
+        end;
     end;
     next_context := trim_left_context_to_sentence(left_context,
         c_left_context_max_len);
@@ -140904,6 +140940,166 @@ begin
     end;
 end;
 
+procedure TncEngine.apply_visible_local_repair(var candidates: TncCandidateList;
+    var source_indices: TArray<Integer>; const expected_units: Integer);
+var
+    text, path, key, segment, replacement, original_path: string;
+    document_key, preceding_text, aligned_pinyin: string;
+    minimum_word_ratio: Double;
+    index, existing, saved_source, position, unit_index: Integer;
+    original_segments: TArray<string>;
+    candidate, saved: TncCandidate;
+    procedure sync_paging_pool;
+    var
+        pool: TncCandidateList;
+        indices: TArray<Integer>;
+        seen: TDictionary<string, Byte>;
+        i, count: Integer;
+        item_key: string;
+    begin
+        if not m_long_visible_candidate_pool_cache_valid then Exit;
+        if m_long_visible_candidate_pool_cache_key <>
+            get_long_visible_candidate_pool_cache_key(get_candidate_page_size) then Exit;
+        pool := Copy(m_long_visible_candidate_pool_cache);
+        indices := Copy(m_long_visible_candidate_pool_source_indices_cache);
+        if (Length(pool) < Length(candidates)) or
+            (Length(pool) <> Length(indices)) then Exit;
+        for i := 0 to High(candidates) do
+        begin
+            pool[i] := candidates[i];
+            indices[i] := source_indices[i];
+        end;
+        seen := TDictionary<string, Byte>.Create;
+        try
+            count := 0;
+            for i := 0 to High(pool) do
+            begin
+                item_key := pool[i].text + #0 + pool[i].comment;
+                if seen.ContainsKey(item_key) then Continue;
+                seen.Add(item_key, 0);
+                pool[count] := pool[i];
+                indices[count] := indices[i];
+                Inc(count);
+            end;
+            SetLength(pool, count);
+            SetLength(indices, count);
+        finally
+            seen.Free;
+        end;
+        m_long_visible_candidate_pool_cache := pool;
+        m_long_visible_candidate_pool_source_indices_cache := indices;
+        m_long_visible_candidate_pool_source_signature := get_candidate_state_signature;
+    end;
+begin
+    if (m_long_local_repair = nil) or (m_dictionary = nil) or (m_page_index <> 0) or
+        (Length(candidates) = 0) or (Length(source_indices) <> Length(candidates)) or
+        (expected_units < 6) or (expected_units > 40) or
+        (m_config.pinyin_input_scheme <> pis_full_pinyin) or
+        (m_config.dictionary_variant <> dv_simplified) or
+        m_config.fuzzy_pinyin_enabled or (m_confirmed_text <> '') or
+        (candidates[0].source = cs_user) or
+        (candidates[0].comment <> '') or
+        (Length(candidates[0].text) <> expected_units) then Exit;
+    // Some generated paths inherit a display weight from their components.
+    // Only a real full-query dictionary entry is an immutable exact candidate.
+    if candidates[0].has_dict_weight and m_dictionary.is_base_entry(
+        normalize_pinyin_text(m_composition_text), candidates[0].text) then Exit;
+    document_key := '';
+    preceding_text := '';
+    if m_document_context_model <> nil then
+    begin
+        document_key := m_document_context_model.document_key;
+        preceding_text := m_document_context_model.semantic_tail;
+    end;
+    key := m_composition_text + #0 + m_last_lookup_key;
+    key := key + #0 + document_key + #0 + preceding_text;
+    text := '';
+    if (key = m_local_repair_query_key) and (m_local_repair_text <> '') and
+        ((candidates[0].text = m_local_repair_draft) or
+        (candidates[0].text = m_local_repair_text)) then
+        text := m_local_repair_text
+    else
+    begin
+        try
+            if not m_long_local_repair.try_repair(m_composition_text,
+                candidates[0].text, document_key, preceding_text, text,
+                aligned_pinyin, minimum_word_ratio) then Exit;
+        except
+            Exit;
+        end;
+        if (text = '') or (Length(text) <> expected_units) then Exit;
+        original_path := get_segment_path_for_candidate(candidates[0], source_indices[0]);
+        text := guard_local_repair_words(m_dictionary, candidates[0].text,
+            text, original_path, aligned_pinyin, minimum_word_ratio);
+        m_local_repair_query_key := key;
+        m_local_repair_text := text;
+        m_local_repair_draft := candidates[0].text;
+    end;
+    if text = candidates[0].text then Exit;
+    // If repair selects an existing visible item, swap the records and their
+    // source indices together. Otherwise replace only the first visible slot.
+    for index := 1 to High(candidates) do
+        if (candidates[index].text = text) and (candidates[index].comment = '') then
+        begin
+            saved := candidates[0];
+            saved_source := source_indices[0];
+            candidates[0] := candidates[index];
+            source_indices[0] := source_indices[index];
+            candidates[index] := saved;
+            source_indices[index] := saved_source;
+            sync_paging_pool;
+            Exit;
+        end;
+    existing := -1;
+    for index := 0 to High(m_candidates) do
+        if (m_candidates[index].text = text) and (m_candidates[index].comment = '') then
+        begin
+            existing := index;
+            Break;
+        end;
+    if existing < 0 then
+    begin
+        candidate := Default(TncCandidate);
+        candidate.text := text;
+        candidate.score := candidates[0].score;
+        candidate.source := cs_rule;
+        candidate.display_kind := cdk_default;
+        existing := Length(m_candidates);
+        SetLength(m_candidates, existing + 1);
+        m_candidates[existing] := candidate;
+        path := '';
+        original_path := get_segment_path_for_candidate(candidates[0], source_indices[0]);
+        original_segments := original_path.Split([#3], TStringSplitOptions.ExcludeEmpty);
+        if StringReplace(original_path, #3, '', [rfReplaceAll]) = candidates[0].text then
+        begin
+            position := 1;
+            for segment in original_segments do
+            begin
+                replacement := Copy(text, position, Length(segment));
+                if path <> '' then path := path + #3;
+                if replacement = segment then path := path + segment
+                else
+                    for unit_index := 1 to Length(replacement) do
+                    begin
+                        if unit_index > 1 then path := path + #3;
+                        path := path + replacement[unit_index];
+                    end;
+                Inc(position, Length(segment));
+            end;
+        end;
+        if path = '' then
+            for index := 1 to Length(text) do
+            begin
+                if path <> '' then path := path + #3;
+                path := path + text[index];
+            end;
+        remember_segment_path_for_candidate(text, '', path);
+    end;
+    candidates[0] := m_candidates[existing];
+    source_indices[0] := existing;
+    sync_paging_pool;
+end;
+
 procedure TncEngine.normalize_page_and_selection;
 var
     page_size: Integer;
@@ -189960,6 +190156,7 @@ var
             begin
                 build_visible_long_sentence_candidate_pool_local;
             end;
+            apply_visible_local_repair(Result, visible_source_indices, expected_units);
             if (Length(Result) > 0) and
                 (Trim(Result[0].comment) = '') and
                 (get_candidate_text_unit_count(Trim(Result[0].text)) =

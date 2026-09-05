@@ -168,6 +168,8 @@ extern "C" __declspec(dllexport) void* __cdecl nc_pt_create(
         options.SetExecutionMode(ExecutionMode::ORT_SEQUENTIAL);
         options.SetIntraOpNumThreads(std::max(1, intra_threads));
         options.SetInterOpNumThreads(1);
+        // Sessions share the host CPU with lattice decoding and each other.
+        options.AddConfigEntry("session.force_spinning_stop", "1");
         options.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
         auto handle = std::make_unique<SessionHandle>();
         handle->session = std::make_unique<Ort::Session>(Environment(), model_path, options);
@@ -362,6 +364,7 @@ extern "C" __declspec(dllexport) void* __cdecl nc_pg_create(
         options.SetExecutionMode(ExecutionMode::ORT_SEQUENTIAL);
         options.SetIntraOpNumThreads(std::max(1, intra_threads));
         options.SetInterOpNumThreads(1);
+        options.AddConfigEntry("session.force_spinning_stop", "1");
         options.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
         handle->session = std::make_unique<Ort::Session>(
             Environment(), model_path, options);
@@ -2362,6 +2365,7 @@ extern "C" __declspec(dllexport) void* __cdecl nc_lc_create(
         options.SetExecutionMode(ExecutionMode::ORT_SEQUENTIAL);
         options.SetIntraOpNumThreads(std::max(1, intra_threads));
         options.SetInterOpNumThreads(1);
+        options.AddConfigEntry("session.force_spinning_stop", "1");
         options.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
         handle->session = std::make_unique<Ort::Session>(
             Environment(), model_path, options);
@@ -2858,6 +2862,7 @@ extern "C" __declspec(dllexport) void* __cdecl nc_lcg_create(
         options.SetExecutionMode(ExecutionMode::ORT_SEQUENTIAL);
         options.SetIntraOpNumThreads(std::max(1, intra_threads));
         options.SetInterOpNumThreads(1);
+        options.AddConfigEntry("session.force_spinning_stop", "1");
         options.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
         handle->session = std::make_unique<Ort::Session>(
             Environment(), model_path, options);
@@ -2939,3 +2944,5 @@ extern "C" __declspec(dllexport) void __cdecl nc_lcg_destroy(
     void* opaque_handle) {
     delete static_cast<LocalGeneratorHandle*>(opaque_handle);
 }
+
+#include "nc_local_repair_ort.inc"

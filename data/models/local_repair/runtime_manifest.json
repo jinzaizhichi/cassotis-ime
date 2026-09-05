@@ -1,0 +1,101 @@
+{
+  "format": 2,
+  "enabled": true,
+  "model": "pinyin-constrained local correction",
+  "minimum_word_ratio": 0.01,
+  "word_calibration": {
+    "rows": 3600,
+    "split": "dev",
+    "minimum_word_ratio": 0.01,
+    "checkpoint_sha256": "371204f81f6d82f4677b5b235afad5bb04cb8829f07cd2cf4b7d67622394556f",
+    "baseline_top1": 1928,
+    "top1": 2033,
+    "baseline_top2": 2101,
+    "top2": 2192,
+    "rescues": 163,
+    "harms": 58,
+    "net": 105,
+    "changed": 864,
+    "observed_paths": 1808
+  },
+  "no_context": {
+    "edit": 0.8,
+    "margin": 0.0,
+    "max_edits": 4,
+    "max_spans": 2
+  },
+  "document_context": {
+    "edit": 0.9,
+    "margin": 0.0,
+    "max_edits": 4,
+    "max_spans": 2
+  },
+  "source_model": "hfl/chinese-macbert-base",
+  "source_revision": "a986e004d2a7f2a1c2f5a3edef4e20604a974ed1",
+  "license": "Apache-2.0",
+  "teacher_url": "https://huggingface.co/hfl/chinese-macbert-base",
+  "checkpoint_sha256": "371204f81f6d82f4677b5b235afad5bb04cb8829f07cd2cf4b7d67622394556f",
+  "max_characters": 40,
+  "context_characters": 256,
+  "dictionary_constraints_sha256": "5b5f5464f07071b2cf913e0f950bd182a5552c7361487355b733755ede3c6dd8",
+  "independent_calibration": {
+    "no_context": {
+      "rows": 3600,
+      "baseline_top1": 1928,
+      "top1": 2031,
+      "rescues": 182,
+      "harms": 79,
+      "net": 103,
+      "baseline_top2": 2101,
+      "thresholds": {
+        "edit": 0.8,
+        "margin": 0.0,
+        "max_edits": 4,
+        "max_spans": 2
+      },
+      "proposals": 1034,
+      "top2": 2181,
+      "split": "dev",
+      "eligible": 3565,
+      "checkpoint": "D:\\cassotis_ime\\out\\local_repair_20260905\\models\\student6\\epoch_6.pt",
+      "checkpoint_sha256": "371204f81f6d82f4677b5b235afad5bb04cb8829f07cd2cf4b7d67622394556f",
+      "inference_seconds": 0.0,
+      "gate_pass": true,
+      "context_dir": null,
+      "context_tail": 256,
+      "mask_disagreements": false
+    },
+    "document_context": {
+      "rows": 3600,
+      "baseline_top1": 1928,
+      "top1": 2147,
+      "rescues": 273,
+      "harms": 54,
+      "net": 219,
+      "baseline_top2": 2101,
+      "thresholds": {
+        "edit": 0.9,
+        "margin": 0.0,
+        "max_edits": 4,
+        "max_spans": 2
+      },
+      "proposals": 1005,
+      "top2": 2293,
+      "split": "dev",
+      "eligible": 3565,
+      "checkpoint": "D:\\cassotis_ime\\out\\local_repair_20260905\\models\\student6\\epoch_6.pt",
+      "checkpoint_sha256": "371204f81f6d82f4677b5b235afad5bb04cb8829f07cd2cf4b7d67622394556f",
+      "inference_seconds": 0.0,
+      "gate_pass": true,
+      "context_dir": "out\\local_repair_20260905\\data\\contexts",
+      "context_tail": 256,
+      "mask_disagreements": false
+    }
+  },
+  "files": {
+    "context_int8.onnx": "eb3778b116cc1000ce86e980c26c6f376b4030b24ab4675aae7466e4feecd218",
+    "query_int8.onnx": "558f6c89bfd66ebbb2217cec577cc2e62b125cd2a58bdcff10c673a0d1b8aec2",
+    "vocab.json": "43b7a1613412edbe08a35147e567f6a795f3aeba719e872096208e6905c0ea47",
+    "readings.json": "cf4021fec90600462da7bd111928326aa8037b1c471e2984d6616e1cadce3baa"
+  }
+}

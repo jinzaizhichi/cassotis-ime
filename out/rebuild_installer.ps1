@@ -86,7 +86,12 @@ $runtimePayloadFiles = @(
     'out\local_completion\local_completion_path_ranker_int8.onnx',
     'out\local_completion\local_completion_generator_int8.onnx',
     'out\local_completion\local_completion_index.bin',
-    'out\local_completion\model_manifest.json'
+    'out\local_completion\model_manifest.json',
+    'out\local_repair\context_int8.onnx',
+    'out\local_repair\query_int8.onnx',
+    'out\local_repair\vocab.json',
+    'out\local_repair\readings.json',
+    'out\local_repair\runtime_manifest.json'
 )
 
 $requiredFiles = @(
@@ -94,7 +99,9 @@ $requiredFiles = @(
     'version.props'
 ) + $runtimePayloadFiles + @(
     'third_party\onnxruntime\LICENSE',
-    'third_party\onnxruntime\ThirdPartyNotices.txt'
+    'third_party\onnxruntime\ThirdPartyNotices.txt',
+    'third_party\macbert\LICENSE',
+    'third_party\macbert\NOTICE'
 )
 
 foreach ($relativePath in $requiredFiles) {

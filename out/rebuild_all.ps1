@@ -1059,6 +1059,9 @@ function build_and_copy_pinyin_transformer_runtime
     $model_target = Join-Path $script_dir 'pinyin_transformer'
     $local_completion_source = Join-Path $root_dir 'data\models\local_completion'
     $local_completion_target = Join-Path $script_dir 'local_completion'
+    $repair_source = Join-Path $root_dir 'data\models\local_repair'
+    $repair_target = Join-Path $script_dir 'local_repair'
+    $repair_files = @('context_int8.onnx', 'query_int8.onnx', 'vocab.json', 'readings.json', 'runtime_manifest.json')
     $required_sources = @(
         $native_build,
         (Join-Path $runtime_source 'onnxruntime.dll'),
@@ -1072,6 +1075,7 @@ function build_and_copy_pinyin_transformer_runtime
         (Join-Path $local_completion_source 'local_completion_index.bin'),
         (Join-Path $local_completion_source 'model_manifest.json')
     )
+    foreach ($name in $repair_files) { $required_sources += Join-Path $repair_source $name }
     foreach ($required_source in $required_sources)
     {
         if (-not (Test-Path -LiteralPath $required_source))
@@ -1111,6 +1115,11 @@ function build_and_copy_pinyin_transformer_runtime
     Copy-Item -Force -LiteralPath (Join-Path $local_completion_source 'local_completion_generator_int8.onnx') -Destination $local_completion_target
     Copy-Item -Force -LiteralPath (Join-Path $local_completion_source 'local_completion_index.bin') -Destination $local_completion_target
     Copy-Item -Force -LiteralPath (Join-Path $local_completion_source 'model_manifest.json') -Destination $local_completion_target
+    New-Item -ItemType Directory -Force -Path $repair_target | Out-Null
+    foreach ($name in $repair_files)
+    {
+        publish_runtime_file (Join-Path $repair_source $name) (Join-Path $repair_target $name)
+    }
 }
 
 stop_engine_host

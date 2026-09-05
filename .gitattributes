@@ -1,0 +1,2 @@
+# Preserve byte-level checksums recorded by the local repair model manifest.
+/data/models/local_repair/*.json -text whitespace=blank-at-eol,blank-at-eof,space-before-tab,cr-at-eol
