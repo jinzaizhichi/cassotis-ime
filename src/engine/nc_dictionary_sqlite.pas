@@ -168,6 +168,7 @@ type
         m_contains_popularity_index_ready: Boolean;
         function ensure_open: Boolean;
         function open_internal(const defer_optional_model_loads: Boolean): Boolean;
+        procedure open_user_connection;
         function get_module_dir: string;
         function find_schema_path: string;
         function load_schema_text(out schema_text: string): Boolean;
@@ -277,6 +278,7 @@ type
         destructor Destroy; override;
         function open: Boolean;
         function open_deferred: Boolean;
+        function reload_user_dictionary: Boolean;
         procedure close;
         procedure prewarm_short_lookup_caches;
         function get_prefix_popularity_hint(const prefix: string): Integer;
@@ -9901,6 +9903,31 @@ begin
         end;
     end;
 
+    open_user_connection;
+
+    if m_base_ready and m_user_ready and m_prune_user_entries_on_open and
+        (not m_defer_optional_model_loads) then
+    begin
+        migrate_user_entries;
+        prune_user_entries_existing_in_base;
+        prune_suspicious_user_entries;
+    end;
+
+    if m_user_ready then
+    begin
+        m_user_data_version := 0;
+        m_last_user_data_version_check_tick := 0;
+        refresh_user_data_version_if_changed(True);
+    end;
+
+    m_ready := m_base_ready or m_user_ready;
+    Result := m_ready;
+end;
+
+procedure TncSqliteDictionary.open_user_connection;
+begin
+    m_user_ready := False;
+    m_user_initialization_deferred := False;
     if m_user_db_path <> '' then
     begin
         if m_defer_optional_model_loads and
@@ -9937,24 +9964,6 @@ begin
             end;
         end;
     end;
-
-    if m_base_ready and m_user_ready and m_prune_user_entries_on_open and
-        (not m_defer_optional_model_loads) then
-    begin
-        migrate_user_entries;
-        prune_user_entries_existing_in_base;
-        prune_suspicious_user_entries;
-    end;
-
-    if m_user_ready then
-    begin
-        m_user_data_version := 0;
-        m_last_user_data_version_check_tick := 0;
-        refresh_user_data_version_if_changed(True);
-    end;
-
-    m_ready := m_base_ready or m_user_ready;
-    Result := m_ready;
 end;
 
 function TncSqliteDictionary.open: Boolean;
@@ -9965,6 +9974,33 @@ end;
 function TncSqliteDictionary.open_deferred: Boolean;
 begin
     Result := open_internal(True);
+end;
+
+function TncSqliteDictionary.reload_user_dictionary: Boolean;
+begin
+    Result := False;
+    if m_write_batch_depth > 0 then
+    begin
+        Exit;
+    end;
+
+    // User learning/checkpoints must not discard the immutable base models.
+    // Reopen only this connection, also supporting restored user databases.
+    clear_cached_user_statements;
+    m_user_ready := False;
+    if m_user_connection <> nil then
+    begin
+        m_user_connection.close;
+    end;
+    clear_user_read_caches;
+    m_literal_user_words_available := -1;
+    m_user_data_version := 0;
+    m_last_user_data_version_check_tick := 0;
+    open_user_connection;
+    refresh_user_data_version_if_changed(True);
+    m_ready := m_base_ready or m_user_ready;
+    Result := m_user_ready or m_user_initialization_deferred or
+        (m_user_db_path = '');
 end;
 
 procedure TncSqliteDictionary.close;

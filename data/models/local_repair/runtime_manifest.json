@@ -3,6 +3,14 @@
   "enabled": true,
   "model": "pinyin-constrained local correction",
   "minimum_word_ratio": 0.01,
+  "no_context_refinement_passes": 2,
+  "refinement_validation": {
+    "checkpoint_unchanged": true,
+    "policy": "after guarded first edit only; at most four total edits and two spans; no reversals",
+    "dev": { "rows": 3600, "top1_before": 2019, "top1_after": 2024, "top2_before": 2178, "top2_after": 2183 },
+    "test": { "rows": 3599, "top1_before": 2042, "top1_after": 2060, "top2_before": 2229, "top2_after": 2247 },
+    "measurement": "guard-point trace and native host; frozen independent policy, not benchmark training"
+  },
   "word_calibration": {
     "rows": 3600,
     "split": "dev",

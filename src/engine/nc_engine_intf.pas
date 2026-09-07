@@ -13,6 +13,7 @@ uses
     nc_types,
     nc_shortcut,
     nc_dictionary_intf,
+    nc_local_repair_guard,
     nc_dictionary_sqlite,
     nc_document_context_model,
     nc_pinyin_parser,
@@ -460,6 +461,16 @@ type
             out minimum_word_ratio: Double): Boolean;
     end;
 
+    IncLongLocalRepairPolicy = interface
+        ['{BB45A804-567C-4FE5-AC84-4439A7AFF353}']
+        function allows_no_context_refinement: Boolean;
+    end;
+
+    TncLocalRepairGuardDebug = record
+        query_text, draft, proposal, segment_path, aligned_pinyin, guarded: string;
+        invoked, accepted: Boolean;
+    end;
+
     TncLongRankingStageDebug = record
         stage_name: string;
         top1_text: string;
@@ -596,6 +607,7 @@ type
         m_one_key_completion_score: Integer;
         m_long_neural_completion_request: TncLongNeuralCompletionRequest;
         m_has_long_neural_completion_request: Boolean;
+        m_long_neural_completion_prefix_locked: Boolean;
         m_completion_feedback_origin_prefix: string;
         m_allow_one_key_completion_lookup: Boolean;
         m_visible_candidates_cache: TncCandidateList;
@@ -784,7 +796,13 @@ type
         m_runtime_long_retained_exact_edges: TncLongRetainedExactEdgeArray;
         m_long_neural_reranker: IncLongNeuralReranker;
         m_long_local_repair: IncLongLocalRepair;
+        m_long_local_repair_policy: IncLongLocalRepairPolicy;
         m_local_repair_query_key, m_local_repair_text, m_local_repair_draft: string;
+        m_local_repair_original_path: string;
+        m_local_repair_validated: TncValidatedRepairPath;
+        m_repaired_completion_query_key: string;
+        m_debug_capture_local_repair: Boolean;
+        m_debug_local_repair_guard: TncLocalRepairGuardDebug;
         m_long_complete_pool_pairwise_text: string;
         m_long_complete_pool_pairwise_insert_rank: Integer;
         m_debug_long_chain_beam_width: Integer;
@@ -827,6 +845,7 @@ type
             const apply_configured_policy: Boolean = True): Boolean;
         procedure free_dictionary_provider(var provider: TncDictionaryProvider);
         function get_active_dictionary_path: string;
+        function create_dictionary_from_paths(const base_path, user_path: string): TncDictionaryProvider;
         function get_dictionary_write_time(const path: string): TDateTime;
         function visible_candidates_cache_is_current(
             const page_size: Integer): Boolean;
@@ -841,6 +860,8 @@ type
         procedure normalize_page_and_selection;
         procedure apply_visible_local_repair(var candidates: TncCandidateList;
             var source_indices: TArray<Integer>; const expected_units: Integer);
+        function has_validated_completion_prefix: Boolean;
+        procedure refresh_validated_prefix_completion;
         function get_source_rank(const source: TncCandidateSource): Integer;
         function get_context_variants(const context_text: string): TArray<string>;
         function get_session_text_bonus(const candidate_text: string): Integer;
@@ -1046,6 +1067,7 @@ type
             const learning_locked: Boolean = False);
         procedure clear_pending_commit;
         procedure update_dictionary_state;
+        procedure invalidate_dictionary_lookup_caches;
         procedure toggle_input_mode;
         procedure reset_debug_target_recall_metrics;
         function is_debug_target_recall_prefix(const text: string): Boolean;
@@ -1061,7 +1083,8 @@ type
     public
         constructor create(const config: TncEngineConfig;
             const defer_optional_dictionary_models: Boolean = False;
-            const allow_one_key_completion_lookup: Boolean = True);
+            const allow_one_key_completion_lookup: Boolean = True;
+            const initial_dictionary: TncDictionaryProvider = nil);
         destructor Destroy; override;
         procedure reset(const preserve_document_context: Boolean = False);
         procedure update_config(const config: TncEngineConfig);
@@ -1085,6 +1108,10 @@ type
             out completions: TncOneKeyCompletionList): Boolean;
         function debug_get_long_one_key_completion_pool(
             out completions: TncOneKeyCompletionList): Boolean;
+{$IFDEF CASSOTIS_ORACLE_DIAGNOSTICS}
+        function debug_oracle_long_completion(const prefix_text,
+            syllable_text, path_text: string): Boolean;
+{$ENDIF}
         function debug_get_lexical_one_key_completion(
             out completion: TncOneKeyCompletion): Boolean;
         procedure debug_enable_long_one_key_completion_pool_capture(
@@ -1147,6 +1174,8 @@ type
         function get_debug_phrase_context_pair_count(const left_text: string; const candidate_text: string): Integer;
         function get_debug_last_commit_segment_path: string;
         function get_debug_candidate_segment_path(const candidate_index: Integer): string;
+        procedure debug_enable_local_repair_capture(const enabled: Boolean);
+        function debug_get_local_repair_guard: TncLocalRepairGuardDebug;
         function get_debug_target_recall(const target_text: string): TncTargetRecallDebug;
         function get_debug_long_beam_states: TncLongBeamStateDebugArray;
         function get_debug_long_exact_edge_stages:
@@ -1201,7 +1230,6 @@ function nc_search_budget_should_stop(const mode: TncSearchBudgetMode;
 implementation
 
 uses
-    nc_local_repair_guard,
     nc_long_search_ranker_model,
     nc_long_edge_retention_model,
     nc_long_exact_edge_lattice_ranker_model,
@@ -1539,7 +1567,8 @@ end;
 
 constructor TncEngine.create(const config: TncEngineConfig;
     const defer_optional_dictionary_models: Boolean = False;
-    const allow_one_key_completion_lookup: Boolean = True);
+    const allow_one_key_completion_lookup: Boolean = True;
+    const initial_dictionary: TncDictionaryProvider = nil);
 begin
     inherited create;
     m_long_neural_reranker := nil;
@@ -1765,7 +1794,15 @@ begin
     m_forced_visible_top_candidate.dict_weight := 0;
     m_forced_visible_top_composition_text := '';
     m_forced_visible_top_lookup_key := '';
-    set_dictionary_provider(create_dictionary_from_config);
+    if initial_dictionary <> nil then
+    begin
+        // Ownership is transferred, without opening the installed dictionary.
+        set_dictionary_provider(initial_dictionary);
+    end
+    else
+    begin
+        set_dictionary_provider(create_dictionary_from_config);
+    end;
 end;
 
 destructor TncEngine.Destroy;
@@ -4306,6 +4343,8 @@ begin
     m_local_repair_query_key := '';
     m_local_repair_text := '';
     m_local_repair_draft := '';
+    m_local_repair_original_path := '';
+    m_local_repair_validated := Default(TncValidatedRepairPath);
     m_context_db_bonus_cache_key := '';
     SetLength(m_candidates, 0);
     SetLength(m_visible_candidates_cache, 0);
@@ -4773,6 +4812,10 @@ begin
         m_dictionary.lookup_one_key_completions(query_text, completions);
 end;
 
+{$IFDEF CASSOTIS_ORACLE_DIAGNOSTICS}
+{$I '..\..\tests\nc_tab_prefix_oracle_engine.inc'}
+{$ENDIF}
+
 function TncEngine.debug_get_long_one_key_completion_pool(
     out completions: TncOneKeyCompletionList): Boolean;
 begin
@@ -5005,6 +5048,13 @@ begin
         m_dictionary.set_fuzzy_pinyin_config(
             m_config.fuzzy_pinyin_enabled, m_config.fuzzy_pinyin_rules);
     end;
+    invalidate_dictionary_lookup_caches;
+    m_last_dictionary_reload_check_tick := 0;
+    update_dictionary_state;
+end;
+
+procedure TncEngine.invalidate_dictionary_lookup_caches;
+begin
     m_context_db_bonus_cache_key := '';
     if m_context_db_bonus_cache <> nil then
     begin
@@ -5023,8 +5073,6 @@ begin
         m_effective_pinyin_parse_cache.Clear;
     end;
     clear_lookup_bonus_caches;
-    m_last_dictionary_reload_check_tick := 0;
-    update_dictionary_state;
 end;
 
 procedure TncEngine.set_long_neural_reranker(
@@ -5032,10 +5080,14 @@ procedure TncEngine.set_long_neural_reranker(
 begin
     m_long_neural_reranker := reranker;
     m_long_local_repair := nil;
+    m_long_local_repair_policy := nil;
     m_local_repair_query_key := '';
     m_local_repair_text := '';
     m_local_repair_draft := '';
+    m_local_repair_original_path := '';
+    m_local_repair_validated := Default(TncValidatedRepairPath);
     Supports(reranker, IncLongLocalRepair, m_long_local_repair);
+    Supports(reranker, IncLongLocalRepairPolicy, m_long_local_repair_policy);
     if (m_long_local_repair <> nil) and (m_document_context_model <> nil) then
     begin
         m_long_local_repair.set_document_context(
@@ -5249,7 +5301,6 @@ end;
 
 function TncEngine.create_dictionary_from_config: TncDictionaryProvider;
 var
-    sqlite_dict: TncSqliteDictionary;
     base_path: string;
     user_path: string;
 begin
@@ -5263,7 +5314,17 @@ begin
             Result.set_debug_mode(m_config.debug_mode);
             Exit;
         end;
+    end;
+    Result := create_dictionary_from_paths(base_path, user_path);
+end;
 
+function TncEngine.create_dictionary_from_paths(const base_path,
+    user_path: string): TncDictionaryProvider;
+var
+    sqlite_dict: TncSqliteDictionary;
+begin
+    if (base_path <> '') or (user_path <> '') then
+    begin
         sqlite_dict := TncSqliteDictionary.create(base_path, user_path);
         if (m_defer_optional_dictionary_models and
             sqlite_dict.open_deferred) or
@@ -5305,15 +5366,12 @@ begin
 end;
 
 procedure TncEngine.update_dictionary_state;
-var
-    base_path: string;
 begin
-    base_path := get_active_dictionary_path;
-    if (m_dictionary is TncSqliteDictionary) and (base_path <> '') then
+    if m_dictionary is TncSqliteDictionary then
     begin
-        m_dictionary_path := base_path;
+        m_dictionary_path := TncSqliteDictionary(m_dictionary).db_path;
         m_dictionary_write_time := get_dictionary_write_time(m_dictionary_path);
-        m_user_dictionary_path := get_default_user_dictionary_path;
+        m_user_dictionary_path := TncSqliteDictionary(m_dictionary).user_db_path;
         m_user_dictionary_write_time := get_dictionary_write_time(m_user_dictionary_path);
     end
     else
@@ -5364,12 +5422,21 @@ begin
         user_write_time := 0;
     end;
 
-    if (current_write_time <= m_dictionary_write_time) and (user_write_time <= m_user_dictionary_write_time) then
+    if current_write_time <> m_dictionary_write_time then
     begin
+        set_dictionary_provider(create_dictionary_from_paths(m_dictionary_path,
+            m_user_dictionary_path));
         Exit;
     end;
 
-    set_dictionary_provider(create_dictionary_from_config);
+    if (user_write_time <> m_user_dictionary_write_time) and
+        (m_dictionary is TncSqliteDictionary) and
+        TncSqliteDictionary(m_dictionary).reload_user_dictionary then
+    begin
+        invalidate_dictionary_lookup_caches;
+        m_user_dictionary_write_time :=
+            get_dictionary_write_time(m_user_dictionary_path);
+    end;
 end;
 
 procedure TncEngine.prewarm_dictionary_caches;
@@ -5693,6 +5760,7 @@ end;
 
 procedure TncEngine.clear_one_key_completion;
 begin
+    m_repaired_completion_query_key := '';
     m_one_key_completion := Default(TncOneKeyCompletion);
     m_debug_lexical_one_key_completion := Default(TncOneKeyCompletion);
     SetLength(m_debug_long_one_key_completion_pool, 0);
@@ -5701,6 +5769,7 @@ begin
     m_long_neural_completion_request :=
         Default(TncLongNeuralCompletionRequest);
     m_has_long_neural_completion_request := False;
+    m_long_neural_completion_prefix_locked := False;
 end;
 
 procedure TncEngine.clear_one_key_completion_feedback_target;
@@ -5968,6 +6037,72 @@ begin
     end;
 end;
 
+function TncEngine.has_validated_completion_prefix: Boolean;
+var key: string;
+begin
+    Result := False;
+    if (GetEnvironmentVariable('CASSOTIS_TAB_REPAIRED_PREFIX') <> '1') or
+        (not m_allow_one_key_completion_lookup) or (m_dictionary = nil) or
+        (m_config.input_mode <> im_chinese) or m_has_pending_commit or
+        (m_long_local_repair = nil) or (m_page_index <> 0) or
+        (m_config.pinyin_input_scheme <> pis_full_pinyin) or
+        (m_config.dictionary_variant <> dv_simplified) or
+        m_config.fuzzy_pinyin_enabled or (m_confirmed_text <> '') or
+        not m_visible_candidates_cache_valid or
+        (m_visible_candidates_cache_composition_text <> m_composition_text) or
+        (m_visible_candidates_cache_lookup_key <> m_last_lookup_key) or
+        (m_visible_candidates_cache_page_index <> 0) or
+        (Length(m_visible_candidates_cache) = 0) or
+        (Length(m_visible_candidates_cache) <> Length(m_visible_candidate_source_indices_cache)) or
+        (Length(m_local_repair_text) < 6) or (Length(m_local_repair_text) > 40) or
+        (m_local_repair_text = m_local_repair_draft) or
+        (m_visible_candidates_cache[0].text <> m_local_repair_text) or
+        (m_visible_candidates_cache[0].comment <> '') or
+        (m_visible_candidates_cache[0].source = cs_user) or
+        not m_local_repair_validated.exact_path or
+        (m_local_repair_validated.text <> m_local_repair_text) or
+        (m_local_repair_validated.segment_path = '') then Exit;
+    if (GetEnvironmentVariable('CASSOTIS_TAB_REPAIR_TRUST') = '1') and
+        (m_local_repair_validated.lm_gain < 80) then Exit;
+    key := m_composition_text + #0 + m_last_lookup_key + #0;
+    if m_document_context_model <> nil then
+        key := key + m_document_context_model.document_key + #0 +
+            m_document_context_model.semantic_tail
+    else key := key + #0;
+    Result := key = m_local_repair_query_key;
+end;
+
+procedure TncEngine.refresh_validated_prefix_completion;
+var
+    previous, completion: TncOneKeyCompletion;
+    syllables: TncPinyinParseResult;
+    query_key: string;
+    score: Integer;
+begin
+    if not has_validated_completion_prefix then Exit;
+    // Lexical/user completion is a separate priority lane. A repaired sentence
+    // only replaces the old long-continuation request, never lexical ranking.
+    if m_one_key_completion.source in [okcs_user_exact, okcs_base_exact, okcs_transition] then Exit;
+    previous := m_one_key_completion;
+    query_key := normalize_pinyin_text(m_composition_text);
+    syllables := get_effective_compact_pinyin_syllables(m_composition_text, False);
+    clear_one_key_completion;
+    if (previous.source = okcs_document_copy) and
+        previous.text.StartsWith(m_local_repair_text) and
+        previous.full_pinyin.StartsWith(query_key) then
+    begin
+        m_one_key_completion := previous;
+        m_one_key_completion_query_prefix := query_key;
+        Exit;
+    end;
+    if try_refresh_long_one_key_completion(syllables, query_key, previous, completion, score) then
+    begin
+        m_one_key_completion := completion;
+        m_one_key_completion_query_prefix := query_key;
+        m_one_key_completion_score := score;
+    end;
+end;
+
 function TncEngine.try_refresh_long_one_key_completion(
     const syllables: TncPinyinParseResult;
     const compact_query: string;
@@ -6004,6 +6139,10 @@ type
         score: Integer;
     end;
 var
+    completion_candidates: TncCandidateList;
+    completion_sources: TArray<Integer>;
+    corrected_prefix: Boolean;
+    corrected_path: string;
     top_index: Integer;
     second_index: Integer;
     top_path: string;
@@ -6038,6 +6177,40 @@ var
     second_best_score: Integer;
     suffix_compact_pinyin: string;
 
+    function completion_path(const candidate_idx: Integer): string;
+    var source_idx: Integer;
+    begin
+        if corrected_prefix and (candidate_idx = 0) and (corrected_path <> '') then
+            Exit(corrected_path);
+        source_idx := candidate_idx;
+        if candidate_idx < Length(completion_sources) then
+            source_idx := completion_sources[candidate_idx];
+        Result := get_segment_path_for_candidate(completion_candidates[candidate_idx], source_idx);
+    end;
+
+    procedure adopt_corrected_prefix;
+    var
+        visible: TncCandidateList;
+        parts: TArray<string>;
+        unit_idx: Integer;
+    begin
+        // Tab consumes the settled visible result; it must never trigger an
+        // earlier candidate-ranking pass while build_candidates is running.
+        if not has_validated_completion_prefix then Exit;
+        visible := m_visible_candidates_cache;
+        if Length(visible[0].text) <> Length(syllables) then Exit;
+        parts := m_local_repair_validated.aligned_pinyin.Split([#3], TStringSplitOptions.ExcludeEmpty);
+        if Length(parts) <> Length(syllables) then Exit;
+        for unit_idx := 0 to High(parts) do
+            if parts[unit_idx] <> normalize_pinyin_text(syllables[unit_idx].text) then Exit;
+        // Text, alignment and resegmented exact path are produced by the same
+        // guard invocation. Never splice corrected text into old word lengths.
+        corrected_path := m_local_repair_validated.segment_path;
+        completion_candidates := visible;
+        completion_sources := Copy(m_visible_candidate_source_indices_cache);
+        corrected_prefix := True;
+    end;
+
     function build_query_syllable_text: string;
     var
         syllable_idx: Integer;
@@ -6064,11 +6237,11 @@ var
     function is_complete_candidate(const candidate_idx: Integer): Boolean;
     begin
         Result := (candidate_idx >= 0) and
-            (candidate_idx < Length(m_candidates)) and
-            (Trim(m_candidates[candidate_idx].text) <> '') and
-            (Trim(m_candidates[candidate_idx].comment) = '') and
+            (candidate_idx < Length(completion_candidates)) and
+            (Trim(completion_candidates[candidate_idx].text) <> '') and
+            (Trim(completion_candidates[candidate_idx].comment) = '') and
             (get_candidate_text_unit_count(
-            Trim(m_candidates[candidate_idx].text)) = Length(syllables));
+            Trim(completion_candidates[candidate_idx].text)) = Length(syllables));
     end;
 
     function query_key_for_span(const start_idx, unit_count: Integer): string;
@@ -6105,8 +6278,7 @@ var
         begin
             Exit;
         end;
-        encoded_path := Trim(get_segment_path_for_candidate(
-            m_candidates[candidate_idx], candidate_idx));
+        encoded_path := Trim(completion_path(candidate_idx));
         if encoded_path = '' then
         begin
             Exit;
@@ -6137,7 +6309,7 @@ var
             Inc(syllable_pos, segment_units);
         end;
         analysis.valid := (syllable_pos = Length(syllables)) and
-            SameText(plain_text, Trim(m_candidates[candidate_idx].text));
+            SameText(plain_text, Trim(completion_candidates[candidate_idx].text));
         Result := analysis.valid;
     end;
 
@@ -6275,9 +6447,9 @@ var
         end;
 
         anchor_text := StringReplace(path_text, #3, '', [rfReplaceAll]);
-        top_units := split_text_units(Trim(m_candidates[top_index].text));
+        top_units := split_text_units(Trim(completion_candidates[top_index].text));
         second_units := split_text_units(
-            Trim(m_candidates[second_index].text));
+            Trim(completion_candidates[second_index].text));
         anchor_units := split_text_units(anchor_text);
         if (Length(anchor_units) = 0) or
             (Length(anchor_units) > Length(top_units)) or
@@ -6290,8 +6462,8 @@ var
         second_prefix_count := Length(second_units) - Length(anchor_units);
         if (top_prefix_count <= 0) or (second_prefix_count <= 0) then
         begin
-            Result := SameText(Trim(m_candidates[top_index].text),
-                Trim(m_candidates[second_index].text));
+            Result := SameText(Trim(completion_candidates[top_index].text),
+                Trim(completion_candidates[second_index].text));
             Exit;
         end;
 
@@ -6375,7 +6547,7 @@ var
             suffix_key := normalize_pinyin_text(
                 items[selected_idx].value.suffix_pinyin);
             debug_completion := Default(TncOneKeyCompletion);
-            debug_completion.anchor_text := Trim(m_candidates[top_index].text);
+            debug_completion.anchor_text := Trim(completion_candidates[top_index].text);
             debug_completion.suffix_text :=
                 items[selected_idx].value.suffix_text;
             debug_completion.anchor_path :=
@@ -6402,9 +6574,16 @@ begin
     completion := Default(TncOneKeyCompletion);
     completion_score := Low(Integer);
     Result := False;
+    completion_candidates := m_candidates;
+    completion_sources := nil;
+    corrected_prefix := False;
+    corrected_path := '';
+    if m_dictionary <> nil then adopt_corrected_prefix;
+    // A failed alignment check must not silently revive the obsolete draft.
+    if has_validated_completion_prefix and (not corrected_prefix) then Exit;
     if (m_dictionary = nil) or
         (Length(syllables) < c_min_long_syllables) or
-        (compact_query = '') or (Length(m_candidates) = 0) or
+        (compact_query = '') or (Length(completion_candidates) = 0) or
         (not is_complete_candidate(0)) then
     begin
         Exit;
@@ -6412,7 +6591,7 @@ begin
 
     top_index := 0;
     second_index := -1;
-    for item_idx := 1 to Min(High(m_candidates), c_max_visible_scan - 1) do
+    for item_idx := 1 to Min(High(completion_candidates), c_max_visible_scan - 1) do
     begin
         if is_complete_candidate(item_idx) then
         begin
@@ -6428,8 +6607,7 @@ begin
     begin
         Exit;
     end;
-    top_path := Trim(get_segment_path_for_candidate(
-        m_candidates[top_index], top_index));
+    top_path := Trim(completion_path(top_index));
     if top_path = '' then
     begin
         Exit;
@@ -6440,15 +6618,15 @@ begin
     begin
         if analyze_candidate_path(second_index, second_analysis) then
         begin
-            second_path := Trim(get_segment_path_for_candidate(
-                m_candidates[second_index], second_index));
+            second_path := Trim(completion_path(second_index));
         end;
     end;
 
-    // A context-sensitive score margin cannot make an unrelated shared tail
-    // coherent. Only a genuinely uncontested complete path may bypass the
-    // prefix agreement check.
+    // Ordinary paths still need agreement. The separate experiment accepts a
+    // fully validated repaired prefix only with additional local LM support.
     top1_uncontested := second_index < 0;
+    if corrected_prefix and (GetEnvironmentVariable('CASSOTIS_TAB_REPAIR_TRUST') = '1') and
+        (m_local_repair_validated.lm_gain >= 80) then top1_uncontested := True;
 
     top1_anchor_path := '';
     for anchor_segment_count := Min(c_max_anchor_segments,
@@ -6513,19 +6691,20 @@ begin
         m_long_neural_completion_request.context_text :=
             trim_left_context_to_sentence(context_value, c_context_length);
         m_long_neural_completion_request.top1_text :=
-            Trim(m_candidates[top_index].text);
+            Trim(completion_candidates[top_index].text);
         m_long_neural_completion_request.top1_path := top_path;
         m_long_neural_completion_request.top1_anchor_path :=
             top1_anchor_path;
         if (second_index >= 0) and (top2_anchor_path <> '') then
         begin
             m_long_neural_completion_request.top2_text :=
-                Trim(m_candidates[second_index].text);
+                Trim(completion_candidates[second_index].text);
             m_long_neural_completion_request.top2_path := second_path;
             m_long_neural_completion_request.top2_anchor_path :=
                 top2_anchor_path;
         end;
         m_has_long_neural_completion_request := True;
+        m_long_neural_completion_prefix_locked := corrected_prefix;
     end;
 
     SetLength(anchors, 0);
@@ -6629,7 +6808,7 @@ begin
         context_value := m_external_left_context;
     end;
     context_value := trim_left_context_to_sentence(context_value +
-        Trim(m_candidates[top_index].text), c_context_length);
+        Trim(completion_candidates[top_index].text), c_context_length);
     SetLength(completion_texts, Length(items));
     for item_idx := 0 to High(items) do
     begin
@@ -6722,7 +6901,7 @@ begin
     end;
     completion := Default(TncOneKeyCompletion);
     completion.anchor_text :=
-        Trim(m_candidates[top_index].text);
+        Trim(completion_candidates[top_index].text);
     completion.suffix_text :=
         items[best_idx].value.suffix_text;
     completion.anchor_path :=
@@ -7272,6 +7451,9 @@ begin
     has_document_completion := try_refresh_document_copy_completion(
         compact_query, previous_completion, document_completion,
         document_completion_score);
+    if has_document_completion and has_validated_completion_prefix and
+        (not document_completion.text.StartsWith(m_local_repair_text)) then
+        has_document_completion := False;
     if has_document_completion then
     begin
         m_one_key_completion := document_completion;
@@ -140945,10 +141127,27 @@ procedure TncEngine.apply_visible_local_repair(var candidates: TncCandidateList;
 var
     text, path, key, segment, replacement, original_path: string;
     document_key, preceding_text, aligned_pinyin: string;
-    minimum_word_ratio: Double;
+    refined_text, refined_pinyin: string;
+    refinement_override: string;
+    minimum_word_ratio, refined_word_ratio: Double;
     index, existing, saved_source, position, unit_index: Integer;
     original_segments: TArray<string>;
     candidate, saved: TncCandidate;
+    repair_accepted: Boolean;
+    boundary_enabled, path_validation_enabled: Boolean;
+    validated, refined_path: TncValidatedRepairPath;
+    procedure remember_validated_path(const source_index: Integer);
+    begin
+        if not m_local_repair_validated.exact_path or
+            (m_local_repair_validated.text <> text) or (source_index < 0) or
+            (source_index >= Length(m_candidates)) or
+            (m_candidates[source_index].text <> text) then Exit;
+        m_candidate_segment_paths := Copy(m_candidate_segment_paths);
+        if Length(m_candidate_segment_paths) <= source_index then
+            SetLength(m_candidate_segment_paths, source_index + 1);
+        m_candidate_segment_paths[source_index] := m_local_repair_validated.segment_path;
+        remember_segment_path_for_candidate(text, '', m_local_repair_validated.segment_path);
+    end;
     procedure sync_paging_pool;
     var
         pool: TncCandidateList;
@@ -141020,20 +141219,87 @@ begin
         text := m_local_repair_text
     else
     begin
+        m_local_repair_validated := Default(TncValidatedRepairPath);
+        if m_debug_capture_local_repair then
+        begin
+            m_debug_local_repair_guard := Default(TncLocalRepairGuardDebug);
+            m_debug_local_repair_guard.query_text := m_composition_text;
+            m_debug_local_repair_guard.draft := candidates[0].text;
+            m_debug_local_repair_guard.segment_path :=
+                get_segment_path_for_candidate(candidates[0], source_indices[0]);
+            m_debug_local_repair_guard.invoked := True;
+        end;
         try
-            if not m_long_local_repair.try_repair(m_composition_text,
+            repair_accepted := m_long_local_repair.try_repair(m_composition_text,
                 candidates[0].text, document_key, preceding_text, text,
-                aligned_pinyin, minimum_word_ratio) then Exit;
+                aligned_pinyin, minimum_word_ratio);
+            if m_debug_capture_local_repair then
+            begin
+                m_debug_local_repair_guard.proposal := text;
+                m_debug_local_repair_guard.aligned_pinyin := aligned_pinyin;
+                m_debug_local_repair_guard.accepted := repair_accepted;
+            end;
+            if not repair_accepted then Exit;
         except
             Exit;
         end;
         if (text = '') or (Length(text) <> expected_units) then Exit;
         original_path := get_segment_path_for_candidate(candidates[0], source_indices[0]);
-        text := guard_local_repair_words(m_dictionary, candidates[0].text,
+        boundary_enabled := GetEnvironmentVariable('CASSOTIS_LOCAL_REPAIR_BOUNDARIES') <> '0';
+        path_validation_enabled := boundary_enabled or
+            (GetEnvironmentVariable('CASSOTIS_TAB_REPAIRED_PREFIX') = '1');
+        validated := Default(TncValidatedRepairPath);
+        if path_validation_enabled then
+        begin
+            validated := validate_local_repair_path(m_dictionary, candidates[0].text,
+                text, original_path, aligned_pinyin, minimum_word_ratio, boundary_enabled);
+            text := validated.text;
+        end
+        else text := guard_local_repair_words(m_dictionary, candidates[0].text,
             text, original_path, aligned_pinyin, minimum_word_ratio);
+        if m_debug_capture_local_repair then
+            m_debug_local_repair_guard.guarded := text;
+        // Reuse the guarded first pass as context, without changing its accepted
+        // positions or increasing the total edit budget. Contextual refinement
+        // has not passed a separate gate and remains on the original single pass.
+        refinement_override := GetEnvironmentVariable('CASSOTIS_LOCAL_REPAIR_REFINE');
+        if ((refinement_override = '1') or
+            ((refinement_override <> '0') and (m_long_local_repair_policy <> nil) and
+            m_long_local_repair_policy.allows_no_context_refinement)) and
+            (preceding_text = '') and (text <> candidates[0].text) then
+        begin
+            try
+                if m_long_local_repair.try_repair(m_composition_text, text,
+                    document_key, preceding_text, refined_text, refined_pinyin,
+                    refined_word_ratio) and (refined_pinyin = aligned_pinyin) and
+                    (refined_word_ratio = minimum_word_ratio) and
+                    valid_local_repair_refinement(candidates[0].text, text, refined_text) then
+                begin
+                    if path_validation_enabled then
+                    begin
+                        refined_path := validate_local_repair_path(m_dictionary,
+                            candidates[0].text, refined_text, original_path,
+                            aligned_pinyin, minimum_word_ratio, boundary_enabled);
+                        refined_text := refined_path.text;
+                    end
+                    else refined_text := guard_local_repair_words(m_dictionary,
+                        candidates[0].text, refined_text, original_path,
+                        aligned_pinyin, minimum_word_ratio);
+                    if valid_local_repair_refinement(candidates[0].text, text, refined_text) then
+                    begin
+                        text := refined_text;
+                        if path_validation_enabled then validated := refined_path;
+                    end;
+                end;
+            except
+                // A failed optional pass must retain the valid first result.
+            end;
+        end;
         m_local_repair_query_key := key;
         m_local_repair_text := text;
         m_local_repair_draft := candidates[0].text;
+        m_local_repair_original_path := original_path;
+        m_local_repair_validated := validated;
     end;
     if text = candidates[0].text then Exit;
     // If repair selects an existing visible item, swap the records and their
@@ -141047,6 +141313,7 @@ begin
             source_indices[0] := source_indices[index];
             candidates[index] := saved;
             source_indices[index] := saved_source;
+            remember_validated_path(source_indices[0]);
             sync_paging_pool;
             Exit;
         end;
@@ -141068,9 +141335,13 @@ begin
         SetLength(m_candidates, existing + 1);
         m_candidates[existing] := candidate;
         path := '';
+        if m_local_repair_validated.exact_path and
+            (m_local_repair_validated.text = text) then
+            path := m_local_repair_validated.segment_path;
         original_path := get_segment_path_for_candidate(candidates[0], source_indices[0]);
         original_segments := original_path.Split([#3], TStringSplitOptions.ExcludeEmpty);
-        if StringReplace(original_path, #3, '', [rfReplaceAll]) = candidates[0].text then
+        if (path = '') and
+            (StringReplace(original_path, #3, '', [rfReplaceAll]) = candidates[0].text) then
         begin
             position := 1;
             for segment in original_segments do
@@ -141097,6 +141368,7 @@ begin
     end;
     candidates[0] := m_candidates[existing];
     source_indices[0] := existing;
+    remember_validated_path(existing);
     sync_paging_pool;
 end;
 
@@ -191028,6 +191300,12 @@ end;
 
 function TncEngine.get_one_key_completion: TncOneKeyCompletion;
 begin
+    if has_validated_completion_prefix and
+        (m_local_repair_query_key <> m_repaired_completion_query_key) then
+    begin
+        refresh_validated_prefix_completion;
+        m_repaired_completion_query_key := m_local_repair_query_key;
+    end;
     Result := m_one_key_completion;
 end;
 
@@ -191154,6 +191432,8 @@ begin
         (m_one_key_completion.source <> okcs_long_transition)) or
         (not m_has_long_neural_completion_request) or
         (not same_request(request, m_long_neural_completion_request)) or
+        (m_long_neural_completion_prefix_locked and
+        ((completion_result.base_rank <> 1) or (completion_result.replace_units <> 0))) or
         (completion_result.base_rank < 1) or
         (completion_result.base_rank > 2) or
         (completion_result.replace_units < 0) or
@@ -191603,6 +191883,20 @@ begin
     Result := m_last_debug_commit_segment_path;
 end;
 
+procedure TncEngine.debug_enable_local_repair_capture(const enabled: Boolean);
+begin
+    m_debug_capture_local_repair := enabled;
+    m_debug_local_repair_guard := Default(TncLocalRepairGuardDebug);
+end;
+
+function TncEngine.debug_get_local_repair_guard: TncLocalRepairGuardDebug;
+begin
+    Result := Default(TncLocalRepairGuardDebug);
+    if m_debug_capture_local_repair and
+        (m_debug_local_repair_guard.query_text = m_composition_text) then
+        Result := m_debug_local_repair_guard;
+end;
+
 function TncEngine.get_debug_candidate_segment_path(const candidate_index: Integer): string;
 var
     source_index: Integer;
@@ -191615,9 +191909,11 @@ begin
         source_index := m_visible_candidate_source_indices_cache[candidate_index];
     end;
 
-    if (source_index >= 0) and (source_index < Length(m_candidate_segment_paths)) then
+    if (source_index >= 0) and (source_index < Length(m_candidates)) then
     begin
-        Result := m_candidate_segment_paths[source_index];
+        // Match the runtime guard: restored/generated candidates can keep their
+        // path in the text-keyed cache rather than the parallel source array.
+        Result := get_segment_path_for_candidate(m_candidates[source_index], source_index);
     end;
 end;
 
@@ -191785,13 +192081,11 @@ begin
         provider_name := 'memory';
     end;
 
-    if (active_path <> '') and FileExists(active_path) then
+    if path_value = '' then
+        path_value := active_path;
+    if (path_value <> '') and FileExists(path_value) then
     begin
         path_exists := 1;
-        if path_value = '' then
-        begin
-            path_value := active_path;
-        end;
     end;
 
     sc_path_value := get_default_dictionary_path_simplified;
@@ -191806,7 +192100,8 @@ begin
         tc_path_exists := 1;
     end;
 
-    user_path_value := get_default_user_dictionary_path;
+    if not (m_dictionary is TncSqliteDictionary) then
+        user_path_value := get_default_user_dictionary_path;
     if (user_path_value <> '') and FileExists(user_path_value) then
     begin
         user_path_exists := 1;
