@@ -39,6 +39,7 @@ UninstallDisplayIcon={#InstallRuntimeDir}\cassotis_ime_tray_host.exe
 CloseApplications=no
 RestartApplications=no
 SetupLogging=yes
+SetupMutex=Local\CassotisIme.Setup.Upgrade
 
 [Languages]
 Name: "chs"; MessagesFile: "compiler:ChineseSimplified.isl"
@@ -78,8 +79,8 @@ Source: "{#SourceRoot}\third_party\macbert\NOTICE"; DestDir: "{app}\licenses\mac
 Source: "{#SourceRoot}\third_party\onnxruntime\LICENSE"; DestDir: "{app}\licenses\onnxruntime"; Flags: ignoreversion
 Source: "{#SourceRoot}\third_party\onnxruntime\ThirdPartyNotices.txt"; DestDir: "{app}\licenses\onnxruntime"; Flags: ignoreversion
 
-Source: "{#RuntimeDataSourceDir}\dict_sc.db"; DestDir: "{localappdata}\CassotisIme\data"; DestName: "dict_sc.db"; Flags: ignoreversion
-Source: "{#RuntimeDataSourceDir}\dict_tc.db"; DestDir: "{localappdata}\CassotisIme\data"; DestName: "dict_tc.db"; Flags: ignoreversion
+Source: "{#RuntimeDataSourceDir}\dict_sc.db"; DestDir: "{localappdata}\CassotisIme\data"; DestName: "dict_sc.db"; Flags: ignoreversion; BeforeInstall: BeforeDictionaryInstall
+Source: "{#RuntimeDataSourceDir}\dict_tc.db"; DestDir: "{localappdata}\CassotisIme\data"; DestName: "dict_tc.db"; Flags: ignoreversion; BeforeInstall: BeforeDictionaryInstall
 [Run]
 Filename: "{#InstallRuntimeDir}\cassotis_ime_profile_reg.exe"; \
     Parameters: "register_tsf -dll_path ""{#InstallRuntimeDir}\cassotis_ime_svr.dll"" -skip_profile"; \
@@ -100,6 +101,7 @@ Filename: "{#InstallRuntimeDir}\cassotis_ime_profile_reg.exe"; \
 Filename: "{#InstallRuntimeDir}\cassotis_ime_profile_reg.exe"; \
     Parameters: "start -restart"; \
     Flags: runhidden waituntilterminated runasoriginaluser; \
+    BeforeInstall: ReleaseRuntimeUpgradeGuards; \
     StatusMsg: "Starting Cassotis IME..."
 Filename: "{#InstallRuntimeDir}\cassotis_ime_profile_reg.exe"; \
     Parameters: "start"; \
@@ -126,9 +128,11 @@ chs.PreparingStopRuntime=正在停止旧版本输入法...
 chs.PreparingUnregisterRuntime=正在停用旧版本输入法组件...
 chs.PreparingForceCloseRuntime=正在关闭占用旧版本文件的程序...
 chs.PreparingWaitRuntime=正在等待旧版本文件释放...
-chs.RuntimeReleaseFailed=旧版本文件仍被占用，安装程序已停止。请关闭仍在使用 Cassotis IME 的应用后重新运行安装包。
+chs.RuntimeReleaseFailed=词库文件仍被占用，无法继续安装。请关闭占用文件的程序后重试。
 chs.RuntimeReleaseLockedFile=仍被占用的文件：
 chs.RuntimeReleaseProcesses=检测到的相关进程：
+chs.RuntimeGuardFailed=无法建立安装期间的后台启动保护，安装已停止。请关闭其他安装程序后重试。
+chs.RuntimeReleaseRetry=请关闭占用文件的程序后选择“重试”，或选择“取消”中止安装；不会跳过词库更新。
 chs.ForceCloseRuntimePrompt=为完成升级安装，安装程序将自动关闭以下正在占用旧版本文件的进程：
 chs.ForceCloseRuntimeContinue=点击“确定”继续，点击“取消”中止安装。
 chs.ForceCloseRuntimeCanceled=用户取消了升级安装。
@@ -136,20 +140,19 @@ english.PreparingStopRuntime=Stopping existing Cassotis IME runtime...
 english.PreparingUnregisterRuntime=Disabling existing Cassotis IME components...
 english.PreparingForceCloseRuntime=Closing applications still using existing runtime files...
 english.PreparingWaitRuntime=Waiting for existing runtime files to be released...
-english.RuntimeReleaseFailed=Setup could not release the files used by the existing Cassotis IME runtime. Please close applications still using Cassotis IME and run Setup again.
+english.RuntimeReleaseFailed=Dictionary files are still in use. Close the application using them and try again.
 english.RuntimeReleaseLockedFile=File still in use:
 english.RuntimeReleaseProcesses=Related processes detected:
+english.RuntimeGuardFailed=Setup could not prevent the old runtime from restarting. Close other installers and try again.
+english.RuntimeReleaseRetry=Close the application using this file and choose Retry, or choose Cancel to abort Setup. Dictionary updates will not be skipped.
 english.ForceCloseRuntimePrompt=To continue the upgrade, Setup will automatically close the following processes that are still using existing runtime files:
 english.ForceCloseRuntimeContinue=Click OK to continue, or Cancel to abort Setup.
 english.ForceCloseRuntimeCanceled=Upgrade canceled by user.
 
 [Code]
+#include "runtime_upgrade_guard.iss"
+
 const
-    c_generic_read = $80000000;
-    c_generic_write = $40000000;
-    c_open_existing = 3;
-    c_file_attribute_normal = $00000080;
-    c_invalid_handle_value = -1;
     c_runtime_unlock_wait_attempts = 40;
     c_runtime_unlock_wait_ms = 250;
     c_disable_ime_for_all_process_threads = $FFFFFFFF;
@@ -161,15 +164,13 @@ var
     ForceStopTargetsPath: string;
     ForceStopApprovalGranted: Boolean;
     ExplorerRestartNeeded: Boolean;
+    PreparedRuntimeDir: string;
+    LastRuntimeFileError: Cardinal;
 
-function CreateFileW(lpFileName: string; dwDesiredAccess, dwShareMode: Cardinal;
-    lpSecurityAttributes: Integer; dwCreationDisposition, dwFlagsAndAttributes: Cardinal;
-    hTemplateFile: Integer): Integer;
-external 'CreateFileW@kernel32.dll stdcall';
-function CloseHandle(hObject: Integer): Boolean;
-external 'CloseHandle@kernel32.dll stdcall';
 function GetCurrentProcessId: DWORD;
 external 'GetCurrentProcessId@kernel32.dll stdcall';
+function ProcessIdToSessionId(ProcessId: DWORD; out SessionId: DWORD): Boolean;
+external 'ProcessIdToSessionId@kernel32.dll stdcall';
 function ImmDisableIME(ThreadId: DWORD): Boolean;
 external 'ImmDisableIME@imm32.dll stdcall';
 
@@ -216,6 +217,8 @@ begin
     ForceStopTargetsPath := ExpandConstant('{tmp}\cassotis_force_stop_targets.txt');
     ForceStopApprovalGranted := False;
     ExplorerRestartNeeded := False;
+    PreparedRuntimeDir := '';
+    LastRuntimeFileError := 0;
 end;
 
 procedure UpdateExplorerRestartNeeded(const TargetsText: string);
@@ -249,11 +252,6 @@ var
     Arguments: string;
 begin
     Result := '';
-    if RuntimeDir = '' then
-    begin
-        Exit;
-    end;
-
     ProfileRegPath := GetInstallerProfileRegPath;
     InstallerPid := GetCurrentProcessId;
     Arguments :=
@@ -367,63 +365,11 @@ begin
     RuntimePrepPage.Hide;
 end;
 
-function TryOpenFileExclusive(const FilePath: string): Boolean;
-var
-    Handle: Integer;
-begin
-    if not FileExists(FilePath) then
-    begin
-        Result := True;
-        Exit;
-    end;
-
-    Handle := CreateFileW(
-        FilePath,
-        c_generic_read or c_generic_write,
-        0,
-        0,
-        c_open_existing,
-        c_file_attribute_normal,
-        0
-    );
-    if Handle = c_invalid_handle_value then
-    begin
-        Result := False;
-        Exit;
-    end;
-
-    CloseHandle(Handle);
-    Result := True;
-end;
-
 function RuntimeFilesReleased(const RuntimeDir: string; out LockedFile: string): Boolean;
-var
-    Files: array[0..1] of string;
-    Index: Integer;
 begin
-    LockedFile := '';
-    if RuntimeDir = '' then
-    begin
-        Result := True;
-        Exit;
-    end;
-
     { Runtime binaries are installed side by side and are never overwritten.
       Only the shared dictionary snapshots still require exclusive replacement. }
-    Files[0] := AddBackslash(GetRuntimeDataDir) + 'dict_sc.db';
-    Files[1] := AddBackslash(GetRuntimeDataDir) + 'dict_tc.db';
-
-    for Index := 0 to GetArrayLength(Files) - 1 do
-    begin
-        if not TryOpenFileExclusive(Files[Index]) then
-        begin
-            LockedFile := Files[Index];
-            Result := False;
-            Exit;
-        end;
-    end;
-
-    Result := True;
+    Result := RuntimeDictionariesReleased(GetRuntimeDataDir, LockedFile, LastRuntimeFileError);
 end;
 
 function NormalizeRegisteredDllPath(const Value: string): string;
@@ -465,6 +411,11 @@ end;
 
 function RuntimeDirHasManagedFiles(const RuntimeDir: string): Boolean;
 begin
+    if RuntimeDir = '' then
+    begin
+        Result := False;
+        Exit;
+    end;
     Result :=
         FileExists(AddBackslash(RuntimeDir) + 'cassotis_ime_host.exe') or
         FileExists(AddBackslash(RuntimeDir) + 'cassotis_ime_tray_host.exe') or
@@ -583,15 +534,6 @@ var
     ResultCode: Integer;
     InstallerPid: DWORD;
 begin
-    if RuntimeDir = '' then
-    begin
-        Exit;
-    end;
-    if not RuntimeDirHasManagedFiles(RuntimeDir) then
-    begin
-        Exit;
-    end;
-
     UpdatePreparingStatus(
         ExpandConstant('{cm:PreparingForceCloseRuntime}'),
         RuntimeDir,
@@ -627,14 +569,6 @@ var
 begin
     Result := True;
     LastLockedFile := '';
-    if RuntimeDir = '' then
-    begin
-        Exit;
-    end;
-    if not RuntimeDirHasManagedFiles(RuntimeDir) then
-    begin
-        Exit;
-    end;
 
     for Attempt := 1 to c_runtime_unlock_wait_attempts do
     begin
@@ -642,7 +576,7 @@ begin
         begin
             UpdatePreparingStatus(
                 ExpandConstant('{cm:PreparingWaitRuntime}'),
-                RuntimeDir + ' (' + IntToStr(Attempt) + '/' + IntToStr(c_runtime_unlock_wait_attempts) + ')',
+                GetRuntimeDataDir + ' (' + IntToStr(Attempt) + '/' + IntToStr(c_runtime_unlock_wait_attempts) + ')',
                 Attempt,
                 c_runtime_unlock_wait_attempts
             );
@@ -660,7 +594,7 @@ begin
         LastLockedFile := LockedFile;
         if (Attempt = 1) or ((Attempt mod 4) = 0) then
         begin
-            Log(Format('Waiting for locked file to be released: %s', [LockedFile]));
+            Log(Format('Waiting for locked file to be released: %s (error %d)', [LockedFile, LastRuntimeFileError]));
         end;
         Sleep(c_runtime_unlock_wait_ms);
     end;
@@ -669,18 +603,74 @@ begin
     Result := False;
 end;
 
+function RuntimeReleaseFailureText(const RuntimeDir, LockedFile: string): string;
+var
+    TargetsText: string;
+begin
+    Result := ExpandConstant('{cm:RuntimeReleaseFailed}');
+    if LockedFile <> '' then
+    begin
+        Result := Result + #13#10#13#10 +
+            ExpandConstant('{cm:RuntimeReleaseLockedFile}') + #13#10 + LockedFile + #13#10 +
+            Format('Windows error %d: %s', [LastRuntimeFileError, SysErrorMessage(LastRuntimeFileError)]);
+    end;
+    TargetsText := GetForceStopTargetsText(RuntimeDir, False);
+    if TargetsText <> '' then
+    begin
+        Result := Result + #13#10#13#10 +
+            ExpandConstant('{cm:RuntimeReleaseProcesses}') + #13#10 + TargetsText;
+    end;
+    Log('Runtime release failure details:' + #13#10 + Result);
+end;
+
+procedure BeforeDictionaryInstall;
+var
+    LockedFile: string;
+    FailureText: string;
+begin
+    if not RuntimeUpgradeGuardsHeld then
+    begin
+        RaiseException(ExpandConstant('{cm:RuntimeGuardFailed}'));
+    end;
+    Log('Rechecking dictionary replacement immediately before copying: ' + CurrentFileName);
+    try
+        while not WaitForRuntimeRelease(PreparedRuntimeDir, LockedFile) do
+        begin
+            HidePreparingStatus;
+            FailureText := RuntimeReleaseFailureText(PreparedRuntimeDir, LockedFile);
+            if WizardSilent then
+            begin
+                RaiseException(FailureText);
+            end;
+            { A newly arrived holder was not in the original approval dialog.
+              Do not silently terminate it or offer to skip either dictionary. }
+            if MsgBox(FailureText + #13#10#13#10 +
+                ExpandConstant('{cm:RuntimeReleaseRetry}'), mbError,
+                MB_RETRYCANCEL or MB_DEFBUTTON2) <> IDRETRY then
+            begin
+                RaiseException(FailureText);
+            end;
+        end;
+    finally
+        HidePreparingStatus;
+    end;
+end;
+
 function PrepareToInstall(var NeedsRestart: Boolean): String;
 var
     RootRuntimeDir: string;
     LegacyRuntimeDir: string;
     ActiveRuntimeDir: string;
     RegisteredRuntimeDir: string;
-    RuntimeUnregistered: Boolean;
     LockedFile: string;
-    TargetsText: string;
-    FailureText: string;
+    SessionId: DWORD;
+    ErrorCode: Cardinal;
+    Prepared: Boolean;
 begin
     NeedsRestart := False;
+    Result := '';
+    Prepared := False;
+    ForceStopApprovalGranted := False;
     Log('Versioned runtime destination: ' + ExpandConstant('{#InstallRuntimeDir}'));
     RootRuntimeDir := ExpandConstant('{app}');
     LegacyRuntimeDir := ExpandConstant('{app}\out');
@@ -699,54 +689,62 @@ begin
         ActiveRuntimeDir := LegacyRuntimeDir;
     end;
 
-    if ActiveRuntimeDir = '' then
+    PreparedRuntimeDir := ActiveRuntimeDir;
+    SessionId := 0;
+    if not ProcessIdToSessionId(GetCurrentProcessId, SessionId) then
     begin
-        HidePreparingStatus;
-        Result := '';
+        ErrorCode := DLLGetLastError;
+        Result := ExpandConstant('{cm:RuntimeGuardFailed}') + #13#10 + SysErrorMessage(ErrorCode);
         Exit;
     end;
-
-    UpdatePreparingStatus(
-        ExpandConstant('{cm:PreparingStopRuntime}'),
-        ActiveRuntimeDir,
-        0,
-        0
-    );
-    if not ConfirmForceStopProcesses(ActiveRuntimeDir) then
+    { These names match the existing host, tray and TSF client. Holding a
+      reference before stopping them also protects upgrades from older builds. }
+    if not AcquireRuntimeUpgradeGuards(
+        Format('Local\cassotis_ime_engine_host_v2_s%d', [SessionId]),
+        Format('Local\cassotis_ime_tray_host_v1_s%d', [SessionId]), ErrorCode) then
     begin
-        Result := ExpandConstant('{cm:ForceCloseRuntimeCanceled}');
+        Result := ExpandConstant('{cm:RuntimeGuardFailed}') + #13#10 + SysErrorMessage(ErrorCode);
         Exit;
     end;
-    { Disable the profile before terminating holders. Otherwise Win10 can restart
-      ctfmon or shell processes and load the old DLL again during this window. }
-    RuntimeUnregistered := TryUnregisterExistingRuntime(ActiveRuntimeDir);
-    if not RuntimeUnregistered then
-    begin
-        Log(Format('Initial unregister_tsf did not fully succeed: %s', [ActiveRuntimeDir]));
-    end;
-    TryForceStopProcessesUsingImeModules(ActiveRuntimeDir);
-    if not WaitForRuntimeRelease(ActiveRuntimeDir, LockedFile) then
-    begin
-        HidePreparingStatus;
-        TargetsText := GetForceStopTargetsText(ActiveRuntimeDir, False);
-        FailureText := ExpandConstant('{cm:RuntimeReleaseFailed}');
-        if LockedFile <> '' then
+    try
+        UpdatePreparingStatus(
+            ExpandConstant('{cm:PreparingStopRuntime}'),
+            GetRuntimeDataDir,
+            0,
+            0
+        );
+        if (ActiveRuntimeDir <> '') or
+            FileExists(AddBackslash(GetRuntimeDataDir) + 'dict_sc.db') or
+            FileExists(AddBackslash(GetRuntimeDataDir) + 'dict_tc.db') then
         begin
-            FailureText := FailureText + #13#10#13#10 +
-                ExpandConstant('{cm:RuntimeReleaseLockedFile}') + #13#10 + LockedFile;
+            if not ConfirmForceStopProcesses(ActiveRuntimeDir) then
+            begin
+                Result := ExpandConstant('{cm:ForceCloseRuntimeCanceled}');
+                Exit;
+            end;
+            { Keep the old registration intact until the new files are installed.
+              Singleton guards prevent old hosts restarting, even with old DLLs. }
+            TryForceStopProcessesUsingImeModules(ActiveRuntimeDir);
         end;
-        if TargetsText <> '' then
+        if not WaitForRuntimeRelease(ActiveRuntimeDir, LockedFile) then
         begin
-            FailureText := FailureText + #13#10#13#10 +
-                ExpandConstant('{cm:RuntimeReleaseProcesses}') + #13#10 + TargetsText;
+            Result := RuntimeReleaseFailureText(ActiveRuntimeDir, LockedFile);
+            Exit;
         end;
-        Log('Runtime release failure details:' + #13#10 + FailureText);
-        Result := FailureText;
-        Exit;
+        Prepared := True;
+    finally
+        HidePreparingStatus;
+        if not Prepared then
+        begin
+            ReleaseRuntimeUpgradeGuards;
+        end;
     end;
+end;
 
-    HidePreparingStatus;
-    Result := '';
+procedure DeinitializeSetup;
+begin
+    { Also runs on cancellation/failure. Abrupt process exit closes handles too. }
+    ReleaseRuntimeUpgradeGuards;
 end;
 
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
