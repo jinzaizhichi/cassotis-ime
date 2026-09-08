@@ -137,7 +137,7 @@ The corpus provides only one reference continuation, so another natural continua
 
 ### Latency Protocol
 
-The dictionary and models are loaded and warmed before scored cases begin. Latency includes medium-length Pinyin decoding, completion-source lookup, unified selection, and local-model refinement when that result is actually applied. It excludes process and model cold start, report output, TSF/Host IPC, candidate-window rendering, real inter-key timing, and learning writes. Diagnostic candidate-pool construction runs after the visible-latency sample and is not included.
+The dictionary and models are loaded and warmed before scored cases begin. Latency includes medium-length Pinyin decoding, final candidate readback and local correction, completion-source lookup, unified selection, and continuation-model refinement when that result is actually applied. It excludes process and model cold start, report output, TSF/Host IPC, candidate-window rendering, real inter-key timing, and learning writes. Diagnostic candidate-pool construction runs after the visible-latency sample and is not included.
 
 ## Long-sentence One-key Completion Benchmark-16300
 
@@ -164,7 +164,7 @@ The detailed report additionally retains average keys saved per hit, incremental
 
 ### Latency Protocol
 
-The dictionary and both runtime models are loaded and warmed before scored cases begin. Latency starts immediately before assigning the scored Pinyin prefix and includes long-sentence decoding, exact/transition lookup, language-model scoring, hysteresis, and accepted local-model refinement. Model work that abstains or times out is asynchronous and does not delay the visible static result, so it is not added to visible latency. The measurement excludes process and model cold start, the preceding stability probe, report output, TSF-to-Host IPC, rendering, real inter-key timing, and learning writes. The engine is reset before every source sentence while dictionary connections, model sessions, and runtime caches remain open for the complete run.
+The dictionary and runtime models are loaded and warmed before scored cases begin. Latency starts immediately before assigning the scored Pinyin prefix and includes long-sentence decoding, exact/transition lookup, language-model scoring, hysteresis, local correction during final candidate readback, and accepted continuation-model refinement. Continuation-model work that abstains or times out is asynchronous and does not delay the visible static result, so it is not added to visible latency. The measurement excludes process and model cold start, the preceding stability probe, report output, TSF-to-Host IPC, rendering, real inter-key timing, and learning writes. The engine is reset before every source sentence while dictionary connections, model sessions, and runtime caches remain open for the complete run.
 
 ## Internal: Document-copy Completion Replay Benchmark-386
 

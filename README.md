@@ -221,10 +221,10 @@ This benchmark leaves the final four complete Pinyin syllables untyped and evalu
 
 | Version | Local Completion Hit | Prompt Coverage | Total Keys Saved | P95 (ms) |
 | --- | --- | --- | --- | --- |
-| `v1.22.0` | 407/16300 (2.50%) | 6474/16300 (39.72%) | 953 | 38.885 |
-| `v1.21.1`<br/>`v1.20.0` | 357/16300 (2.19%) | 6475/16300 (39.72%) | 861 | 42.672 |
-| `v1.19.0` | 202/16300 (1.24%) | 3834/16300 (23.52%) | 571 | 38.452 |
-| `v1.18.0` | 143/16300 (0.88%) | 3957/16300 (24.28%) | 478 | 40.329 |
+| `v1.22.0` | 407/16300 (2.50%) | 6474/16300 (39.72%) | 953 | 77.103 |
+| `v1.21.1`<br/>`v1.20.0` | 357/16300 (2.19%) | 6475/16300 (39.72%) | 861 | 118.064 |
+| `v1.19.0` | 202/16300 (1.24%) | 3834/16300 (23.52%) | 571 | 92.453 |
+| `v1.18.0` | 143/16300 (0.88%) | 3957/16300 (24.28%) | 478 | 109.060 |
 
 `Prompt Coverage` counts opportunities where any completion was displayed. `Total Keys Saved` sums the net keys saved by correct local-continuation hits after charging one key for accepting each completion. Per-hit averages and incremental stability remain available in detailed diagnostic reports rather than the public comparison table.
 
@@ -232,8 +232,8 @@ This benchmark leaves the final four complete Pinyin syllables untyped and evalu
 
 | Version | Whole-sentence Hit | Total Keys Saved | P95 (ms) |
 | --- | --- | --- | --- |
-| `v1.17.0` | 20/16300 (0.12%) | 124 | 37.357 |
-| `v1.16.0` | 10/16300 (0.06%) | 71 | 38.831 |
+| `v1.17.0` | 20/16300 (0.12%) | 124 | 55.049 |
+| `v1.16.0` | 10/16300 (0.06%) | 71 | 65.063 |
 
 `v1.16.0` and `v1.17.0` use the legacy strict whole-sentence criterion and are retained only as historical results. They are not directly comparable with the current local-continuation protocol.
 
