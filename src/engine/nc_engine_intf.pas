@@ -90057,6 +90057,63 @@ var
         seen_key: string;
         seen: TDictionary<string, Byte>;
 
+        procedure append_alternative_pair_prefixes;
+        var
+            boundary, shift, split_pos, idx, tail_idx: Integer;
+            head_key, tail_key: string;
+            heads, tails: TncCandidateList;
+            item: TncCandidate;
+            tail_is_exact: Boolean;
+        begin
+            if (Length(syllables_local) <> 4) or is_shuangpin_input or
+                (Pos('''', normalized_query) > 0) then Exit;
+            boundary := Length(syllables_local[0].text) +
+                Length(syllables_local[1].text);
+            // Adjacent n/g boundaries can hide an exact word (xin/an vs xi/nan).
+            // Recover prefixes only; this must not authorize a new 2+2 compound.
+            for shift := -1 to 1 do
+            begin
+                if shift = 0 then Continue;
+                split_pos := boundary + shift;
+                if (split_pos < 2) or (split_pos >= Length(normalized_query)) then Continue;
+                if not CharInSet(normalized_query[Min(boundary, split_pos) + 1],
+                    ['n', 'g']) then Continue;
+                head_key := Copy(normalized_query, 1, split_pos);
+                tail_key := Copy(normalized_query, split_pos + 1, MaxInt);
+                if (not is_full_pinyin_key(head_key)) or
+                    (not is_full_pinyin_key(tail_key)) or
+                    (Length(get_effective_compact_pinyin_syllables(head_key)) <> 2) or
+                    (Length(get_effective_compact_pinyin_syllables(tail_key)) <> 2) then Continue;
+                if not dictionary_exact_lookup_cached(tail_key, tails) then Continue;
+                tail_is_exact := False;
+                for tail_idx := 0 to High(tails) do
+                    if (tails[tail_idx].comment = '') and
+                        (get_candidate_text_unit_count(tails[tail_idx].text) = 2) then
+                    begin
+                        tail_is_exact := True;
+                        Break;
+                    end;
+                if (not tail_is_exact) or
+                    (not dictionary_exact_lookup_cached(head_key, heads)) then Continue;
+                for idx := 0 to Min(High(heads), c_four_syllable_prefix_phrase_limit - 1) do
+                begin
+                    if accepted_total >= c_prefix_total_limit then Break;
+                    item := heads[idx];
+                    if (item.comment <> '') or
+                        (get_candidate_text_unit_count(item.text) <> 2) then Continue;
+                    if seen.ContainsKey(item.text + #9 + tail_key) then Continue;
+                    item.comment := tail_key;
+                    Inc(item.score, c_prefix_base_bonus + 2 * c_prefix_bonus_per_syllable +
+                        c_prefix_phrase_extra_bonus + c_prefix_short_query_phrase_bonus -
+                        2 * c_prefix_remaining_penalty);
+                    SetLength(out_candidates, Length(out_candidates) + 1);
+                    out_candidates[High(out_candidates)] := item;
+                    seen.AddOrSetValue(item.text + #9 + tail_key, 1);
+                    Inc(accepted_total);
+                end;
+            end;
+        end;
+
         function is_single_initial_tail_comment_local(const value: string): Boolean;
         var
             normalized_value: string;
@@ -90119,6 +90176,7 @@ var
             for prefix_count := Min(c_prefix_max_syllables,
                 Length(syllables_local) - 1) downto 1 do
             begin
+                if prefix_count = 1 then append_alternative_pair_prefixes;
                 // Phrase prefixes must consume the bounded pool before the
                 // much larger first-syllable character set.
                 prefix_key := '';
@@ -158816,6 +158874,30 @@ var
                 Exit(get_candidate_text_unit_count(value.text));
     end;
 
+    function alternative_exact_prefix_units(const value: TncCandidate): Integer;
+    var
+        split_pos, boundary: Integer;
+        head_key, tail_key: string;
+    begin
+        Result := 0;
+        if (expected_units <> 4) or (Length(syllables) <> 4) or
+            (m_dictionary = nil) or (value.comment = '') or
+            (Pos('''', m_composition_text) > 0) or is_shuangpin_input or
+            (get_candidate_text_unit_count(value.text) <> 2) then Exit;
+        tail_key := normalize_pinyin_text(value.comment);
+        split_pos := Length(normalized_pinyin) - Length(tail_key);
+        boundary := Length(syllables[0].text) + Length(syllables[1].text);
+        if (split_pos < 2) or (split_pos >= Length(normalized_pinyin)) or
+            (Abs(split_pos - boundary) <> 1) or
+            (not CharInSet(normalized_pinyin[Min(split_pos, boundary) + 1], ['n', 'g'])) or
+            (Copy(normalized_pinyin, split_pos + 1, MaxInt) <> tail_key) then Exit;
+        head_key := Copy(normalized_pinyin, 1, split_pos);
+        if (Length(get_effective_compact_pinyin_syllables(head_key)) = 2) and
+            (Length(get_effective_compact_pinyin_syllables(tail_key)) = 2) and
+            (m_dictionary.is_base_entry(head_key, value.text) or
+            m_dictionary.is_user_entry(head_key, value.text)) then Result := 2;
+    end;
+
     function lookup_display_complete_cached(const query_key: string;
         out out_results: TncCandidateList): Boolean;
     var
@@ -179068,7 +179150,8 @@ var
                         candidate_text_local, candidate_text_units_local) and
                         (tail_key_local <> '') and
                         (not SameText(candidate_comment_local,
-                        tail_key_local)) then
+                        tail_key_local)) and
+                        (alternative_exact_prefix_units(m_candidates[idx]) = 0) then
                     begin
                         Inc(removed_count);
                         Continue;
@@ -183118,6 +183201,7 @@ var
                 head_key_local := build_display_query_key(0,
                     candidate_units_local);
                 keep_candidate_local :=
+                    (alternative_exact_prefix_units(m_candidates[in_idx_local]) > 0) or
                     display_exact_key_has_text(head_key_local,
                     candidate_text_local) or
                     m_dictionary.is_base_entry(head_key_local,
@@ -184493,6 +184577,10 @@ var
                     (Trim(exact_results_local[exact_idx_local].comment) <> '') or
                     (get_candidate_text_unit_count(candidate_text_local) <>
                     expected_units) or
+                    // Compact-key recovery must not undo explicit boundaries.
+                    ((Pos('''', m_composition_text) > 0) and
+                    (not display_complete_text_matches_explicit_apostrophe_boundary(
+                    candidate_text_local))) or
                     (((exact_results_local[exact_idx_local].source = cs_user) and
                     (not m_dictionary.is_user_entry(query_key_local,
                     candidate_text_local))) or
@@ -189883,7 +189971,8 @@ var
                 end;
 
                 if (prefix_units_local <= c_short_exact_prefix_max_units) and
-                    (umlaut_raw_prefix_units(candidate_value_local) > 0) then Exit(True);
+                    ((umlaut_raw_prefix_units(candidate_value_local) > 0) or
+                    (alternative_exact_prefix_units(candidate_value_local) > 0)) then Exit(True);
 
                 prefix_key_local := build_display_query_key(0,
                     prefix_units_local);
