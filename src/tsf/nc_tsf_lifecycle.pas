@@ -147,7 +147,7 @@ function nc_tsf_shortcut_to_preserved_key(const shortcut: TncShortcut;
     out preserved_key: TF_PRESERVEDKEY): Boolean;
 begin
     FillChar(preserved_key, SizeOf(preserved_key), 0);
-    Result := nc_shortcut_is_valid(shortcut) and
+    Result := (not shortcut.disabled) and nc_shortcut_is_valid(shortcut) and
         (not nc_shortcut_is_modifier_only(shortcut));
     if not Result then
     begin
@@ -177,7 +177,7 @@ var
     expected_modifiers: UINT;
 begin
     Result := False;
-    if not nc_shortcut_is_valid(shortcut) or
+    if shortcut.disabled or (not nc_shortcut_is_valid(shortcut)) or
         nc_shortcut_is_modifier_only(shortcut) or
         (nc_normalize_shortcut_key_code(shortcut.key_code) <> virtual_key) then
     begin
@@ -339,7 +339,7 @@ end;
 function nc_tsf_shortcut_is_bare_shift(
     const configured_shortcut: TncShortcut): Boolean;
 begin
-    Result := nc_shortcut_is_valid(configured_shortcut) and
+    Result := (not configured_shortcut.disabled) and nc_shortcut_is_valid(configured_shortcut) and
         (nc_normalize_shortcut_key_code(configured_shortcut.key_code) = VK_SHIFT) and
         (not configured_shortcut.shift_down) and
         (not configured_shortcut.ctrl_down) and
@@ -349,7 +349,7 @@ end;
 function nc_tsf_shortcut_is_ctrl_space(
     const configured_shortcut: TncShortcut): Boolean;
 begin
-    Result := nc_shortcut_is_valid(configured_shortcut) and
+    Result := (not configured_shortcut.disabled) and nc_shortcut_is_valid(configured_shortcut) and
         (nc_normalize_shortcut_key_code(configured_shortcut.key_code) = VK_SPACE) and
         (not configured_shortcut.shift_down) and
         configured_shortcut.ctrl_down and

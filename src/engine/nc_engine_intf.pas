@@ -122830,7 +122830,8 @@ begin
         explicit_apostrophe_lookup_text := '';
         if has_explicit_apostrophe_input then
         begin
-            explicit_apostrophe_lookup_text := LowerCase(Trim(m_composition_text));
+            explicit_apostrophe_lookup_text := LowerCase(
+                nc_normalize_umlaut_spelling(Trim(m_composition_text)));
         end;
         if m_last_lookup_normalized_from <> '' then
         begin
@@ -148624,6 +148625,7 @@ function TncEngine.normalize_pinyin_text(const input_text: string): string;
 var
     i: Integer;
     ch: Char;
+    spelling: string;
 begin
     Result := '';
     if input_text = '' then
@@ -148631,10 +148633,11 @@ begin
         Exit;
     end;
 
-    SetLength(Result, Length(input_text));
-    for i := 1 to Length(input_text) do
+    spelling := nc_normalize_umlaut_spelling(input_text);
+    SetLength(Result, Length(spelling));
+    for i := 1 to Length(spelling) do
     begin
-        ch := input_text[i];
+        ch := spelling[i];
         if ch = '''' then
         begin
             Result[i] := #0;
@@ -157917,6 +157920,8 @@ var
     candidate_idx: Integer;
     cached_pool_start: Integer;
     cached_pool_count: Integer;
+    umlaut_raw_prefixes_ready: Boolean;
+    umlaut_raw_prefixes: TncCandidateList;
 
     function is_short_repeated_initial_display_query_local: Boolean;
     var
@@ -158755,6 +158760,60 @@ var
             m_build_lookup_cache.AddOrSetValue(cache_key, out_results);
         end;
         Result := Length(out_results) > 0;
+    end;
+
+    procedure prepare_umlaut_raw_prefixes;
+    var
+        raw_query: string;
+        canonical_query: string;
+        prefix_key: string;
+        tail_key: string;
+        offset: Integer;
+        idx: Integer;
+        out_idx: Integer;
+        exact_results: TncCandidateList;
+    begin
+        if umlaut_raw_prefixes_ready then Exit;
+        umlaut_raw_prefixes_ready := True;
+        if (m_dictionary = nil) or is_shuangpin_input then Exit;
+        raw_query := m_composition_text;
+        canonical_query := nc_normalize_umlaut_spelling(raw_query);
+        if raw_query = canonical_query then Exit;
+        raw_query := LowerCase(raw_query);
+        canonical_query := LowerCase(canonical_query);
+
+        // The alias and the original spelling are parallel lookup paths:
+        // hu/lue can match hu/lve, but hulu/e must remain selectable too.
+        // Query only the additional u/e boundaries, not all input substrings.
+        for offset := Length(raw_query) downto 1 do
+        begin
+            if (raw_query[offset] <> 'u') or
+                (canonical_query[offset] <> 'v') then Continue;
+            prefix_key := Copy(raw_query, 1, offset);
+            tail_key := Copy(raw_query, offset + 1, MaxInt);
+            if not lookup_display_exact_cached(prefix_key, exact_results) then Continue;
+            for idx := 0 to High(exact_results) do
+            begin
+                if (Trim(exact_results[idx].text) = '') or
+                    (Trim(exact_results[idx].comment) <> '') then Continue;
+                out_idx := Length(umlaut_raw_prefixes);
+                SetLength(umlaut_raw_prefixes, out_idx + 1);
+                umlaut_raw_prefixes[out_idx] := exact_results[idx];
+                umlaut_raw_prefixes[out_idx].comment := tail_key;
+            end;
+        end;
+    end;
+
+    function umlaut_raw_prefix_units(const value: TncCandidate): Integer;
+    var
+        idx: Integer;
+    begin
+        Result := 0;
+        if value.comment = '' then Exit;
+        for idx := 0 to High(umlaut_raw_prefixes) do
+            if SameText(value.text, umlaut_raw_prefixes[idx].text) and
+                SameText(value.comment, umlaut_raw_prefixes[idx].comment) then
+                Exit(get_candidate_text_unit_count(value.text));
     end;
 
     function lookup_display_complete_cached(const query_key: string;
@@ -164131,13 +164190,13 @@ var
         insert_idx: Integer;
         candidate_count: Integer;
     begin
-        if display_candidate_is_unsupported_short_four_ab_cd_complete(
-            candidate_value) then
+        if (umlaut_raw_prefix_units(candidate_value) = 0) and
+            display_candidate_is_unsupported_short_four_ab_cd_complete(candidate_value) then
         begin
             Exit;
         end;
-        if display_candidate_is_unsupported_short_four_ab_c_partial(
-            candidate_value) then
+        if (umlaut_raw_prefix_units(candidate_value) = 0) and
+            display_candidate_is_unsupported_short_four_ab_c_partial(candidate_value) then
         begin
             Exit;
         end;
@@ -183721,6 +183780,7 @@ var
         text_units: Integer;
     begin
         Result := False;
+        if umlaut_raw_prefix_units(candidate_value) > 0 then Exit;
         if (expected_units < 3) or (expected_units > 6) or
             (normalized_pinyin = '') or
             (not is_full_pinyin_key(normalized_pinyin)) or
@@ -183854,6 +183914,37 @@ var
         has_supported_transition_top_local: Boolean;
         supported_transition_top_candidate_local: TncCandidate;
         supported_transition_top_path_local: string;
+
+        procedure insert_umlaut_raw_prefixes_local;
+        var
+            idx: Integer;
+            insert_idx: Integer;
+            prefix_units: Integer;
+            existing_units: Integer;
+        begin
+            prepare_umlaut_raw_prefixes;
+            for idx := 0 to High(umlaut_raw_prefixes) do
+            begin
+                if find_display_candidate(umlaut_raw_prefixes[idx].text,
+                    umlaut_raw_prefixes[idx].comment) >= 0 then Continue;
+                prefix_units := get_candidate_text_unit_count(umlaut_raw_prefixes[idx].text);
+                insert_idx := 0;
+                while insert_idx < Length(m_candidates) do
+                begin
+                    if Trim(m_candidates[insert_idx].comment) <> '' then
+                    begin
+                        existing_units := get_candidate_text_unit_count(m_candidates[insert_idx].text);
+                        if existing_units < prefix_units then Break;
+                        if (existing_units = prefix_units) and
+                            (umlaut_raw_prefixes[idx].source = m_candidates[insert_idx].source) and
+                            (umlaut_raw_prefixes[idx].score > m_candidates[insert_idx].score) then Break;
+                    end;
+                    Inc(insert_idx);
+                end;
+                // Preserve complete candidates and the source-index/page mapping.
+                insert_display_candidate(umlaut_raw_prefixes[idx], '', insert_idx);
+            end;
+        end;
 
         procedure insert_short_exact_lexicon_completion_local;
         var
@@ -189664,6 +189755,8 @@ var
                 text_units_local: Integer;
             begin
                 Result := False;
+                prefix_units_local := umlaut_raw_prefix_units(candidate_value_local);
+                if prefix_units_local > 0 then Exit(True);
                 prefix_units_local := 0;
                 if Trim(candidate_value_local.comment) = '' then
                 begin
@@ -189788,6 +189881,9 @@ var
                 begin
                     Exit;
                 end;
+
+                if (prefix_units_local <= c_short_exact_prefix_max_units) and
+                    (umlaut_raw_prefix_units(candidate_value_local) > 0) then Exit(True);
 
                 prefix_key_local := build_display_query_key(0,
                     prefix_units_local);
@@ -190249,6 +190345,7 @@ var
         restore_short_exact_ranked_order_local;
         restore_supported_transition_top_local;
         insert_short_exact_lexicon_completion_local;
+        insert_umlaut_raw_prefixes_local;
         if m_last_lookup_prefix_partial_fast then
         begin
             ensure_fuzzy_short_single_prefixes_visible_local;
@@ -190721,6 +190818,7 @@ var
 
 begin
     display_phase_tick := GetTickCount64;
+    umlaut_raw_prefixes_ready := False;
     relaxed_boundary_cache_ready := False;
     relaxed_boundary_cache_found := False;
     relaxed_boundary_cache_head_key := '';

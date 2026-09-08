@@ -1049,6 +1049,7 @@ var
         if not nc_try_parse_shortcut(shortcut_text, shortcut_value) then
         begin
             shortcut_value := nc_default_shortcut(action);
+            shortcut_value.disabled := SameText(Copy(Trim(shortcut_text), 1, 9), 'disabled:');
             shortcut_values_valid := False;
         end;
         nc_set_shortcut_for_action(Result.shortcuts, action, shortcut_value);

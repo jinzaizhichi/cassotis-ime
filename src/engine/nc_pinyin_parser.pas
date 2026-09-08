@@ -23,6 +23,7 @@ type
 function nc_is_pinyin_spelling_helper_compatible(const initial_value: string;
     const final_value: string): Boolean;
 function nc_is_canonical_pinyin_syllable(const value: string): Boolean;
+function nc_normalize_umlaut_spelling(const value: string): string;
 
 implementation
 
@@ -504,6 +505,31 @@ begin
     end;
 
     Result := result_list;
+end;
+
+function nc_normalize_umlaut_spelling(const value: string): string;
+var
+    lower_value: string;
+    parser: TncPinyinParser;
+    syllables: TncPinyinParseResult;
+    syllable: TncPinyinSyllable;
+begin
+    Result := value;
+    if (Pos('ue', value) = 0) and (Pos('UE', value) = 0) and
+        (Pos('uE', value) = 0) and (Pos('Ue', value) = 0) then Exit;
+    lower_value := LowerCase(value);
+    if (Pos('lue', lower_value) = 0) and (Pos('nue', lower_value) = 0) then Exit;
+    // Normalize complete syllables only, never lu'e. Equal-length aliases
+    // preserve raw key offsets for partial commits, editing and learning.
+    parser := TncPinyinParser.Create;
+    try
+        syllables := parser.parse(lower_value);
+    finally
+        parser.Free;
+    end;
+    for syllable in syllables do
+        if (syllable.text = 'lue') or (syllable.text = 'nue') then
+            Result[syllable.start_index + 2] := 'v';
 end;
 
 end.

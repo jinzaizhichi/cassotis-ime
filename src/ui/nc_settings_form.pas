@@ -181,6 +181,7 @@ type
         m_candidate_preview: TPaintBox;
         m_candidate_preview_window: TncCandidateWindow;
         m_combo_shortcut_modifiers: array[TncShortcutAction] of TComboBox;
+        m_chk_shortcut_enabled: array[TncShortcutAction] of TncModernCheckBox;
         m_combo_shortcut_keys: array[TncShortcutAction] of TComboBox;
         m_combo_candidate_page_keys: TComboBox;
         m_combo_one_key_completion_key: TComboBox;
@@ -239,6 +240,7 @@ type
         function shortcut_from_controls(const action: TncShortcutAction): TncShortcut;
         procedure set_shortcut_controls(const action: TncShortcutAction; const shortcut: TncShortcut);
         procedure load_shortcut_controls(const config: TncShortcutConfig);
+        procedure shortcut_enabled_changed(Sender: TObject);
         function get_candidate_font_size_from_slider: Integer;
         procedure set_candidate_font_size_slider(const font_size: Integer);
         function get_selected_candidate_font_name: string;
@@ -376,7 +378,6 @@ resourcestring
     SShortcutFullWidth = '全角/半角切换';
     SShortcutOpenSettings = '打开设置';
     SShortcutNoModifier = '无';
-    SShortcutHint = '快捷键不可重复。无修饰键时仅支持 Shift 或 F1-F24，以免占用正常输入。';
     SGroupCandidatePaging = '候选翻页';
     SLabelCandidatePageKeys = '按键组合';
     SLabelCandidatePagePrevious = '向上翻';
@@ -1691,6 +1692,7 @@ procedure TncSettingsForm.update_scaled_control_metrics;
 var
     dpi: Integer;
     fuzzy_rule: TncFuzzyPinyinRule;
+    action: TncShortcutAction;
 
     procedure update_check_box_metrics(const control: TncModernCheckBox);
     begin
@@ -1716,6 +1718,8 @@ begin
         update_check_box_metrics(m_chk_fuzzy_pinyin_rules[fuzzy_rule]);
     end;
     update_check_box_metrics(m_chk_show_status_widget);
+    for action := Low(TncShortcutAction) to High(TncShortcutAction) do
+        update_check_box_metrics(m_chk_shortcut_enabled[action]);
     update_check_box_metrics(m_chk_log_enabled);
     update_check_box_metrics(m_chk_debug_mode);
     if m_candidate_preview <> nil then
@@ -2247,7 +2251,7 @@ var
     header_label: TLabel;
 begin
     section_top := scale_ui(18);
-    shortcut_group := create_section_group(Self, m_scroll_shortcuts, '', section_top, 260);
+    shortcut_group := create_section_group(Self, m_scroll_shortcuts, '', section_top, 232);
 
     top := scale_ui(c_untitled_section_inner_top);
     header_label := create_label(Self, shortcut_group, SLabelShortcutAction, top);
@@ -2273,7 +2277,10 @@ begin
     Inc(top, scale_ui(28));
     for action := Low(TncShortcutAction) to High(TncShortcutAction) do
     begin
-        create_label(Self, shortcut_group, shortcut_action_caption(action), top);
+        m_chk_shortcut_enabled[action] := create_check_box(Self, shortcut_group,
+            top, shortcut_action_caption(action), shortcut_enabled_changed);
+        m_chk_shortcut_enabled[action].Width := scale_ui(c_control_left - c_label_left - 10);
+        m_chk_shortcut_enabled[action].Checked := True;
 
         m_combo_shortcut_modifiers[action] := TComboBox.Create(Self);
         m_combo_shortcut_modifiers[action].Parent := shortcut_group;
@@ -2295,9 +2302,6 @@ begin
 
         Inc(top, scale_ui(36));
     end;
-
-    create_hint_label(Self, shortcut_group, SShortcutHint, scale_ui(c_label_left),
-        top + scale_ui(2), scale_ui(c_hint_width));
 
     section_top := shortcut_group.Top + shortcut_group.Height + scale_ui(c_section_gap);
     paging_group := create_section_group(Self, m_scroll_shortcuts,
@@ -2551,6 +2555,7 @@ begin
     ctrl_down := modifier_index in [2, 4, 5, 7];
     alt_down := modifier_index in [3, 5, 6, 7];
     Result := nc_make_shortcut(key_code, shift_down, ctrl_down, alt_down);
+    Result.disabled := not m_chk_shortcut_enabled[action].Checked;
 end;
 
 procedure TncSettingsForm.set_shortcut_controls(const action: TncShortcutAction;
@@ -2590,6 +2595,9 @@ begin
         modifier_index := 1;
     end;
     m_combo_shortcut_modifiers[action].ItemIndex := modifier_index;
+    m_chk_shortcut_enabled[action].Checked := not shortcut.disabled;
+    m_combo_shortcut_modifiers[action].Enabled := not shortcut.disabled;
+    m_combo_shortcut_keys[action].Enabled := not shortcut.disabled;
 
     key_code := shortcut.key_code;
     m_combo_shortcut_keys[action].ItemIndex := -1;
@@ -2601,6 +2609,18 @@ begin
             Break;
         end;
     end;
+end;
+
+procedure TncSettingsForm.shortcut_enabled_changed(Sender: TObject);
+var
+    action: TncShortcutAction;
+begin
+    for action := Low(TncShortcutAction) to High(TncShortcutAction) do
+    begin
+        m_combo_shortcut_modifiers[action].Enabled := m_chk_shortcut_enabled[action].Checked;
+        m_combo_shortcut_keys[action].Enabled := m_chk_shortcut_enabled[action].Checked;
+    end;
+    mark_dirty(Sender);
 end;
 
 procedure TncSettingsForm.load_shortcut_controls(const config: TncShortcutConfig);
@@ -3595,7 +3615,7 @@ begin
         action := TncShortcutAction(action_index);
         shortcut_value := shortcut_from_controls(action);
         shortcut_issue := nc_get_shortcut_validation_issue(shortcut_value);
-        if shortcut_issue <> svi_none then
+        if (not shortcut_value.disabled) and (shortcut_issue <> svi_none) then
         begin
             case shortcut_issue of
                 svi_missing_key:
@@ -3623,9 +3643,11 @@ begin
     for action_index := Ord(Low(TncShortcutAction)) to Ord(High(TncShortcutAction)) - 1 do
     begin
         action := TncShortcutAction(action_index);
+        if nc_shortcut_for_action(shortcut_config, action).disabled then Continue;
         for other_index := action_index + 1 to Ord(High(TncShortcutAction)) do
         begin
             other_action := TncShortcutAction(other_index);
+            if nc_shortcut_for_action(shortcut_config, other_action).disabled then Continue;
             if nc_shortcut_equal(nc_shortcut_for_action(shortcut_config, action),
                 nc_shortcut_for_action(shortcut_config, other_action)) then
             begin

@@ -1962,11 +1962,13 @@ function normalize_compact_pinyin_key(const value: string): string;
 var
     i: Integer;
     ch: Char;
+    spelling: string;
 begin
+    spelling := nc_normalize_umlaut_spelling(value);
     Result := '';
-    for i := 1 to Length(value) do
+    for i := 1 to Length(spelling) do
     begin
-        ch := value[i];
+        ch := spelling[i];
         if CharInSet(ch, ['A' .. 'Z']) then
         begin
             ch := Chr(Ord(ch) + 32);
@@ -1982,11 +1984,13 @@ function normalize_canonical_pinyin_key(const value: string): string;
 var
     i: Integer;
     ch: Char;
+    spelling: string;
 begin
+    spelling := nc_normalize_umlaut_spelling(value);
     Result := '';
-    for i := 1 to Length(value) do
+    for i := 1 to Length(spelling) do
     begin
-        ch := value[i];
+        ch := spelling[i];
         if CharInSet(ch, ['A' .. 'Z']) then
         begin
             ch := Chr(Ord(ch) + 32);
@@ -13706,7 +13710,7 @@ begin
     // Same-process writes clear these caches synchronously. Cross-process
     // updates only need the bounded check performed by ensure_open.
     refresh_user_data_version_if_changed(False);
-    query_key := LowerCase(pinyin);
+    query_key := LowerCase(nc_normalize_umlaut_spelling(pinyin));
     if (m_lookup_result_cache <> nil) and
         m_lookup_result_cache.TryGetValue(query_key, results) then
     begin

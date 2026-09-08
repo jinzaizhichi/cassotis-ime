@@ -190,6 +190,7 @@ type
         shift_down: Boolean;
         ctrl_down: Boolean;
         alt_down: Boolean;
+        disabled: Boolean;
     end;
 
     TncShortcutConfig = record
