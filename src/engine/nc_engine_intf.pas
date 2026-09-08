@@ -122365,17 +122365,62 @@ var
 
     procedure ensure_short_lexicon_prefix_completions_visible_local(
         var candidates: TncCandidateList);
+    const
+        c_short_long_completion_limit = 2;
+        c_general_completion_min_prior = 120;
+        c_popular_vertical_min_prior = 480;
     var
         prefix_results_local: TncCandidateList;
+        completion_evidence_local: TncOneKeyCompletionList;
+        completion_evidence_loaded_local: Boolean;
         text_units_local: TArray<string>;
         candidate_text_local: string;
         prefix_text_local: string;
         candidate_score_local: Integer;
         candidate_anchored_local: Boolean;
         completion_anchor_flags_local: TArray<Boolean>;
+        completion_popularity_scores_local: TArray<Integer>;
+        candidate_popularity_local: Integer;
         completion_idx_local: Integer;
         prefix_idx_local: Integer;
         unit_idx_local: Integer;
+        long_completion_count_local: Integer;
+
+        function long_completion_popularity_local(
+            const text_value_local: string): Integer;
+        var
+            evidence_local: TncOneKeyCompletion;
+        begin
+            Result := -1;
+            if not completion_evidence_loaded_local then
+            begin
+                // Reuse the bounded, cached completion evidence pool. Never
+                // let a vertical lexicon weight alone admit a distant title.
+                m_dictionary.lookup_one_key_completions(lookup_text,
+                    completion_evidence_local);
+                completion_evidence_loaded_local := True;
+            end;
+            for evidence_local in completion_evidence_local do
+            begin
+                if (evidence_local.source <> okcs_base_exact) or
+                    (not evidence_local.has_popularity_prior) or
+                    (not SameText(evidence_local.text, text_value_local)) then
+                begin
+                    Continue;
+                end;
+                if ((evidence_local.vertical_layer_kind = 0) and
+                    (evidence_local.popularity_prior >= c_general_completion_min_prior) and
+                    ((evidence_local.corpus_score > 0) or
+                    (evidence_local.document_score > 0) or
+                    (evidence_local.source_count >= 2))) or
+                    ((evidence_local.popularity_prior >= c_popular_vertical_min_prior) and
+                    (evidence_local.source_count >= 2)) then
+                begin
+                    Result := evidence_local.popularity_prior;
+                end;
+                Exit;
+            end;
+        end;
 
         function has_visible_exact_prefix_local(
             const text_value_local: string): Boolean;
@@ -122414,19 +122459,42 @@ var
         end;
 
         procedure collect_candidate_local(const candidate_value_local: TncCandidate;
-            const score_value_local: Integer; const anchored_value_local: Boolean);
+            const score_value_local: Integer; const anchored_value_local: Boolean;
+            const popularity_value_local: Integer);
         var
             candidate_local: TncCandidate;
             insert_idx_local: Integer;
             move_idx_local: Integer;
             old_count_local: Integer;
         begin
-            // Text anchoring improves ordering, but every lexicon entry whose
-            // pinyin extends the query remains available as a prefix choice.
+            // Keep ordinary short extensions ahead of the few admitted long
+            // predictions, whose evidence is independent of lexicon weight.
             insert_idx_local := 0;
             while insert_idx_local <
                 Length(m_short_exact_lexicon_completion_candidates) do
             begin
+                if (completion_popularity_scores_local[insert_idx_local] < 0) and
+                    (popularity_value_local >= 0) then
+                begin
+                    Inc(insert_idx_local);
+                    Continue;
+                end;
+                if (completion_popularity_scores_local[insert_idx_local] >= 0) and
+                    (popularity_value_local < 0) then
+                begin
+                    Break;
+                end;
+                if completion_popularity_scores_local[insert_idx_local] <
+                    popularity_value_local then
+                begin
+                    Break;
+                end;
+                if completion_popularity_scores_local[insert_idx_local] >
+                    popularity_value_local then
+                begin
+                    Inc(insert_idx_local);
+                    Continue;
+                end;
                 if completion_anchor_flags_local[insert_idx_local] and
                     (not anchored_value_local) then
                 begin
@@ -122451,6 +122519,7 @@ var
             SetLength(m_short_exact_lexicon_completion_candidates,
                 old_count_local + 1);
             SetLength(completion_anchor_flags_local, old_count_local + 1);
+            SetLength(completion_popularity_scores_local, old_count_local + 1);
             for move_idx_local :=
                 High(m_short_exact_lexicon_completion_candidates) downto
                 insert_idx_local + 1 do
@@ -122460,6 +122529,8 @@ var
                     move_idx_local - 1];
                 completion_anchor_flags_local[move_idx_local] :=
                     completion_anchor_flags_local[move_idx_local - 1];
+                completion_popularity_scores_local[move_idx_local] :=
+                    completion_popularity_scores_local[move_idx_local - 1];
             end;
             candidate_local := candidate_value_local;
             candidate_local.score := score_value_local;
@@ -122470,6 +122541,8 @@ var
                 candidate_local;
             completion_anchor_flags_local[insert_idx_local] :=
                 anchored_value_local;
+            completion_popularity_scores_local[insert_idx_local] :=
+                popularity_value_local;
         end;
     begin
         if (m_dictionary = nil) or (lookup_text = '') or
@@ -122483,6 +122556,8 @@ var
         SetLength(m_short_exact_lexicon_completion_candidates, 0);
         SetLength(m_short_exact_lexicon_completion_texts, 0);
         SetLength(completion_anchor_flags_local, 0);
+        SetLength(completion_popularity_scores_local, 0);
+        completion_evidence_loaded_local := False;
         for prefix_idx_local := 0 to High(prefix_results_local) do
         begin
             if (prefix_results_local[prefix_idx_local].source = cs_user) or
@@ -122494,6 +122569,20 @@ var
             candidate_text_local := Trim(prefix_results_local[
                 prefix_idx_local].text);
             text_units_local := split_text_units(candidate_text_local);
+            candidate_popularity_local := -1;
+            // Long extensions of a short query need independent evidence and
+            // share two slots across all pages. Tab and full-query exacts do
+            // not use this display-only gate.
+            if (input_syllable_count < c_long_sentence_full_path_min_syllables) and
+                (Length(text_units_local) >= c_long_sentence_full_path_min_syllables) then
+            begin
+                candidate_popularity_local :=
+                    long_completion_popularity_local(candidate_text_local);
+                if candidate_popularity_local < 0 then
+                begin
+                    Continue;
+                end;
+            end;
             if Length(text_units_local) < input_syllable_count then
             begin
                 Continue;
@@ -122526,7 +122615,24 @@ var
                     prefix_idx_local].dict_weight;
             end;
             collect_candidate_local(prefix_results_local[prefix_idx_local],
-                candidate_score_local, candidate_anchored_local);
+                candidate_score_local, candidate_anchored_local,
+                candidate_popularity_local);
+        end;
+
+        long_completion_count_local := 0;
+        for completion_idx_local := 0 to
+            High(completion_popularity_scores_local) do
+        begin
+            if completion_popularity_scores_local[completion_idx_local] >= 0 then
+            begin
+                Inc(long_completion_count_local);
+                if long_completion_count_local > c_short_long_completion_limit then
+                begin
+                    SetLength(m_short_exact_lexicon_completion_candidates,
+                        completion_idx_local);
+                    Break;
+                end;
+            end;
         end;
 
         if Length(m_short_exact_lexicon_completion_candidates) = 0 then

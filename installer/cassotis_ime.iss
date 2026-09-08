@@ -55,6 +55,8 @@ Source: "{#RuntimeDir}\cassotis_ime_host.exe"; DestDir: "{#InstallRuntimeDir}"; 
 Source: "{#RuntimeDir}\cassotis_ime_tray_host.exe"; DestDir: "{#InstallRuntimeDir}"; Flags: ignoreversion onlyifdoesntexist
 Source: "{#RuntimeDir}\cassotis_ime_svr.dll"; DestDir: "{#InstallRuntimeDir}"; Flags: ignoreversion onlyifdoesntexist
 Source: "{#RuntimeDir}\cassotis_ime_svr32.dll"; DestDir: "{#InstallRuntimeDir}"; Flags: ignoreversion onlyifdoesntexist
+Source: "{#RuntimeDir}\cassotis_ime_svr.dll"; Flags: dontcopy
+Source: "{#RuntimeDir}\cassotis_ime_svr32.dll"; Flags: dontcopy
 Source: "{#RuntimeDir}\cassotis_ime_profile_reg.exe"; DestDir: "{#InstallRuntimeDir}"; Flags: ignoreversion onlyifdoesntexist
 Source: "{#RuntimeDir}\cassotis_ime_profile_reg.exe"; Flags: dontcopy
 Source: "{#RuntimeDir}\sqlite3_64.dll"; DestDir: "{#InstallRuntimeDir}"; Flags: ignoreversion onlyifdoesntexist
@@ -106,6 +108,7 @@ Filename: "{#InstallRuntimeDir}\cassotis_ime_profile_reg.exe"; \
 Filename: "{#InstallRuntimeDir}\cassotis_ime_profile_reg.exe"; \
     Parameters: "start"; \
     Flags: runhidden waituntilterminated runasoriginaluser; \
+    AfterInstall: FinalizeTsfUpgradeNotice; \
     StatusMsg: "Verifying Cassotis IME runtime..."
 Filename: "{sys}\cmd.exe"; \
     Parameters: "/c start """" explorer.exe"; \
@@ -136,6 +139,15 @@ chs.RuntimeReleaseRetry=请关闭占用文件的程序后选择“重试”，�
 chs.ForceCloseRuntimePrompt=为完成升级安装，安装程序将自动关闭以下正在占用旧版本文件的进程：
 chs.ForceCloseRuntimeContinue=点击“确定”继续，点击“取消”中止安装。
 chs.ForceCloseRuntimeCanceled=用户取消了升级安装。
+chs.TsfUpgradeTitle=部分应用需要重启后才能使用新版输入组件
+chs.TsfUpgradeBefore=以下应用仍加载着与新版不同的输入组件。请先保存工作并完整退出这些应用，再选择“重新检查”；也可以稍后重启应用并继续安装。安装程序不会强制关闭这些应用。
+chs.TsfUpgradeAfter=新版已安装，但以下应用中的输入组件修复尚未生效。请保存工作并完整退出应用后重新打开；仅关闭窗口可能仍有后台进程。也可注销 Windows 后重新登录。
+chs.TsfUpgradeIncomplete=未能完整核实所有相关进程。为确保新版修复生效，请重启使用过输入法的应用，或保存工作后注销 Windows 再登录。
+chs.TsfUpgradeRecheck=重新检查
+chs.TsfUpgradeLater=稍后重启应用，继续安装
+chs.TsfUpgradeCancel=取消安装
+chs.TsfUpgradeFinished=安装完成，部分应用仍需重启。相关修复将在这些应用完整退出并重新打开后生效。
+chs.TsfUpgradeMore=其余进程见安装日志；安装完成页将再次列出仍需重启的应用。
 english.PreparingStopRuntime=Stopping existing Cassotis IME runtime...
 english.PreparingUnregisterRuntime=Disabling existing Cassotis IME components...
 english.PreparingForceCloseRuntime=Closing applications still using existing runtime files...
@@ -148,9 +160,19 @@ english.RuntimeReleaseRetry=Close the application using this file and choose Ret
 english.ForceCloseRuntimePrompt=To continue the upgrade, Setup will automatically close the following processes that are still using existing runtime files:
 english.ForceCloseRuntimeContinue=Click OK to continue, or Cancel to abort Setup.
 english.ForceCloseRuntimeCanceled=Upgrade canceled by user.
+english.TsfUpgradeTitle=Some applications need restarting to use the new text service
+english.TsfUpgradeBefore=These applications still have different text service code loaded. Save your work, fully exit them and choose Recheck, or continue and restart them later. Setup will not force-close these applications.
+english.TsfUpgradeAfter=The new version is installed, but its text service fixes are not yet active in these applications. Save your work, fully exit and reopen them; closing a window may leave a background process running. Alternatively, sign out of Windows and sign back in.
+english.TsfUpgradeIncomplete=Some related processes could not be fully verified. Restart applications that have used the input method, or save your work and sign out of Windows, to ensure the new fixes take effect.
+english.TsfUpgradeRecheck=Recheck
+english.TsfUpgradeLater=Restart applications later and continue
+english.TsfUpgradeCancel=Cancel Setup
+english.TsfUpgradeFinished=Installation complete. Some applications still need restarting before the updated text service fixes take effect.
+english.TsfUpgradeMore=Additional processes are listed in the Setup log. The finished page will recheck and list applications that still need restarting.
 
 [Code]
 #include "runtime_upgrade_guard.iss"
+#include "tsf_upgrade_notice.iss"
 
 const
     c_runtime_unlock_wait_attempts = 40;
@@ -166,6 +188,11 @@ var
     ExplorerRestartNeeded: Boolean;
     PreparedRuntimeDir: string;
     LastRuntimeFileError: Cardinal;
+    TsfIncomingExtracted: Boolean;
+    TsfUpgradeFinalized: Boolean;
+    TsfFinishedMemo: TNewMemo;
+    TsfRecheckButton: TNewButton;
+    TsfOriginalFinishedText: string;
 
 function GetCurrentProcessId: DWORD;
 external 'GetCurrentProcessId@kernel32.dll stdcall';
@@ -219,6 +246,9 @@ begin
     ExplorerRestartNeeded := False;
     PreparedRuntimeDir := '';
     LastRuntimeFileError := 0;
+    TsfIncomingExtracted := False;
+    TsfUpgradeFinalized := False;
+    TsfUpgradeScanComplete := False;
 end;
 
 procedure UpdateExplorerRestartNeeded(const TargetsText: string);
@@ -240,6 +270,166 @@ begin
     ExtractTemporaryFile('cassotis_ime_profile_reg.exe');
     InstallerProfileRegPath := ExpandConstant('{tmp}\cassotis_ime_profile_reg.exe');
     Result := InstallerProfileRegPath;
+end;
+
+procedure ScanTsfUpgradeApplications;
+var
+    ProfileRegPath, ReportPath: string;
+    ResultCode: Integer;
+    Lines: TArrayOfString;
+begin
+    SetArrayLength(Lines, 0);
+    ReadTsfUpgradeReport(Lines);
+    try
+        ProfileRegPath := GetInstallerProfileRegPath;
+        if not TsfIncomingExtracted then
+        begin
+            ExtractTemporaryFile('cassotis_ime_svr.dll');
+            ExtractTemporaryFile('cassotis_ime_svr32.dll');
+            TsfIncomingExtracted := True;
+        end;
+        ReportPath := ExpandConstant('{tmp}\cassotis_tsf_upgrade_report.txt');
+        DeleteFile(ReportPath);
+        if Exec(ProfileRegPath,
+            'list_stale_tsf_holders -new_runtime_dir "' + ExpandConstant('{tmp}') +
+            '" -output_path "' + ReportPath + '" -exclude_pid "' +
+            GetCurrentProcessIdText('') + '"', '', SW_HIDE, ewWaitUntilTerminated,
+            ResultCode) and (ResultCode = 0) then
+        begin
+            if LoadStringsFromFile(ReportPath, Lines) then
+                ReadTsfUpgradeReport(Lines);
+        end;
+    except
+        Log('TSF upgrade scan failed: ' + GetExceptionMessage);
+    end;
+    Log('TSF upgrade scan complete=' + IntToStr(Ord(TsfUpgradeScanComplete)) + #13#10 +
+        TsfUpgradeApplications);
+end;
+
+function ConfirmTsfApplicationRestart: Boolean;
+var
+    Choice, Index: Integer;
+    Text: string;
+    Lines: TStringList;
+begin
+    Result := False;
+    while True do
+    begin
+        ScanTsfUpgradeApplications;
+        if not TsfUpgradeNoticeRequired then
+        begin
+            Result := True;
+            Exit;
+        end;
+        if WizardSilent then
+        begin
+            Log(TsfUpgradeNoticeText(CustomMessage('TsfUpgradeAfter'),
+                CustomMessage('TsfUpgradeIncomplete')));
+            Result := True;
+            Exit;
+        end;
+        HidePreparingStatus;
+        Text := CustomMessage('TsfUpgradeBefore');
+        if not TsfUpgradeScanComplete then
+            Text := Text + #13#10#13#10 + CustomMessage('TsfUpgradeIncomplete');
+        Lines := TStringList.Create;
+        try
+            Lines.Text := TsfUpgradeApplications;
+            for Index := 0 to Lines.Count - 1 do
+            begin
+                if Index >= 12 then
+                begin
+                    Text := Text + #13#10 + CustomMessage('TsfUpgradeMore');
+                    Break;
+                end;
+                Text := Text + #13#10 + Lines[Index];
+            end;
+        finally
+            Lines.Free;
+        end;
+        Choice := TaskDialogMsgBox(CustomMessage('TsfUpgradeTitle'), Text,
+            mbInformation, MB_YESNOCANCEL, [CustomMessage('TsfUpgradeRecheck'),
+             CustomMessage('TsfUpgradeLater'),
+             CustomMessage('TsfUpgradeCancel')], 0);
+        case Choice of
+            IDYES: Continue;
+            IDNO:
+                begin
+                    Log('User deferred restarting applications with old TSF modules.');
+                    Result := True;
+                    Exit;
+                end;
+        else
+            Exit;
+        end;
+    end;
+end;
+
+procedure UpdateTsfFinishedNotice;
+begin
+    if TsfFinishedMemo = nil then
+        Exit;
+    TsfFinishedMemo.Visible := TsfUpgradeNoticeRequired;
+    TsfRecheckButton.Visible := TsfUpgradeNoticeRequired;
+    if TsfUpgradeNoticeRequired then
+    begin
+        WizardForm.FinishedLabel.Caption := CustomMessage('TsfUpgradeFinished');
+        TsfFinishedMemo.Text := TsfUpgradeNoticeText(CustomMessage('TsfUpgradeAfter'),
+            CustomMessage('TsfUpgradeIncomplete'));
+    end
+    else
+        WizardForm.FinishedLabel.Caption := TsfOriginalFinishedText;
+end;
+
+procedure RecheckTsfApplications(Sender: TObject);
+begin
+    TsfRecheckButton.Enabled := False;
+    try
+        ScanTsfUpgradeApplications;
+        UpdateTsfFinishedNotice;
+    finally
+        TsfRecheckButton.Enabled := True;
+    end;
+end;
+
+procedure FinalizeTsfUpgradeNotice;
+begin
+    { Inspect again: applications may have survived or started during extraction. }
+    ScanTsfUpgradeApplications;
+    TsfUpgradeFinalized := True;
+    if TsfUpgradeNoticeRequired then
+        Log(TsfUpgradeNoticeText(CustomMessage('TsfUpgradeAfter'),
+            CustomMessage('TsfUpgradeIncomplete')));
+end;
+
+procedure CurPageChanged(CurPageID: Integer);
+begin
+    if CurPageID <> wpFinished then
+        Exit;
+    if not TsfUpgradeFinalized then
+        FinalizeTsfUpgradeNotice;
+    if TsfFinishedMemo = nil then
+    begin
+        TsfOriginalFinishedText := WizardForm.FinishedLabel.Caption;
+        TsfFinishedMemo := TNewMemo.Create(WizardForm);
+        TsfFinishedMemo.Parent := WizardForm.FinishedPage;
+        TsfFinishedMemo.Left := WizardForm.FinishedLabel.Left;
+        TsfFinishedMemo.Top := WizardForm.FinishedLabel.Top + ScaleY(72);
+        TsfFinishedMemo.Width := WizardForm.FinishedLabel.Width;
+        TsfFinishedMemo.Height := WizardForm.FinishedPage.ClientHeight -
+            TsfFinishedMemo.Top - ScaleY(40);
+        TsfFinishedMemo.ReadOnly := True;
+        TsfFinishedMemo.ScrollBars := ssVertical;
+        TsfRecheckButton := TNewButton.Create(WizardForm);
+        TsfRecheckButton.Parent := WizardForm.FinishedPage;
+        TsfRecheckButton.Left := TsfFinishedMemo.Left;
+        TsfRecheckButton.Top := TsfFinishedMemo.Top + TsfFinishedMemo.Height + ScaleY(6);
+        TsfRecheckButton.Width := ScaleX(150);
+        TsfRecheckButton.Height := ScaleY(25);
+        TsfRecheckButton.Caption := CustomMessage('TsfUpgradeRecheck');
+        TsfRecheckButton.OnClick := @RecheckTsfApplications;
+    end;
+    UpdateTsfFinishedNotice;
 end;
 
 function GetForceStopTargetsText(const RuntimeDir: string; const ExcludeInstaller: Boolean): string;
@@ -729,6 +919,11 @@ begin
         if not WaitForRuntimeRelease(ActiveRuntimeDir, LockedFile) then
         begin
             Result := RuntimeReleaseFailureText(ActiveRuntimeDir, LockedFile);
+            Exit;
+        end;
+        if not ConfirmTsfApplicationRestart then
+        begin
+            Result := ExpandConstant('{cm:ForceCloseRuntimeCanceled}');
             Exit;
         end;
         Prepared := True;

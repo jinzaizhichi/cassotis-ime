@@ -18,6 +18,7 @@ uses
     Winapi.Msctf,
     ComObj,
     nc_tsf_guids in '..\src\tsf\nc_tsf_guids.pas',
+    nc_tsf_upgrade_scan in '..\src\common\nc_tsf_upgrade_scan.pas',
     nc_runtime_process_policy in '..\src\common\nc_runtime_process_policy.pas';
 
 const
@@ -68,7 +69,7 @@ function nc_query_full_process_image_name(process_handle: THandle; flags: DWORD;
 
 procedure print_usage;
 begin
-    Writeln('Usage: cassotis_ime_profile_reg register|unregister|register_tsf|unregister_tsf|start|stop|list_force_stop_targets|force_stop_runtime');
+    Writeln('Usage: cassotis_ime_profile_reg register|unregister|register_tsf|unregister_tsf|start|stop|list_force_stop_targets|force_stop_runtime|list_stale_tsf_holders');
 end;
 
 function hr_succeeded(const hr: HRESULT): Boolean;
@@ -160,6 +161,9 @@ end;
 
 function execute_process_capture_stdout(const file_path: string; const arguments: array of string;
     out output_text: string; out exit_code: Cardinal): Boolean;
+const
+    c_capture_timeout_ms = 10000;
+    c_capture_max_bytes = 8 * 1024 * 1024;
 var
     startup_info: TStartupInfo;
     process_info: TProcessInformation;
@@ -168,7 +172,8 @@ var
     write_pipe: THandle;
     command_line: string;
     buffer: array[0..4095] of Byte;
-    bytes_read: DWORD;
+    bytes_read, available, to_read, wait_result: DWORD;
+    start_tick: UInt64;
     stream: TBytesStream;
 begin
     Result := False;
@@ -208,18 +213,56 @@ begin
         CloseHandle(write_pipe);
         write_pipe := 0;
 
+        stream := TBytesStream.Create;
         try
-            WaitForSingleObject(process_info.hProcess, INFINITE);
+            start_tick := GetTickCount64;
+            repeat
+                available := 0;
+                if PeekNamedPipe(read_pipe, nil, 0, nil, @available, nil) and
+                    (available > 0) then
+                begin
+                    to_read := available;
+                    if to_read > SizeOf(buffer) then
+                        to_read := SizeOf(buffer);
+                    if not ReadFile(read_pipe, buffer, to_read, bytes_read, nil) then
+                        Exit;
+                    stream.WriteBuffer(buffer, bytes_read);
+                    if stream.Size > c_capture_max_bytes then
+                    begin
+                        exit_code := ERROR_BUFFER_OVERFLOW;
+                        TerminateProcess(process_info.hProcess, exit_code);
+                        Exit;
+                    end;
+                end
+                else
+                begin
+                    wait_result := WaitForSingleObject(process_info.hProcess, 10);
+                    if wait_result = WAIT_OBJECT_0 then
+                    begin
+                        // Drain bytes emitted just before process exit as well.
+                        available := 0;
+                        if not PeekNamedPipe(read_pipe, nil, 0, nil, @available, nil) or
+                            (available = 0) then
+                            Break;
+                    end;
+                end;
+                if GetTickCount64 - start_tick >= c_capture_timeout_ms then
+                begin
+                    exit_code := ERROR_TIMEOUT;
+                    // Only this read-only child command, never a listed app.
+                    TerminateProcess(process_info.hProcess, exit_code);
+                    Exit;
+                end;
+            until False;
             GetExitCodeProcess(process_info.hProcess, exit_code);
         finally
+            if WaitForSingleObject(process_info.hProcess, 0) = WAIT_TIMEOUT then
+            begin
+                // Do not leave our inventory command behind on a pipe/read failure.
+                TerminateProcess(process_info.hProcess, ERROR_OPERATION_ABORTED);
+                WaitForSingleObject(process_info.hProcess, 1000);
+            end;
             CloseHandle(process_info.hProcess);
-        end;
-
-        stream := TBytesStream.Create;
-        while ReadFile(read_pipe, buffer, SizeOf(buffer), bytes_read, nil) and
-            (bytes_read > 0) do
-        begin
-            stream.WriteBuffer(buffer, bytes_read);
         end;
         output_text := TEncoding.Default.GetString(stream.Bytes, 0, stream.Size);
         Result := True;
@@ -880,7 +923,8 @@ begin
     end;
 end;
 
-function get_processes_using_dll(const dll_name: string): TArray<TncProcessInfo>;
+function get_processes_using_dll_checked(const dll_name: string;
+    out scan_succeeded: Boolean): TArray<TncProcessInfo>;
 var
     output_text: string;
     exit_code: Cardinal;
@@ -891,42 +935,39 @@ var
     list: TList<TncProcessInfo>;
     seen: TDictionary<Cardinal, Boolean>;
     info: TncProcessInfo;
+    system_dir: array[0..MAX_PATH] of Char;
+    path_length: UINT;
 begin
+    scan_succeeded := False;
     list := TList<TncProcessInfo>.Create;
     seen := TDictionary<Cardinal, Boolean>.Create;
     lines := TStringList.Create;
     try
-        if not execute_process_capture_stdout('tasklist.exe',
-            ['/m', dll_name, '/fo', 'csv', '/nh'], output_text, exit_code) then
+        path_length := GetSystemDirectory(system_dir, Length(system_dir));
+        if (path_length = 0) or (path_length >= UINT(Length(system_dir))) then
+            Exit(list.ToArray);
+        if not execute_process_capture_stdout(TPath.Combine(string(system_dir), 'tasklist.exe'),
+            ['/m', dll_name, '/fo', 'csv', '/nh'], output_text, exit_code) or
+            (exit_code <> 0) then
         begin
+            Writeln(Format('TSF module inventory failed: %s (exit %d, error %d)',
+                [dll_name, exit_code, GetLastError]));
             Exit(list.ToArray);
         end;
-        if exit_code <> 0 then
-        begin
-            Exit(list.ToArray);
-        end;
-
+        scan_succeeded := True;
         lines.Text := output_text;
         for idx := 0 to lines.Count - 1 do
         begin
             line := Trim(lines[idx]);
             if line = '' then
-            begin
                 Continue;
-            end;
             fields := parse_csv_fields(line);
             if Length(fields) < 2 then
-            begin
                 Continue;
-            end;
             if not TryStrToUInt(Trim(fields[1]), info.pid) then
-            begin
                 Continue;
-            end;
             if seen.ContainsKey(info.pid) then
-            begin
                 Continue;
-            end;
             info.name := Trim(fields[0]);
             list.Add(info);
             seen.Add(info.pid, True);
@@ -937,6 +978,81 @@ begin
         seen.Free;
         list.Free;
     end;
+end;
+
+function get_interactive_wow64_processes(const only_pid: DWORD;
+    out scan_succeeded: Boolean): TArray<TncProcessInfo>;
+var
+    snapshot, process_handle: THandle;
+    entry: TProcessEntry32;
+    session_id: DWORD;
+    wow64: BOOL;
+    info: TncProcessInfo;
+    list: TList<TncProcessInfo>;
+begin
+    // Native tasklist can omit WOW64 DLLs. A native module snapshot can inspect
+    // these apps directly, without invoking the unreliable 32-bit tasklist.
+    scan_succeeded := False;
+    list := TList<TncProcessInfo>.Create;
+    try
+        snapshot := CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+        if snapshot = INVALID_HANDLE_VALUE then
+            Exit(list.ToArray);
+        try
+            FillChar(entry, SizeOf(entry), 0);
+            entry.dwSize := SizeOf(entry);
+            if not Process32First(snapshot, entry) then
+                Exit(list.ToArray);
+            scan_succeeded := True;
+            repeat
+                if (entry.th32ProcessID = 0) or
+                    ((only_pid <> 0) and (only_pid <> entry.th32ProcessID)) then
+                    Continue;
+                session_id := 0;
+                if not ProcessIdToSessionId(entry.th32ProcessID, session_id) or
+                    (session_id = 0) then
+                    Continue;
+                process_handle := OpenProcess(c_process_query_limited_information,
+                    False, entry.th32ProcessID);
+                if process_handle = 0 then
+                begin
+                    if get_process_name_by_pid(entry.th32ProcessID) <> '' then
+                        scan_succeeded := False;
+                    Continue;
+                end;
+                try
+                    wow64 := False;
+                    if not IsWow64Process(process_handle, wow64) then
+                    begin
+                        scan_succeeded := False;
+                        Continue;
+                    end;
+                    if wow64 then
+                    begin
+                        info.pid := entry.th32ProcessID;
+                        info.name := string(entry.szExeFile);
+                        list.Add(info);
+                    end;
+                finally
+                    CloseHandle(process_handle);
+                end;
+            until not Process32Next(snapshot, entry);
+            if GetLastError <> ERROR_NO_MORE_FILES then
+                scan_succeeded := False;
+        finally
+            CloseHandle(snapshot);
+        end;
+        Result := list.ToArray;
+    finally
+        list.Free;
+    end;
+end;
+
+function get_processes_using_dll(const dll_name: string): TArray<TncProcessInfo>;
+var
+    scan_succeeded: Boolean;
+begin
+    Result := get_processes_using_dll_checked(dll_name, scan_succeeded);
 end;
 
 function stop_processes_using_dlls(const dll_path: string; const force_kill: Boolean): Boolean;
@@ -1257,6 +1373,116 @@ begin
         begin
             Writeln(Format('Still running: %s (PID %d)', [remaining[idx].name, remaining[idx].pid]));
         end;
+    end;
+end;
+
+function run_list_stale_tsf_holders_action: Boolean;
+var
+    incoming_dir, output_path, pid_text, name, path: string;
+    candidates: TArray<TncProcessInfo>;
+    inventory: TList<TncProcessInfo>;
+    paths: TArray<string>;
+    seen, excluded: TDictionary<Cardinal, Boolean>;
+    inspector: TncTsfUpgradeInspector;
+    report, rows: TStringList;
+    info: TncProcessInfo;
+    error_code, only_pid: DWORD;
+    complete, scanned, changed: Boolean;
+    comparison: TncTsfModuleComparison;
+begin
+    Result := False;
+    incoming_dir := '';
+    output_path := '';
+    pid_text := '';
+    get_param_value('new_runtime_dir', incoming_dir);
+    get_param_value('output_path', output_path);
+    get_param_value('pid', pid_text);
+    if (incoming_dir = '') or (output_path = '') then
+        Exit;
+    only_pid := 0;
+    if (pid_text <> '') and (not TryStrToUInt(pid_text, only_pid) or (only_pid = 0)) then
+        Exit;
+    report := TStringList.Create;
+    rows := TStringList.Create;
+    seen := TDictionary<Cardinal, Boolean>.Create;
+    excluded := build_excluded_pid_set;
+    inspector := nil;
+    inventory := TList<TncProcessInfo>.Create;
+    complete := True;
+    try
+        try
+            inspector := TncTsfUpgradeInspector.Create(incoming_dir);
+            for name in ['cassotis_ime_svr.dll', 'cassotis_ime_svr32.dll'] do
+            begin
+                // Inventory by module name includes older side-by-side directories,
+                // not just the currently registered runtime. This never closes apps.
+                candidates := get_processes_using_dll_checked(name, scanned);
+                if only_pid <> 0 then
+                    Writeln(Format('Inventory %s: %d processes, complete=%d',
+                        [name, Length(candidates), Ord(scanned)]));
+                complete := complete and scanned;
+                inventory.AddRange(candidates);
+            end;
+            inventory.AddRange(get_interactive_wow64_processes(only_pid, scanned));
+            complete := complete and scanned;
+            for info in inventory do
+            begin
+                if seen.ContainsKey(info.pid) or excluded.ContainsKey(info.pid) or
+                    ((only_pid <> 0) and (info.pid <> only_pid)) then
+                    Continue;
+                seen.Add(info.pid, True);
+                scanned := nc_process_tsf_module_paths(info.pid, paths, error_code);
+                if only_pid <> 0 then
+                    Writeln(Format('Inspect PID %d: %d modules, error=%d',
+                        [info.pid, Length(paths), error_code]));
+                if not scanned then
+                begin
+                    // An exited process no longer needs restarting. Other errors
+                    // must not be mistaken for a fully updated application.
+                    if get_process_name_by_pid(info.pid) <> '' then
+                    begin
+                        complete := False;
+                        rows.Add(Format('%s (PID %d) [unverified, error %d]',
+                            [info.name, info.pid, error_code]));
+                    end;
+                    Continue;
+                end;
+                changed := False;
+                for path in paths do
+                begin
+                    comparison := inspector.CompareModule(path);
+                    if comparison <> tmc_same then
+                    begin
+                        changed := True;
+                        if comparison = tmc_unknown then
+                            complete := False;
+                        Writeln(Format('TSF holder %s (PID %d): %s [%d]',
+                            [info.name, info.pid, path, Ord(comparison)]));
+                    end;
+                end;
+                if changed then
+                    rows.Add(Format('%s (PID %d)', [info.name, info.pid]));
+            end;
+        except
+            on E: Exception do
+            begin
+                complete := False;
+                Writeln('TSF holder scan incomplete: ' + E.Message);
+            end;
+        end;
+        rows.Sort;
+        report.Add('cassotis_tsf_upgrade_report_v1');
+        report.Add('complete=' + IntToStr(Ord(complete)));
+        report.AddStrings(rows);
+        report.SaveToFile(output_path, TEncoding.UTF8);
+        Result := True;
+    finally
+        inventory.Free;
+        inspector.Free;
+        excluded.Free;
+        seen.Free;
+        rows.Free;
+        report.Free;
     end;
 end;
 
@@ -2183,6 +2409,12 @@ begin
     if action = 'force_stop_runtime' then
     begin
         Result := run_force_stop_runtime_action;
+        Exit;
+    end;
+
+    if action = 'list_stale_tsf_holders' then
+    begin
+        Result := run_list_stale_tsf_holders_action;
         Exit;
     end;
 

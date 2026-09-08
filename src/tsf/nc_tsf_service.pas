@@ -49,6 +49,7 @@ type
         m_conversion_source: ITfSource;
         m_conversion_cookie: DWORD;
         m_compartment_update_depth: Integer;
+        m_compartment_deferred: TncTsfDeferredCompartmentSync;
         m_last_input_mode: TncInputMode;
         m_last_full_width_mode: Boolean;
         m_last_punctuation_full_width: Boolean;
@@ -128,6 +129,7 @@ type
         m_system_input_mode_prefix_tick: UInt64;
         m_rejected_modifier_transition_pending: Boolean;
         m_rejected_modifier_transition_tick: UInt64;
+        m_unconfigured_ctrl_space_pending: Boolean;
         m_terminal_ctrl_space_hook: HHOOK;
         m_terminal_ctrl_space_window: HWND;
         m_terminal_ctrl_space_key_down: Boolean;
@@ -135,6 +137,8 @@ type
         procedure clear_state;
         procedure unpreserve_input_mode_shortcut;
         procedure refresh_preserved_input_mode_shortcut;
+        function read_host_input_mode_or_cached(out input_mode: TncInputMode;
+            out full_width: Boolean; out punctuation_full_width: Boolean): Boolean;
         function begin_chord_shortcut(const action: TncShortcutAction;
             const key_code: Word;
             const source: TncTsfShortcutEventSource = tses_key_sink;
@@ -158,10 +162,10 @@ type
         procedure advise_key_trace_sink;
         procedure unadvise_compartment_sinks;
         procedure advise_compartment_sinks;
-        function read_compartment_dword(const compartment: ITfCompartment; out value: DWORD): Boolean;
-        function write_compartment_dword(const compartment: ITfCompartment; const value: DWORD): Boolean;
         procedure apply_engine_state_to_compartments(const input_mode: TncInputMode; const full_width_mode: Boolean;
             const punctuation_full_width: Boolean);
+        procedure flush_deferred_compartment_state;
+        procedure log_activation_identity;
         function thread_mgr_on_set_focus(const pdimFocus: ITfDocumentMgr; const pdimPrevFocus: ITfDocumentMgr): HResult; stdcall;
         function ITfThreadMgrEventSink.OnSetFocus = thread_mgr_on_set_focus;
         procedure unadvise_context_sinks;
@@ -174,6 +178,7 @@ type
         function is_safe_composition_fast_key(const key_code: Word; const key_state: TncKeyState): Boolean;
         function get_config_write_time: TDateTime;
         procedure load_engine_config(out config: TncEngineConfig);
+        procedure apply_shortcut_config(const config: TncShortcutConfig);
         procedure apply_log_config;
         procedure reload_config_if_needed(const force_check: Boolean = False);
         procedure save_engine_state_to_config(const input_mode: TncInputMode; const full_width_mode: Boolean;
@@ -271,6 +276,9 @@ type
     end;
 
 implementation
+
+uses
+    nc_version_info;
 
 procedure signal_tray_profile_event(const active: Boolean); forward;
 procedure log_tsf_boundary_exception(const operation: string); forward;
@@ -774,6 +782,7 @@ begin
     try
         inherited Initialize;
         clear_state;
+        m_compartment_deferred := TncTsfDeferredCompartmentSync.Create(flush_deferred_compartment_state);
         m_ipc_client := TncIpcClient.create(True);
         m_active_state_lock := TCriticalSection.Create;
         m_active_state_event := TEvent.Create(nil, False, False, '');
@@ -798,6 +807,7 @@ begin
             m_ipc_client.Free;
             m_ipc_client := nil;
         end;
+        FreeAndNil(m_compartment_deferred);
         m_session_id := '';
     end;
 end;
@@ -827,6 +837,8 @@ end;
 
 destructor TncTextService.Destroy;
 begin
+    if m_compartment_deferred <> nil then
+        m_compartment_deferred.Close;
     try
         stop_active_state_worker;
     except
@@ -859,11 +871,14 @@ begin
         end;
         m_ipc_client := nil;
     end;
+    FreeAndNil(m_compartment_deferred);
     inherited Destroy;
 end;
 
 procedure TncTextService.clear_state;
 begin
+    if m_compartment_deferred <> nil then
+        m_compartment_deferred.Close;
     if m_langbar_icon <> 0 then
     begin
         DestroyIcon(m_langbar_icon);
@@ -954,6 +969,7 @@ begin
     m_system_input_mode_prefix_tick := 0;
     m_rejected_modifier_transition_pending := False;
     m_rejected_modifier_transition_tick := 0;
+    m_unconfigured_ctrl_space_pending := False;
     m_terminal_ctrl_space_hook := 0;
     m_terminal_ctrl_space_window := 0;
     m_terminal_ctrl_space_key_down := False;
@@ -1068,6 +1084,23 @@ begin
         end;
     except
         log_tsf_boundary_exception('PreserveInputModeShortcut');
+    end;
+end;
+
+function TncTextService.read_host_input_mode_or_cached(
+    out input_mode: TncInputMode; out full_width: Boolean;
+    out punctuation_full_width: Boolean): Boolean;
+begin
+    Result := (m_ipc_client <> nil) and (m_session_id <> '') and
+        m_ipc_client.get_state(m_session_id, input_mode, full_width,
+            punctuation_full_width);
+    if not Result then
+    begin
+        // GET_STATE initializes its out parameters even on timeout. Those
+        // defaults must never become a mode change or erase Chinese punctuation.
+        input_mode := m_last_input_mode;
+        full_width := m_last_full_width_mode;
+        punctuation_full_width := m_last_punctuation_full_width;
     end;
 end;
 
@@ -1480,6 +1513,8 @@ end;
 
 procedure TncTextService.unadvise_compartment_sinks;
 begin
+    if m_compartment_deferred <> nil then
+        m_compartment_deferred.Cancel;
     if not nc_tsf_try_unadvise_sink(m_openclose_source, m_openclose_cookie) then
     begin
         if m_logger <> nil then
@@ -1554,55 +1589,26 @@ begin
     end;
 end;
 
-function TncTextService.read_compartment_dword(const compartment: ITfCompartment; out value: DWORD): Boolean;
-var
-    var_value: OleVariant;
-    int_value: Integer;
+procedure TncTextService.flush_deferred_compartment_state;
 begin
-    value := 0;
-    Result := False;
-    if compartment = nil then
-    begin
-        Exit;
-    end;
-
-    var_value := Unassigned;
-    if compartment.GetValue(var_value) <> S_OK then
-    begin
-        Exit;
-    end;
-
-    if VarIsEmpty(var_value) or VarIsNull(var_value) then
-    begin
-        Exit;
-    end;
-
     try
-        int_value := var_value;
+        if (m_thread_mgr = nil) or (m_client_id = 0) then
+            Exit;
+        // Coalesced state is the latest host-authorized target, not the value
+        // captured by the first of several split Windows notifications.
+        m_compartment_state_inited := False;
+        apply_engine_state_to_compartments(m_last_input_mode,
+            m_last_full_width_mode, m_last_punctuation_full_width);
+        if (m_logger <> nil) and (m_logger.level <= ll_debug) then
+            m_logger.debug(Format(
+                'Compartment deferred sync pid=%d tid=%d synced=%d state=%d/%d/%d',
+                [GetCurrentProcessId, GetCurrentThreadId, Ord(m_compartment_state_inited),
+                Ord(m_last_input_mode), Ord(m_last_full_width_mode),
+                Ord(m_last_punctuation_full_width)]));
     except
-        Exit;
+        m_compartment_state_inited := False;
+        log_tsf_boundary_exception('DeferredCompartmentSync');
     end;
-
-    if int_value < 0 then
-    begin
-        int_value := 0;
-    end;
-    value := DWORD(int_value);
-    Result := True;
-end;
-
-function TncTextService.write_compartment_dword(const compartment: ITfCompartment; const value: DWORD): Boolean;
-var
-    var_value: OleVariant;
-begin
-    Result := False;
-    if (compartment = nil) or (m_client_id = 0) then
-    begin
-        Exit;
-    end;
-
-    var_value := Integer(value);
-    Result := compartment.SetValue(m_client_id, var_value) = S_OK;
 end;
 
 procedure TncTextService.apply_engine_state_to_compartments(const input_mode: TncInputMode; const full_width_mode: Boolean;
@@ -1610,9 +1616,29 @@ procedure TncTextService.apply_engine_state_to_compartments(const input_mode: Tn
 var
     openclose_value: DWORD;
     conversion_value: DWORD;
+    openclose_written: Boolean;
+    conversion_written: Boolean;
+    open_status, conversion_status: HRESULT;
 begin
+    if (m_compartment_deferred <> nil) and m_compartment_deferred.notifying then
+    begin
+        // TSF forbids SetValue during OnChange (E_UNEXPECTED). A process-local
+        // posted message restores the state after the notification returns.
+        m_last_input_mode := input_mode;
+        m_last_full_width_mode := full_width_mode;
+        m_last_punctuation_full_width := punctuation_full_width;
+        m_compartment_state_inited := False;
+        m_compartment_deferred.Request;
+        Exit;
+    end;
+    if m_compartment_deferred <> nil then
+        m_compartment_deferred.Cancel;
     if (m_openclose_compartment = nil) or (m_conversion_compartment = nil) then
     begin
+        m_last_input_mode := input_mode;
+        m_last_full_width_mode := full_width_mode;
+        m_last_punctuation_full_width := punctuation_full_width;
+        m_compartment_state_inited := False;
         Exit;
     end;
 
@@ -1644,8 +1670,23 @@ begin
 
     Inc(m_compartment_update_depth);
     try
-        write_compartment_dword(m_openclose_compartment, openclose_value);
-        write_compartment_dword(m_conversion_compartment, conversion_value);
+        openclose_written := nc_write_compartment_dword(m_openclose_compartment,
+            m_client_id, openclose_value, open_status);
+        conversion_written := nc_write_compartment_dword(m_conversion_compartment,
+            m_client_id, conversion_value, conversion_status);
+        if (m_thread_mgr <> nil) and nc_compartments_need_rebind(open_status, conversion_status) then
+        begin
+            // A cleared compartment object stays invalid even after OnChange.
+            // Reacquire/advise once, outside notifications; never spin on failure.
+            if m_logger <> nil then
+                m_logger.info(Format('Compartment rebind open_hr=0x%s conversion_hr=0x%s',
+                    [IntToHex(Cardinal(open_status), 8), IntToHex(Cardinal(conversion_status), 8)]));
+            advise_compartment_sinks;
+            openclose_written := nc_write_compartment_dword(m_openclose_compartment,
+                m_client_id, openclose_value, open_status);
+            conversion_written := nc_write_compartment_dword(m_conversion_compartment,
+                m_client_id, conversion_value, conversion_status);
+        end;
     finally
         Dec(m_compartment_update_depth);
     end;
@@ -1653,7 +1694,16 @@ begin
     m_last_input_mode := input_mode;
     m_last_full_width_mode := full_width_mode;
     m_last_punctuation_full_width := punctuation_full_width;
-    m_compartment_state_inited := True;
+    m_compartment_state_inited := openclose_written and conversion_written;
+    if (not m_compartment_state_inited) and (m_logger <> nil) then
+    begin
+        m_logger.info(Format(
+            'Input-mode compartment sync incomplete open=%d conversion=%d state=%d/%d/%d open_hr=0x%s conversion_hr=0x%s pid=%d tid=%d',
+            [Ord(openclose_written), Ord(conversion_written), Ord(input_mode),
+            Ord(full_width_mode), Ord(punctuation_full_width),
+            IntToHex(Cardinal(open_status), 8), IntToHex(Cardinal(conversion_status), 8),
+            GetCurrentProcessId, GetCurrentThreadId]));
+    end;
 end;
 
 procedure TncTextService.unadvise_context_sinks;
@@ -1788,6 +1838,26 @@ begin
     advise_context_sinks(context);
 end;
 
+procedure TncTextService.log_activation_identity;
+var
+    buffer: array[0..32767] of Char;
+    path_length: DWORD;
+    module_path: string;
+begin
+    if m_logger = nil then
+        Exit;
+    path_length := GetModuleFileName(HInstance, buffer, Length(buffer));
+    module_path := '';
+    if (path_length > 0) and (path_length < DWORD(Length(buffer))) then
+        SetString(module_path, buffer, path_length);
+    m_logger.info(Format(
+        'TSF identity code=compartment-defer-20260908 pid=%d tid=%d process=%s module=%s file_version=%s shortcut=%s disabled=%d',
+        [GetCurrentProcessId, GetCurrentThreadId, ParamStr(0), module_path,
+        nc_get_display_version_from_exe_file(module_path),
+        nc_shortcut_to_text(m_shortcut_config.input_mode_toggle),
+        Ord(m_shortcut_config.input_mode_toggle.disabled)]));
+end;
+
 function TncTextService.activate_core(const thread_mgr: ITfThreadMgr;
     client_id: TfClientId; const activation_flags: DWORD): HResult;
 var
@@ -1861,6 +1931,7 @@ begin
 
     if m_logger <> nil then
     begin
+        log_activation_identity;
         m_logger.info(Format('TSF activate flags=0x%.8x comless=%d',
             [m_activation_flags, Ord((m_activation_flags and TF_TMAE_COMLESS) <> 0)]));
         if m_key_trace_source = nil then
@@ -1967,6 +2038,8 @@ begin
     try
         if focus = 0 then
         begin
+            if m_compartment_deferred <> nil then
+                m_compartment_deferred.Cancel;
             cancel_composition;
             if (m_ipc_client <> nil) and (m_session_id <> '') then
             begin
@@ -1990,6 +2063,7 @@ begin
             m_external_input_mode_transition_tick := 0;
             clear_system_input_mode_shortcut_prefix;
             clear_rejected_modifier_transition;
+            m_unconfigured_ctrl_space_pending := False;
         end;
         if focus <> 0 then
         begin
@@ -2566,6 +2640,8 @@ var
     normalized_key_code: Word;
 begin
     normalized_key_code := nc_normalize_shortcut_key_code(key_code);
+    m_unconfigured_ctrl_space_pending := nc_tsf_ctrl_space_rejection_for_key(
+        m_shortcut_config.input_mode_toggle, key_code, key_state);
     if nc_tsf_is_unconfigured_shift_toggle(
         m_shortcut_config.input_mode_toggle, key_code, key_state) then
     begin
@@ -2869,6 +2945,7 @@ begin
         // lets the compartment sink reject Windows' legacy IME toggle, while
         // still allowing tools such as HotkeyP to remap the physical chord to
         // Win+Space.
+        m_unconfigured_ctrl_space_pending := True;
         m_system_input_mode_prefix_pending := True;
         m_system_input_mode_prefix_tick := GetTickCount64;
         PostMessage(m_terminal_ctrl_space_window,
@@ -2921,6 +2998,8 @@ begin
         reload_config_if_needed(True);
         if not chord_was_consumed then
         begin
+            m_unconfigured_ctrl_space_pending := not nc_tsf_shortcut_is_ctrl_space(
+                m_shortcut_config.input_mode_toggle);
             // A config refresh clears transient shortcut state. Restore this
             // marker until Windows either reports its legacy toggle or the
             // bounded prefix timeout expires.
@@ -2967,6 +3046,12 @@ function TncTextService.external_input_mode_transition_active: Boolean;
 var
     elapsed_ms: UInt64;
 begin
+    if m_shortcut_config.input_mode_toggle.disabled then
+    begin
+        m_external_input_mode_transition_pending := False;
+        m_external_input_mode_transition_tick := 0;
+        Exit(False);
+    end;
     if (not m_external_input_mode_transition_pending) or
         (m_external_input_mode_transition_tick = 0) then
     begin
@@ -2992,15 +3077,12 @@ var
     got_state_from_host: Boolean;
     state_source: string;
 begin
-    input_mode := m_last_input_mode;
-    full_width_mode := m_last_full_width_mode;
-    punctuation_full_width := m_last_punctuation_full_width;
-    got_state_from_host := False;
-    if (m_ipc_client <> nil) and (m_session_id <> '') then
+    if m_shortcut_config.input_mode_toggle.disabled then
     begin
-        got_state_from_host := m_ipc_client.get_state(m_session_id, input_mode,
-            full_width_mode, punctuation_full_width);
+        Exit;
     end;
+    got_state_from_host := read_host_input_mode_or_cached(input_mode,
+        full_width_mode, punctuation_full_width);
 
     if input_mode = im_chinese then
     begin
@@ -3070,21 +3152,18 @@ var
     got_state_from_host: Boolean;
     state_source: string;
 begin
-    got_state_from_host := False;
-    input_mode := m_last_input_mode;
-    full_width_mode := m_last_full_width_mode;
-    punctuation_full_width := m_last_punctuation_full_width;
-
+    if m_shortcut_config.input_mode_toggle.disabled then
+    begin
+        Exit;
+    end;
     if (m_logger <> nil) and (m_logger.level <= ll_debug) then
     begin
         m_logger.debug(Format('Input-mode shortcut trigger shortcut=%s session=%s',
             [nc_shortcut_to_text(m_shortcut_config.input_mode_toggle), m_session_id]));
     end;
 
-    if (m_ipc_client <> nil) and (m_session_id <> '') then
-    begin
-        got_state_from_host := m_ipc_client.get_state(m_session_id, input_mode, full_width_mode, punctuation_full_width);
-    end;
+    got_state_from_host := read_host_input_mode_or_cached(input_mode,
+        full_width_mode, punctuation_full_width);
 
     if input_mode = im_chinese then
     begin
@@ -3735,6 +3814,8 @@ begin
     try
         if pdimFocus <> m_doc_mgr then
         begin
+            if m_compartment_deferred <> nil then
+                m_compartment_deferred.Cancel;
             cancel_composition;
             if (m_ipc_client <> nil) and (m_session_id <> '') then
             begin
@@ -3964,6 +4045,12 @@ var
     host_full_width: Boolean;
     host_punctuation_full_width: Boolean;
     system_shortcut_prefix_consumed: Boolean;
+    host_shortcuts: TncShortcutConfig;
+    input_shortcut_changed: Boolean;
+    key_state: TncKeyState;
+    ctrl_space_rejected: Boolean;
+    guard_unconfigured_mode: Boolean;
+    open_read_status, conversion_read_status: HRESULT;
 begin
     if m_compartment_update_depth > 0 then
     begin
@@ -3977,12 +4064,52 @@ begin
         Exit;
     end;
 
+    // A Windows IMM toggle can bypass all key sinks. Refresh the host-owned
+    // binding here too, so Apply/Disable does not wait for the next traced key.
+    Inc(m_compartment_update_depth);
+    try
+        if m_ipc_client.get_shortcut_config(m_session_id, host_shortcuts) then
+        begin
+            input_shortcut_changed := not nc_shortcut_equal(
+                m_shortcut_config.input_mode_toggle,
+                host_shortcuts.input_mode_toggle);
+            apply_shortcut_config(host_shortcuts);
+            if input_shortcut_changed then
+            begin
+                refresh_preserved_input_mode_shortcut;
+                refresh_terminal_ctrl_space_hook;
+            end;
+        end;
+    finally
+        Dec(m_compartment_update_depth);
+    end;
+
+    key_state := build_key_state;
+    ctrl_space_rejected := nc_tsf_ctrl_space_rejection_is_active(
+        m_shortcut_config.input_mode_toggle,
+        m_unconfigured_ctrl_space_pending, key_state);
+    // Also retain evidence when Windows delivered no key trace at all.
+    m_unconfigured_ctrl_space_pending := ctrl_space_rejected;
+    guard_unconfigured_mode := m_shortcut_config.input_mode_toggle.disabled or
+        ctrl_space_rejected;
+
     openclose_value := 0;
     conversion_value := 0;
-    has_openclose := read_compartment_dword(m_openclose_compartment, openclose_value);
-    has_conversion := read_compartment_dword(m_conversion_compartment, conversion_value);
+    has_openclose := nc_read_compartment_dword(m_openclose_compartment,
+        openclose_value, open_read_status);
+    has_conversion := nc_read_compartment_dword(m_conversion_compartment,
+        conversion_value, conversion_read_status);
+    if nc_compartments_need_rebind(open_read_status, conversion_read_status) then
+    begin
+        m_compartment_state_inited := False;
+        m_compartment_deferred.Request;
+    end;
     if (not has_openclose) and (not has_conversion) then
     begin
+        if m_logger <> nil then
+            m_logger.info(Format('Compartment values unavailable open_hr=0x%s conversion_hr=0x%s deferred=%d',
+                [IntToHex(Cardinal(open_read_status), 8), IntToHex(Cardinal(conversion_read_status), 8),
+                Ord(m_compartment_deferred.pending)]));
         Result := S_OK;
         Exit;
     end;
@@ -4001,7 +4128,7 @@ begin
         consume_system_input_mode_shortcut_prefix;
     if system_shortcut_prefix_consumed then
     begin
-        if nc_tsf_should_reject_unconfigured_ctrl_space_toggle(
+        if ctrl_space_rejected or nc_tsf_should_reject_unconfigured_ctrl_space_toggle(
             m_shortcut_config.input_mode_toggle,
             m_windows_ctrl_space_hotkey,
             system_shortcut_prefix_consumed) then
@@ -4040,12 +4167,13 @@ begin
     terminal_compatibility_target := False;
     host_state_available := False;
     host_state_matches_proposed := False;
-    if (not external_transition) and
-        (proposed_input_mode <> previous_input_mode) then
+    if guard_unconfigured_mode or
+        ((not external_transition) and
+        (proposed_input_mode <> previous_input_mode)) then
     begin
         terminal_compatibility_target :=
             current_target_is_terminal_compatibility_host;
-        if terminal_compatibility_target then
+        if terminal_compatibility_target or guard_unconfigured_mode then
         begin
             host_input_mode := previous_input_mode;
             host_full_width := previous_full_width;
@@ -4058,13 +4186,14 @@ begin
         end;
     end;
     rejected_transition := (not external_transition) and
+        (not host_state_matches_proposed) and
         rejected_modifier_transition_active;
     if (not rejected_transition) and
-        nc_tsf_should_reject_unconfigured_terminal_mode_change(
+        nc_tsf_should_reject_unconfigured_mode_change(
             m_shortcut_config.input_mode_toggle,
             terminal_compatibility_target, external_transition,
             proposed_input_mode <> previous_input_mode,
-            host_state_matches_proposed) then
+            host_state_matches_proposed, ctrl_space_rejected) then
     begin
         rejected_transition := True;
     end;
@@ -4077,6 +4206,30 @@ begin
         next_input_mode := previous_input_mode;
         next_full_width := previous_full_width;
         next_punctuation_full_width := previous_punctuation_full_width;
+        if guard_unconfigured_mode and host_state_available then
+        begin
+            next_input_mode := host_input_mode;
+            next_full_width := host_full_width;
+            next_punctuation_full_width := host_punctuation_full_width;
+        end;
+    end
+    else if guard_unconfigured_mode then
+    begin
+        // Mouse/UI changes and other configured actions update the host first.
+        // An unconfigured legacy chord cannot write mode/punctuation behind
+        // that state, including delayed and split notifications.
+        if host_state_available then
+        begin
+            next_input_mode := host_input_mode;
+            next_full_width := host_full_width;
+            next_punctuation_full_width := host_punctuation_full_width;
+        end
+        else
+        begin
+            next_input_mode := previous_input_mode;
+            next_full_width := previous_full_width;
+            next_punctuation_full_width := previous_punctuation_full_width;
+        end;
     end
     else if external_transition then
     begin
@@ -4106,11 +4259,12 @@ begin
         (next_full_width <> previous_full_width) or
         (next_punctuation_full_width <> previous_punctuation_full_width);
     state_synced := not state_changed;
-    if rejected_transition then
+    if rejected_transition or guard_unconfigured_mode then
     begin
         m_compartment_state_inited := False;
-        apply_engine_state_to_compartments(previous_input_mode,
-            previous_full_width, previous_punctuation_full_width);
+        apply_engine_state_to_compartments(next_input_mode,
+            next_full_width, next_punctuation_full_width);
+        state_synced := True;
     end
     else if state_changed then
     begin
@@ -4127,11 +4281,15 @@ begin
         m_last_input_mode := next_input_mode;
         m_last_full_width_mode := next_full_width;
         m_last_punctuation_full_width := next_punctuation_full_width;
-        // Never write compartments back from their own notification callback.
-        // A trace-assisted system shortcut is normalized by the next ordinary
-        // key after Windows has finished dispatching the chord.
-        m_compartment_state_inited := not external_transition;
-        if state_changed then
+        if not (rejected_transition or guard_unconfigured_mode) then
+        begin
+            // Trace-assisted shortcuts are normalized on the next ordinary key.
+            // A queued restoration has not synchronized Windows state yet.
+            m_compartment_state_inited := (not external_transition) and
+                has_openclose and has_conversion and
+                (not m_compartment_deferred.pending);
+        end;
+        if state_changed and (not guard_unconfigured_mode) then
         begin
             save_engine_state_to_config(next_input_mode, next_full_width,
                 next_punctuation_full_width);
@@ -4150,7 +4308,9 @@ begin
     if (m_logger <> nil) and (m_logger.level <= ll_debug) then
     begin
         m_logger.debug(Format(
-            'Compartment change source=%d open=%d/%d conversion=%d/0x%s pending=%d settled=%d rejected=%d terminal=%d host=%d/%d target=%d state=%d/%d/%d changed=%d synced=%d',
+            'Compartment change source=%d open=%d/%d conversion=%d/0x%s pending=%d settled=%d rejected=%d ' +
+            'terminal=%d host=%d/%d target=%d state=%d/%d/%d changed=%d host_synced=%d compartment_synced=%d ' +
+            'deferred=%d disabled=%d shortcut=%s ctrl=%d ctrl_guard=%d pid=%d tid=%d open_read_hr=0x%s conversion_read_hr=0x%s',
             [Ord(change_source), Ord(has_openclose), openclose_value,
             Ord(has_conversion), IntToHex(conversion_value, 8),
             Ord(external_transition), Ord(external_transition_settled),
@@ -4160,7 +4320,13 @@ begin
             Ord(m_external_input_mode_target),
             Ord(next_input_mode), Ord(next_full_width),
             Ord(next_punctuation_full_width), Ord(state_changed),
-            Ord(state_synced)]));
+            Ord(state_synced), Ord(m_compartment_state_inited),
+            Ord((m_compartment_deferred <> nil) and m_compartment_deferred.pending),
+            Ord(m_shortcut_config.input_mode_toggle.disabled),
+            nc_shortcut_to_text(m_shortcut_config.input_mode_toggle),
+            Ord(key_state.ctrl_down), Ord(ctrl_space_rejected),
+            GetCurrentProcessId, GetCurrentThreadId,
+            IntToHex(Cardinal(open_read_status), 8), IntToHex(Cardinal(conversion_read_status), 8)]));
     end;
 
     Result := S_OK;
@@ -4170,7 +4336,16 @@ function TncTextService.OnChange(var rguid: TGUID): HResult;
 begin
     Result := S_OK;
     try
-        Result := on_compartment_change_core(rguid);
+        if m_compartment_deferred = nil then
+            m_compartment_deferred := TncTsfDeferredCompartmentSync.Create(flush_deferred_compartment_state);
+        m_compartment_deferred.BeginNotification;
+        try
+            Result := on_compartment_change_core(rguid);
+        finally
+            if not m_compartment_deferred.EndNotification and (m_logger <> nil) then
+                m_logger.warn(Format('Compartment deferred sync post failed error=%d',
+                    [m_compartment_deferred.last_error]));
+        end;
     except
         log_tsf_boundary_exception('CompartmentEventSink.OnChange');
     end;
@@ -4302,8 +4477,7 @@ begin
         end;
     end;
 
-    m_shortcut_config := config.shortcuts;
-    nc_normalize_shortcut_config(m_shortcut_config);
+    apply_shortcut_config(config.shortcuts);
     m_loaded_config_write_time := get_config_write_time;
     m_last_config_check_tick := GetTickCount64;
     try
@@ -4314,6 +4488,33 @@ begin
     end;
     refresh_preserved_input_mode_shortcut;
     refresh_terminal_ctrl_space_hook;
+end;
+
+procedure TncTextService.apply_shortcut_config(const config: TncShortcutConfig);
+var
+    normalized: TncShortcutConfig;
+begin
+    normalized := config;
+    nc_normalize_shortcut_config(normalized);
+    if not nc_shortcut_equal(m_shortcut_config.input_mode_toggle,
+        normalized.input_mode_toggle) then
+    begin
+        // An in-flight preserved/legacy callback belongs to the old binding.
+        // Do not let it authorize a toggle after Apply or after Disable.
+        m_modifier_shortcut_pending := False;
+        m_modifier_shortcut_canceled := False;
+        m_modifier_shortcut_key_code := 0;
+        m_chord_shortcut_pending := False;
+        m_chord_shortcut_key_code := 0;
+        m_chord_shortcut_tick := 0;
+        m_chord_shortcut_source := tses_key_sink;
+        m_external_input_mode_transition_pending := False;
+        m_external_input_mode_transition_tick := 0;
+        clear_system_input_mode_shortcut_prefix;
+        clear_rejected_modifier_transition;
+        m_unconfigured_ctrl_space_pending := False;
+    end;
+    m_shortcut_config := normalized;
 end;
 
 procedure TncTextService.apply_log_config;

@@ -70,6 +70,7 @@ implementation
 
 uses
     nc_ipc_common,
+    nc_runtime_location,
     nc_shortcut;
 
 const
@@ -82,12 +83,8 @@ const
     c_get_module_handle_ex_unchanged_refcount = $00000002;
 {$IFDEF WIN32}
     c_tsf_module_name = 'cassotis_ime_svr32.dll';
-    c_host_exe_prefer = 'cassotis_ime_host.exe';
-    c_host_exe_fallback = 'cassotis_ime_host.exe';
 {$ELSE}
     c_tsf_module_name = 'cassotis_ime_svr.dll';
-    c_host_exe_prefer = 'cassotis_ime_host.exe';
-    c_host_exe_fallback = 'cassotis_ime_host.exe';
 {$ENDIF}
 
 function get_module_handle_ex(const flags: DWORD; const module_name: Pointer; var module_handle: HMODULE): BOOL; stdcall;
@@ -222,7 +219,6 @@ end;
 function TncIpcClient.start_host: Boolean;
 var
     exe_path: string;
-    module_dir: string;
     start_info: TStartupInfo;
     proc_info: TProcessInformation;
     command_line: string;
@@ -250,15 +246,8 @@ begin
         Exit;
     end;
 
-    module_dir := IncludeTrailingPathDelimiter(get_module_directory);
-    exe_path := module_dir + c_host_exe_prefer;
-    if not FileExists(exe_path) then
+    if not nc_resolve_runtime_host(get_module_directory, exe_path, m_last_error) then
     begin
-        exe_path := module_dir + c_host_exe_fallback;
-    end;
-    if not FileExists(exe_path) then
-    begin
-        m_last_error := ERROR_FILE_NOT_FOUND;
         Exit;
     end;
 

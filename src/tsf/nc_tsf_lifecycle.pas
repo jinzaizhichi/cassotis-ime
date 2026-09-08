@@ -73,6 +73,12 @@ function nc_tsf_shortcut_is_bare_shift(
     const configured_shortcut: TncShortcut): Boolean;
 function nc_tsf_shortcut_is_ctrl_space(
     const configured_shortcut: TncShortcut): Boolean;
+function nc_tsf_ctrl_space_rejection_for_key(
+    const configured_shortcut: TncShortcut; const key_code: Word;
+    const key_state: TncKeyState): Boolean;
+function nc_tsf_ctrl_space_rejection_is_active(
+    const configured_shortcut: TncShortcut; const observed_chord: Boolean;
+    const key_state: TncKeyState): Boolean;
 function nc_tsf_should_reject_unconfigured_ctrl_space_toggle(
     const configured_shortcut: TncShortcut;
     const windows_ctrl_space_hotkey: Boolean;
@@ -96,12 +102,13 @@ function nc_tsf_terminal_ctrl_space_disposition(
     const key_state: TncKeyState): TncTsfTerminalCtrlSpaceDisposition;
 function nc_tsf_is_terminal_compatibility_identity(
     const process_name: string; const window_class_name: string): Boolean;
-function nc_tsf_should_reject_unconfigured_terminal_mode_change(
+function nc_tsf_should_reject_unconfigured_mode_change(
     const configured_shortcut: TncShortcut;
     const terminal_like_target: Boolean;
     const external_transition: Boolean;
     const input_mode_changed: Boolean;
-    const host_state_matches_proposed: Boolean): Boolean;
+    const host_state_matches_proposed: Boolean;
+    const unconfigured_ctrl_space: Boolean = False): Boolean;
 function nc_tsf_rejected_modifier_transition_is_active(
     const pending: Boolean; const elapsed_ms: UInt64): Boolean;
 function nc_tsf_resolve_punctuation_full_width(
@@ -356,6 +363,32 @@ begin
         (not configured_shortcut.alt_down);
 end;
 
+function nc_tsf_ctrl_space_rejection_for_key(
+    const configured_shortcut: TncShortcut; const key_code: Word;
+    const key_state: TncKeyState): Boolean;
+var
+    normalized_key: Word;
+begin
+    normalized_key := nc_normalize_shortcut_key_code(key_code);
+    // Ctrl down can arrive before its key-state bit, and Windows may consume
+    // Space before the sink sees it. A different key ends this rejected chord.
+    Result := (not nc_tsf_shortcut_is_ctrl_space(configured_shortcut)) and
+        (not key_state.shift_down) and (not key_state.alt_down) and
+        ((normalized_key = VK_CONTROL) or
+        ((normalized_key = VK_SPACE) and key_state.ctrl_down));
+end;
+
+function nc_tsf_ctrl_space_rejection_is_active(
+    const configured_shortcut: TncShortcut; const observed_chord: Boolean;
+    const key_state: TncKeyState): Boolean;
+begin
+    // Do not expire or consume negative evidence on the first notification:
+    // Windows can deliver several changes, even after the keys were released.
+    Result := (not nc_tsf_shortcut_is_ctrl_space(configured_shortcut)) and
+        (not key_state.shift_down) and (not key_state.alt_down) and
+        (observed_chord or key_state.ctrl_down);
+end;
+
 function nc_tsf_should_reject_unconfigured_ctrl_space_toggle(
     const configured_shortcut: TncShortcut;
     const windows_ctrl_space_hotkey: Boolean;
@@ -430,13 +463,20 @@ begin
         (Pos('pseudoconsole', normalized_class_name) > 0);
 end;
 
-function nc_tsf_should_reject_unconfigured_terminal_mode_change(
+function nc_tsf_should_reject_unconfigured_mode_change(
     const configured_shortcut: TncShortcut;
     const terminal_like_target: Boolean;
     const external_transition: Boolean;
     const input_mode_changed: Boolean;
-    const host_state_matches_proposed: Boolean): Boolean;
+    const host_state_matches_proposed: Boolean;
+    const unconfigured_ctrl_space: Boolean): Boolean;
 begin
+    if configured_shortcut.disabled or unconfigured_ctrl_space then
+    begin
+        // A different enabled binding (including Shift) does not authorize
+        // Ctrl+Space. The host remains authoritative for mouse/UI changes.
+        Exit(input_mode_changed and (not host_state_matches_proposed));
+    end;
     // Some console compatibility paths change TSF compartments directly for
     // bare Shift and never dispatch a key event to the text service. A state
     // already selected by the host (for example from Cassotis' status UI) is
