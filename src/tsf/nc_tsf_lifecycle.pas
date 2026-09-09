@@ -38,6 +38,7 @@ const
     c_nc_tsf_rejected_modifier_transition_timeout_ms = UInt64(750);
 
 function nc_tsf_sink_cookie_is_valid(const cookie: DWORD): Boolean;
+function nc_tsf_is_shell_key(const key_code: Word): Boolean;
 function nc_tsf_try_unadvise_sink(const source: ITfSource; var cookie: DWORD): Boolean;
 function nc_tsf_shortcut_to_preserved_key(const shortcut: TncShortcut;
     out preserved_key: TF_PRESERVEDKEY): Boolean;
@@ -130,6 +131,11 @@ implementation
 uses
     System.SysUtils,
     nc_shortcut;
+
+function nc_tsf_is_shell_key(const key_code: Word): Boolean;
+begin
+    Result := key_code in [VK_LWIN, VK_RWIN];
+end;
 
 function nc_tsf_sink_cookie_is_valid(const cookie: DWORD): Boolean;
 begin

@@ -15,6 +15,8 @@ type
         m_pipe_name: string;
         m_auto_start: Boolean;
         m_last_start_tick: DWORD;
+        m_last_start_error: DWORD;
+        m_last_start_detail: string;
         m_last_error: DWORD;
         function call_pipe(const request_text: string; out response_text: string): Boolean;
         function ping_host: Boolean;
@@ -54,6 +56,7 @@ type
         function reset_session(const session_id: string;
             const preserve_document_context: Boolean = False): Boolean;
         property last_error: DWORD read m_last_error;
+        property last_start_detail: string read m_last_start_detail;
     end;
 
 function build_set_caret_request(const session_id: string;
@@ -119,6 +122,8 @@ begin
     m_pipe_name := get_nc_pipe_name;
     m_auto_start := auto_start;
     m_last_start_tick := 0;
+    m_last_start_error := 0;
+    m_last_start_detail := '';
     m_last_error := 0;
 end;
 
@@ -223,6 +228,9 @@ var
     proc_info: TProcessInformation;
     command_line: string;
     now_tick: DWORD;
+    module_dir: string;
+    resolution_detail: string;
+    resolved: Boolean;
 begin
     Result := False;
     now_tick := GetTickCount;
@@ -230,6 +238,8 @@ begin
     begin
         m_last_start_tick := now_tick;
         m_last_error := 0;
+        m_last_start_error := 0;
+        m_last_start_detail := 'host already responding';
         Result := True;
         Exit;
     end;
@@ -238,36 +248,55 @@ begin
         // Another instance is already starting/running; do not spawn again.
         m_last_start_tick := now_tick;
         m_last_error := 0;
+        m_last_start_error := 0;
+        m_last_start_detail := 'host startup mutex exists; waiting for pipe';
         Result := True;
         Exit;
     end;
     if (m_last_start_tick <> 0) and (now_tick - m_last_start_tick < c_start_retry_delay_ms) then
     begin
+        m_last_error := m_last_start_error;
+        if m_last_error = ERROR_SUCCESS then
+            m_last_error := ERROR_RETRY;
         Exit;
     end;
 
-    if not nc_resolve_runtime_host(get_module_directory, exe_path, m_last_error) then
+    // Failed starts need the same backoff as successful ones. Preserve the
+    // actual failure instead of replacing it with a later missing-pipe error.
+    m_last_start_tick := now_tick;
+    module_dir := get_module_directory;
+    m_last_start_detail := 'resolve_host module_dir=' + module_dir;
+    resolved := nc_resolve_runtime_host(module_dir, exe_path, m_last_error, resolution_detail);
+    m_last_start_detail := m_last_start_detail + ' ' + resolution_detail;
+    if not resolved then
     begin
+        m_last_start_error := m_last_error;
         Exit;
     end;
+    m_last_start_detail := 'CreateProcess host_path=' + exe_path;
 
     FillChar(start_info, SizeOf(start_info), 0);
     start_info.cb := SizeOf(start_info);
     FillChar(proc_info, SizeOf(proc_info), 0);
 
     command_line := '"' + exe_path + '"';
-    if CreateProcess(PChar(exe_path), PChar(command_line), nil, nil, False, CREATE_NO_WINDOW, nil, nil, start_info,
+    if CreateProcess(PChar(exe_path), PChar(command_line), nil, nil, False, CREATE_NO_WINDOW, nil,
+        PChar(ExtractFileDir(exe_path)), start_info,
         proc_info) then
     begin
+        m_last_start_detail := Format('started host_path=%s pid=%d',
+            [exe_path, proc_info.dwProcessId]);
         CloseHandle(proc_info.hProcess);
         CloseHandle(proc_info.hThread);
         m_last_start_tick := now_tick;
         m_last_error := 0;
+        m_last_start_error := 0;
         Result := True;
         Exit;
     end;
 
     m_last_error := GetLastError;
+    m_last_start_error := m_last_error;
 end;
 
 function TncIpcClient.is_host_running: Boolean;
@@ -329,7 +358,13 @@ begin
         if (err = ERROR_FILE_NOT_FOUND) and m_auto_start and (not started_host) then
         begin
             started_host := True;
-            start_host;
+            if not start_host then
+            begin
+                // There is no process to wait for. In-proc callers must return
+                // immediately, with the resolver/CreateProcess error intact.
+                Result := False;
+                Exit;
+            end;
             if wait_for_host_ready(c_start_wait_ms) then
             begin
                 Continue;

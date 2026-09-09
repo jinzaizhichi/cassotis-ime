@@ -1851,7 +1851,7 @@ begin
     if (path_length > 0) and (path_length < DWORD(Length(buffer))) then
         SetString(module_path, buffer, path_length);
     m_logger.info(Format(
-        'TSF identity code=compartment-defer-20260908 pid=%d tid=%d process=%s module=%s file_version=%s shortcut=%s disabled=%d',
+        'TSF identity code=host-startup-20260909 pid=%d tid=%d process=%s module=%s file_version=%s shortcut=%s disabled=%d',
         [GetCurrentProcessId, GetCurrentThreadId, ParamStr(0), module_path,
         nc_get_display_version_from_exe_file(module_path),
         nc_shortcut_to_text(m_shortcut_config.input_mode_toggle),
@@ -2082,6 +2082,7 @@ const
     c_slow_test_key_ms = 8;
 var
     handled: Boolean;
+    ipc_ok: Boolean;
     key_state: TncKeyState;
     key_code: Word;
     total_start_tick: UInt64;
@@ -2092,6 +2093,14 @@ var
     normalized_key_code: Word;
 begin
     eaten := 0;
+    if nc_tsf_is_shell_key(Word(wParam)) then
+    begin
+        m_modifier_shortcut_canceled := True;
+        m_chord_shortcut_pending := False;
+        clear_system_input_mode_shortcut_prefix;
+        Result := S_OK;
+        Exit;
+    end;
     total_start_tick := GetTickCount64;
     ipc_elapsed_ms := 0;
     reload_config_if_needed;
@@ -2171,9 +2180,10 @@ begin
     if (m_ipc_client <> nil) and (m_session_id <> '') then
     begin
         ipc_start_tick := GetTickCount64;
-        if m_ipc_client.test_key(m_session_id, key_code, key_state, handled) then
+        ipc_ok := m_ipc_client.test_key(m_session_id, key_code, key_state, handled);
+        ipc_elapsed_ms := Int64(GetTickCount64 - ipc_start_tick);
+        if ipc_ok then
         begin
-            ipc_elapsed_ms := Int64(GetTickCount64 - ipc_start_tick);
             if handled then
             begin
                 eaten := 1;
@@ -2183,7 +2193,8 @@ begin
             and (m_ipc_client.last_error <> m_last_ipc_error) then
         begin
             m_last_ipc_error := m_ipc_client.last_error;
-            m_logger.info(Format('IPC test_key failed err=%d', [m_last_ipc_error]));
+            m_logger.info(Format('IPC test_key failed err=%d (%s) startup=[%s]',
+                [m_last_ipc_error, SysErrorMessage(m_last_ipc_error), m_ipc_client.last_start_detail]));
         end;
     end;
     total_elapsed_ms := Int64(GetTickCount64 - total_start_tick);
@@ -2222,6 +2233,7 @@ const
     c_slow_keydown_ms = 12;
 var
     handled: Boolean;
+    ipc_ok: Boolean;
     commit_text: string;
     display_text: string;
     input_mode: TncInputMode;
@@ -2253,8 +2265,17 @@ var
     shortcut_value: TncShortcut;
     normalized_key_code: Word;
 begin
-    ensure_active_context(context);
     eaten := 0;
+    // Shell keys must not start/wait for the engine or trigger context IPC.
+    if nc_tsf_is_shell_key(Word(wParam)) then
+    begin
+        m_modifier_shortcut_canceled := True;
+        m_chord_shortcut_pending := False;
+        clear_system_input_mode_shortcut_prefix;
+        Result := S_OK;
+        Exit;
+    end;
+    ensure_active_context(context);
     total_start_tick := GetTickCount64;
     process_elapsed_ms := 0;
     composition_elapsed_ms := 0;
@@ -2355,10 +2376,11 @@ begin
     begin
         mark_session_dirty;
         process_start_tick := GetTickCount64;
-        if m_ipc_client.process_key(m_session_id, key_code, key_state, handled, commit_text, display_text,
-            input_mode, full_width_mode, punctuation_full_width, lookup_perf_info) then
+        ipc_ok := m_ipc_client.process_key(m_session_id, key_code, key_state, handled, commit_text, display_text,
+            input_mode, full_width_mode, punctuation_full_width, lookup_perf_info);
+        process_elapsed_ms := Int64(GetTickCount64 - process_start_tick);
+        if ipc_ok then
         begin
-            process_elapsed_ms := Int64(GetTickCount64 - process_start_tick);
             apply_engine_state_to_compartments(input_mode, full_width_mode, punctuation_full_width);
             if handled then
             begin
@@ -2415,7 +2437,8 @@ begin
             and (m_ipc_client.last_error <> m_last_ipc_error) then
         begin
             m_last_ipc_error := m_ipc_client.last_error;
-            m_logger.info(Format('IPC process_key failed err=%d', [m_last_ipc_error]));
+            m_logger.info(Format('IPC process_key failed err=%d (%s) startup=[%s]',
+                [m_last_ipc_error, SysErrorMessage(m_last_ipc_error), m_ipc_client.last_start_detail]));
         end;
     end;
     total_elapsed_ms := Int64(GetTickCount64 - total_start_tick);
@@ -4413,7 +4436,9 @@ var
     host_input_mode: TncInputMode;
     host_full_width_mode: Boolean;
     host_punctuation_full_width: Boolean;
+    host_sync_error: DWORD;
 begin
+    host_sync_error := ERROR_SUCCESS;
     config := nc_default_engine_config;
     config_manager := nil;
     try
@@ -4452,6 +4477,7 @@ begin
             config.full_width_mode := host_full_width_mode;
             config.punctuation_full_width := host_punctuation_full_width;
         end;
+        host_sync_error := m_ipc_client.last_error;
     end;
 
     apply_shortcut_config(config.shortcuts);
@@ -4462,6 +4488,13 @@ begin
     except
         log_tsf_boundary_exception('ApplyLogConfig');
         free_logger;
+    end;
+    if (host_sync_error <> ERROR_SUCCESS) and (m_logger <> nil) and
+        (host_sync_error <> m_last_ipc_error) then
+    begin
+        m_last_ipc_error := host_sync_error;
+        m_logger.warn(Format('TSF host sync unavailable err=%d (%s) startup=[%s]',
+            [host_sync_error, SysErrorMessage(host_sync_error), m_ipc_client.last_start_detail]));
     end;
     refresh_preserved_input_mode_shortcut;
     refresh_terminal_ctrl_space_hook;

@@ -11,6 +11,7 @@ uses
     System.Generics.Defaults,
     Winapi.Windows,
     nc_types,
+    nc_candidate_presentation,
     nc_shortcut,
     nc_dictionary_intf,
     nc_local_repair_guard,
@@ -849,6 +850,8 @@ type
         function get_dictionary_write_time(const path: string): TDateTime;
         function visible_candidates_cache_is_current(
             const page_size: Integer): Boolean;
+        procedure cache_visible_candidate_page(const candidates: TncCandidateList;
+            const source_indices: TArray<Integer>; const page_size: Integer);
         function get_candidate_state_signature: UInt64;
         function get_long_visible_candidate_pool_cache_key(
             const page_size: Integer): string;
@@ -141199,6 +141202,24 @@ begin
         (m_visible_candidates_cache_page_size = page_size);
 end;
 
+procedure TncEngine.cache_visible_candidate_page(const candidates: TncCandidateList;
+    const source_indices: TArray<Integer>; const page_size: Integer);
+begin
+    if Length(candidates) <> Length(source_indices) then
+        raise EArgumentException.Create('Visible candidate/source count mismatch');
+    m_visible_candidates_cache := Copy(candidates);
+    m_visible_candidate_source_indices_cache := Copy(source_indices);
+    m_visible_candidates_cache_composition_text := m_composition_text;
+    m_visible_candidates_cache_lookup_key := m_last_lookup_key;
+    m_visible_candidates_cache_page_index := m_page_index;
+    m_visible_candidates_cache_page_size := page_size;
+    m_visible_candidates_cache_valid := True;
+    if (Length(candidates) = 0) or (m_selected_index < 0) then
+        m_selected_index := 0
+    else if m_selected_index >= Length(candidates) then
+        m_selected_index := High(candidates);
+end;
+
 function TncEngine.get_candidate_state_signature: UInt64;
 var
     signature: UInt64;
@@ -141264,8 +141285,6 @@ end;
 
 function TncEngine.get_current_page_candidate_count(
     const page_size: Integer): Integer;
-var
-    page_offset: Integer;
 begin
     if visible_candidates_cache_is_current(page_size) then
     begin
@@ -141274,29 +141293,12 @@ begin
 
     if long_visible_candidate_pool_cache_is_current(page_size) then
     begin
-        page_offset := m_page_index * page_size;
-        Result := Length(m_long_visible_candidate_pool_cache) - page_offset;
-        if Result < 0 then
-        begin
-            Result := 0;
-        end
-        else if Result > page_size then
-        begin
-            Result := page_size;
-        end;
+        Result := nc_candidate_page_items(Length(m_long_visible_candidate_pool_cache),
+            m_page_index, page_size);
         Exit;
     end;
 
-    page_offset := m_page_index * page_size;
-    Result := Length(m_candidates) - page_offset;
-    if Result < 0 then
-    begin
-        Result := 0;
-    end
-    else if Result > page_size then
-    begin
-        Result := page_size;
-    end;
+    Result := nc_candidate_page_items(Length(m_candidates), m_page_index, page_size);
 end;
 
 procedure TncEngine.apply_visible_local_repair(var candidates: TncCandidateList;
@@ -141350,7 +141352,8 @@ var
             count := 0;
             for i := 0 to High(pool) do
             begin
-                item_key := pool[i].text + #0 + pool[i].comment;
+                item_key := nc_visible_candidate_key(pool[i],
+                    normalize_pinyin_text(Trim(pool[i].comment)));
                 if seen.ContainsKey(item_key) then Continue;
                 seen.Add(item_key, 0);
                 pool[count] := pool[i];
@@ -141553,7 +141556,6 @@ procedure TncEngine.normalize_page_and_selection;
 var
     page_size: Integer;
     page_count: Integer;
-    page_offset: Integer;
     page_items: Integer;
 begin
     page_size := get_candidate_page_size;
@@ -141574,16 +141576,7 @@ begin
         m_page_index := page_count - 1;
     end;
 
-    page_offset := m_page_index * page_size;
-    page_items := Length(m_candidates) - page_offset;
-    if visible_candidates_cache_is_current(page_size) then
-    begin
-        page_items := Length(m_visible_candidates_cache);
-    end;
-    if page_items > page_size then
-    begin
-        page_items := page_size;
-    end;
+    page_items := get_current_page_candidate_count(page_size);
 
     if page_items <= 0 then
     begin
@@ -156695,12 +156688,7 @@ var
 
         function visible_selection_cache_is_current: Boolean;
         begin
-            Result := m_visible_candidates_cache_valid and
-                SameText(m_visible_candidates_cache_composition_text,
-                m_composition_text) and
-                SameText(m_visible_candidates_cache_lookup_key, m_last_lookup_key) and
-                (m_visible_candidates_cache_page_index = m_page_index) and
-                (m_visible_candidates_cache_page_size = page_size);
+            Result := visible_candidates_cache_is_current(page_size);
         end;
 
         function get_visible_candidate_source_index(
@@ -158094,8 +158082,7 @@ var
     display_query_key_cache: TArray<string>;
     display_normalized_syllable_cache: TArray<string>;
     candidate_idx: Integer;
-    cached_pool_start: Integer;
-    cached_pool_count: Integer;
+    cached_page_sources: TArray<Integer>;
     umlaut_raw_prefixes_ready: Boolean;
     umlaut_raw_prefixes: TncCandidateList;
 
@@ -185736,6 +185723,13 @@ var
                 Exit;
             end;
 
+            // A preserved partial must not override an explicit full user word.
+            if (Length(Result) > 0) and (Result[0].source = cs_user) and
+                is_protected_full_query_exact_local(Result[0]) then
+            begin
+                Exit;
+            end;
+
             { A forced incremental prefix must not displace a full exact or a
               longer exact phrase prefix that explains more input syllables. }
             superseding_idx_local := -1;
@@ -187126,8 +187120,8 @@ var
                 write_idx_local := 0;
                 for read_idx_local := 0 to High(Result) do
                 begin
-                    candidate_key_local := LowerCase(Trim(Result[read_idx_local].text)) +
-                        #1 + LowerCase(normalize_pinyin_text(
+                    candidate_key_local := nc_visible_candidate_key(Result[read_idx_local],
+                        normalize_pinyin_text(
                         Trim(Result[read_idx_local].comment)));
                     if (Trim(Result[read_idx_local].text) <> '') and
                         seen_keys_local.ContainsKey(candidate_key_local) then
@@ -189962,8 +189956,6 @@ var
             pool_source_indices_local: TArray<Integer>;
             seen_candidates_local: TDictionary<string, Boolean>;
             long_candidate_count_local: Integer;
-            page_start_local: Integer;
-            page_count_local: Integer;
 
             function get_partial_prefix_units_local(
                 const candidate_value_local: TncCandidate;
@@ -190189,9 +190181,8 @@ var
                         cdk_lm_compound;
                 end;
 
-                candidate_key_local := LowerCase(
-                    Trim(normalized_candidate_local.text)) + #0 +
-                    LowerCase(normalize_pinyin_text(
+                candidate_key_local := nc_visible_candidate_key(normalized_candidate_local,
+                    normalize_pinyin_text(
                     Trim(normalized_candidate_local.comment)));
                 if (Trim(normalized_candidate_local.text) = '') or
                     seen_candidates_local.ContainsKey(candidate_key_local) then
@@ -190415,6 +190406,22 @@ var
                 end;
             end;
 
+            procedure order_short_pool_prefix_tiers_local;
+            var
+                prefix_units: TArray<Integer>;
+                idx, units: Integer;
+            begin
+                SetLength(prefix_units, Length(pool_candidates_local));
+                for idx := 0 to High(pool_candidates_local) do
+                begin
+                    if not get_partial_prefix_units_local(
+                        pool_candidates_local[idx], units) then Continue;
+                    prefix_units[idx] := units;
+                end;
+                nc_order_candidate_prefix_tiers(pool_candidates_local,
+                    pool_source_indices_local, prefix_units, expected_units);
+            end;
+
             procedure build_short_visible_candidate_pool_local;
             var
                 candidate_idx_local: Integer;
@@ -190434,10 +190441,10 @@ var
                 SetLength(pool_source_indices_local, 0);
                 seen_candidates_local := TDictionary<string, Boolean>.Create;
                 try
-                    { Freeze the fully processed first page, then append every
-                      remaining visible source candidate once. Later pages are
-                      slices of this pool and therefore cannot rerun first-page
-                      promotion rules or lose the item displaced by a prefix. }
+                    { Collect the processed first page and remaining source
+                      candidates once. Normalize prefix tiers before pagination
+                      so a filled first page cannot strand shorter words behind
+                      singles. Complete-candidate ranking is left unchanged. }
                     for candidate_idx_local := 0 to High(Result) do
                     begin
                         if candidate_idx_local < Length(visible_source_indices) then
@@ -190505,7 +190512,10 @@ var
                             candidate_local.display_kind = cdk_lm_compound);
                     end;
 
+                    order_short_pool_prefix_tiers_local;
                     append_nasal_boundary_singles_local;
+                    nc_copy_candidate_page(pool_candidates_local, pool_source_indices_local,
+                        0, visible_page_size, Result, visible_source_indices);
                     m_long_visible_candidate_pool_cache := Copy(
                         pool_candidates_local, 0, Length(pool_candidates_local));
                     m_long_visible_candidate_pool_source_indices_cache := Copy(
@@ -190580,21 +190590,8 @@ var
                     get_candidate_state_signature;
                 m_long_visible_candidate_pool_cache_valid := True;
 
-                page_start_local := m_page_index * visible_page_size;
-                page_count_local := Length(pool_candidates_local) -
-                    page_start_local;
-                if page_count_local < 0 then
-                begin
-                    page_count_local := 0;
-                end
-                else if page_count_local > visible_page_size then
-                begin
-                    page_count_local := visible_page_size;
-                end;
-                Result := Copy(pool_candidates_local, page_start_local,
-                    page_count_local);
-                visible_source_indices := Copy(pool_source_indices_local,
-                    page_start_local, page_count_local);
+                nc_copy_candidate_page(pool_candidates_local, pool_source_indices_local,
+                    m_page_index, visible_page_size, Result, visible_source_indices);
             finally
                 seen_candidates_local.Free;
             end;
@@ -190832,26 +190829,7 @@ var
                     end;
                 end;
             end;
-            if Length(Result) <= 0 then
-            begin
-                m_selected_index := 0;
-            end
-            else if m_selected_index < 0 then
-            begin
-                m_selected_index := 0;
-            end
-            else if m_selected_index >= Length(Result) then
-            begin
-                m_selected_index := High(Result);
-            end;
-            m_visible_candidates_cache := Copy(Result, 0, Length(Result));
-            m_visible_candidate_source_indices_cache :=
-                Copy(visible_source_indices, 0, Length(visible_source_indices));
-            m_visible_candidates_cache_composition_text := m_composition_text;
-            m_visible_candidates_cache_lookup_key := m_last_lookup_key;
-            m_visible_candidates_cache_page_index := m_page_index;
-            m_visible_candidates_cache_page_size := visible_page_size;
-            m_visible_candidates_cache_valid := True;
+            cache_visible_candidate_page(Result, visible_source_indices, visible_page_size);
         finally
             emitted_visible_texts.Free;
             complete_visible_texts.Free;
@@ -191132,12 +191110,7 @@ begin
     SetLength(Result, 0);
     page_size := get_candidate_limit;
     visible_page_size := get_candidate_page_size;
-    if m_visible_candidates_cache_valid and
-        SameText(m_visible_candidates_cache_composition_text,
-        m_composition_text) and
-        SameText(m_visible_candidates_cache_lookup_key, m_last_lookup_key) and
-        (m_visible_candidates_cache_page_index = m_page_index) and
-        (m_visible_candidates_cache_page_size = visible_page_size) then
+    if visible_candidates_cache_is_current(visible_page_size) then
     begin
         Result := Copy(m_visible_candidates_cache, 0,
             Length(m_visible_candidates_cache));
@@ -191145,36 +191118,10 @@ begin
     end;
     if long_visible_candidate_pool_cache_is_current(visible_page_size) then
     begin
-        cached_pool_start := m_page_index * visible_page_size;
-        cached_pool_count := Length(m_long_visible_candidate_pool_cache) -
-            cached_pool_start;
-        if cached_pool_count < 0 then
-        begin
-            cached_pool_count := 0;
-        end
-        else if cached_pool_count > visible_page_size then
-        begin
-            cached_pool_count := visible_page_size;
-        end;
-        Result := Copy(m_long_visible_candidate_pool_cache,
-            cached_pool_start, cached_pool_count);
-        m_visible_candidate_source_indices_cache := Copy(
+        nc_copy_candidate_page(m_long_visible_candidate_pool_cache,
             m_long_visible_candidate_pool_source_indices_cache,
-            cached_pool_start, cached_pool_count);
-        m_visible_candidates_cache := Copy(Result, 0, Length(Result));
-        m_visible_candidates_cache_composition_text := m_composition_text;
-        m_visible_candidates_cache_lookup_key := m_last_lookup_key;
-        m_visible_candidates_cache_page_index := m_page_index;
-        m_visible_candidates_cache_page_size := visible_page_size;
-        m_visible_candidates_cache_valid := True;
-        if Length(Result) <= 0 then
-        begin
-            m_selected_index := 0;
-        end
-        else if m_selected_index >= Length(Result) then
-        begin
-            m_selected_index := High(Result);
-        end;
+            m_page_index, visible_page_size, Result, cached_page_sources);
+        cache_visible_candidate_page(Result, cached_page_sources, visible_page_size);
         note_display_phase('longvisiblecache');
         Exit;
     end;
@@ -191981,13 +191928,7 @@ begin
     begin
         total_count := Length(m_candidates);
     end;
-    if (page_size <= 0) or (total_count = 0) then
-    begin
-        Result := 0;
-        Exit;
-    end;
-
-    Result := (total_count + page_size - 1) div page_size;
+    Result := nc_candidate_page_count(total_count, page_size);
 end;
 
 function TncEngine.get_page_index: Integer;
@@ -192078,12 +192019,7 @@ begin
     begin
         normalize_page_and_selection;
         page_size := get_candidate_page_size;
-        if m_visible_candidates_cache_valid and
-            SameText(m_visible_candidates_cache_composition_text,
-            m_composition_text) and
-            SameText(m_visible_candidates_cache_lookup_key, m_last_lookup_key) and
-            (m_visible_candidates_cache_page_index = m_page_index) and
-            (m_visible_candidates_cache_page_size = page_size) then
+        if visible_candidates_cache_is_current(page_size) then
         begin
             visible_candidates := m_visible_candidates_cache;
         end

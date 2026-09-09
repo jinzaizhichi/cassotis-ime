@@ -17,7 +17,7 @@ function nc_read_runtime_registration(const root: HKEY; const key_path: string;
     const registry_view: REGSAM; out dll_path: string;
     out error_code: DWORD): Boolean;
 function nc_resolve_runtime_host(const module_dir: string; out host_path: string;
-    out error_code: DWORD): Boolean;
+    out error_code: DWORD; out resolution_detail: string): Boolean;
 
 implementation
 
@@ -36,6 +36,8 @@ function nc_select_runtime_host(const module_dir, registered_dll: string;
     out error_code: DWORD): Boolean;
 var
     dll_path, directory, file_name: string;
+    long_path: TArray<Char>;
+    path_length: DWORD;
 begin
     Result := False;
     host_path := '';
@@ -46,9 +48,22 @@ begin
         if (Length(dll_path) >= 2) and (dll_path[1] = '"') and
             (dll_path[Length(dll_path)] = '"') then
             dll_path := Copy(dll_path, 2, Length(dll_path) - 2);
+        if not absolute_file_path(dll_path) then
+            Exit;
+        // Delphi's COM registration uses 8.3 aliases for paths with spaces.
+        // Resolve the real name before validating it; never accept CASSOT~*.DLL
+        // by pattern alone, since it might refer to an unrelated library.
+        path_length := GetLongPathName(PChar(dll_path), nil, 0);
+        if (path_length > 0) and (path_length <= 32768) then
+        begin
+            SetLength(long_path, path_length);
+            path_length := GetLongPathName(PChar(dll_path),
+                @long_path[0], Length(long_path));
+            if (path_length > 0) and (path_length < DWORD(Length(long_path))) then
+                SetString(dll_path, PChar(@long_path[0]), path_length);
+        end;
         file_name := ExtractFileName(dll_path);
-        if not absolute_file_path(dll_path) or
-            ((not SameText(file_name, 'cassotis_ime_svr.dll')) and
+        if ((not SameText(file_name, 'cassotis_ime_svr.dll')) and
             (not SameText(file_name, 'cassotis_ime_svr32.dll'))) then
             Exit;
         directory := ExtractFileDir(dll_path);
@@ -145,25 +160,34 @@ begin
 end;
 
 function nc_resolve_runtime_host(const module_dir: string; out host_path: string;
-    out error_code: DWORD): Boolean;
+    out error_code: DWORD; out resolution_detail: string): Boolean;
 var
     dll_path: string;
     found: Boolean;
+    registry_view: REGSAM;
 begin
     host_path := '';
     // The host is Win64 even for a Win32 text service. HKCR observes the user's
     // effective COM registration rather than bypassing a per-user override.
+    registry_view := KEY_WOW64_64KEY;
     found := nc_read_runtime_registration(HKEY_CLASSES_ROOT,
-        c_nc_tsf_registration_key, KEY_WOW64_64KEY, dll_path, error_code);
+        c_nc_tsf_registration_key, registry_view, dll_path, error_code);
     if not found and (error_code in [ERROR_FILE_NOT_FOUND, ERROR_PATH_NOT_FOUND]) then
+    begin
+        registry_view := KEY_WOW64_32KEY;
         found := nc_read_runtime_registration(HKEY_CLASSES_ROOT,
-            c_nc_tsf_registration_key, KEY_WOW64_32KEY, dll_path, error_code);
+            c_nc_tsf_registration_key, registry_view, dll_path, error_code);
+    end;
+    resolution_detail := Format('registry=HKCR view=0x%x registered_dll=[%s] read_error=%d',
+        [registry_view, dll_path, error_code]);
     if not found and not (error_code in [ERROR_FILE_NOT_FOUND, ERROR_PATH_NOT_FOUND]) then
         Exit(False);
     // Unregistered development/portable builds retain their adjacent host.
     // Once registered, failure is explicit; no silent downgrade is allowed.
     Result := nc_select_runtime_host(module_dir, dll_path, found,
         host_path, error_code);
+    if not found then
+        resolution_detail := resolution_detail + ' unregistered_adjacent_runtime';
 end;
 
 end.

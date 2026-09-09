@@ -63,7 +63,8 @@ type
     public
         constructor create(const owner: TncEngineHost; const session_id: string; const instance_id: UInt64;
             const config: TncEngineConfig;
-            const defer_optional_dictionary_models: Boolean = False);
+            const defer_optional_dictionary_models: Boolean = False;
+            const owned_engine: TncEngine = nil);
         destructor Destroy; override;
         procedure adopt_session_id(const session_id: string);
         procedure touch;
@@ -688,7 +689,8 @@ end;
 
 constructor TncHostSession.create(const owner: TncEngineHost; const session_id: string; const instance_id: UInt64;
     const config: TncEngineConfig;
-    const defer_optional_dictionary_models: Boolean = False);
+    const defer_optional_dictionary_models: Boolean = False;
+    const owned_engine: TncEngine = nil);
 begin
     inherited create;
     m_owner := owner;
@@ -696,7 +698,10 @@ begin
     m_instance_id := instance_id;
     m_last_activity_tick := GetTickCount64;
     m_release_requested := False;
-    m_engine := TncEngine.create(config, defer_optional_dictionary_models);
+    // The session owns injected engines too, allowing isolated session replay.
+    m_engine := owned_engine;
+    if m_engine = nil then
+        m_engine := TncEngine.create(config, defer_optional_dictionary_models);
     if owner <> nil then
     begin
         m_engine.set_long_neural_reranker(owner.m_long_neural_reranker);
@@ -882,7 +887,8 @@ begin
         (not one_key_completions_equal(m_one_key_completion,
         one_key_completion)) or
         (not candidates_equal(m_candidates, candidates));
-    m_candidates := candidates;
+    // Async UI generations must own their snapshot, not the producer's array.
+    m_candidates := Copy(candidates);
     m_one_key_completion := one_key_completion;
     m_page_index := page_index;
     m_page_count := page_count;

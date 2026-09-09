@@ -19,6 +19,8 @@ uses
     ComObj,
     nc_tsf_guids in '..\src\tsf\nc_tsf_guids.pas',
     nc_tsf_upgrade_scan in '..\src\common\nc_tsf_upgrade_scan.pas',
+    nc_shell_upgrade in '..\src\common\nc_shell_upgrade.pas',
+    nc_shell_recovery in '..\src\common\nc_shell_recovery.pas',
     nc_profile_icon in '..\src\common\nc_profile_icon.pas',
     nc_runtime_process_policy in '..\src\common\nc_runtime_process_policy.pas';
 
@@ -70,7 +72,7 @@ function nc_query_full_process_image_name(process_handle: THandle; flags: DWORD;
 
 procedure print_usage;
 begin
-    Writeln('Usage: cassotis_ime_profile_reg register|unregister|register_tsf|unregister_tsf|start|stop|list_force_stop_targets|force_stop_runtime|list_stale_tsf_holders');
+    Writeln('Usage: cassotis_ime_profile_reg register|unregister|register_tsf|unregister_tsf|start|stop|list_force_stop_targets|force_stop_runtime|list_stale_tsf_holders|list_stale_shell_holders|restart_stale_shell_holders');
 end;
 
 function hr_succeeded(const hr: HRESULT): Boolean;
@@ -981,18 +983,17 @@ begin
     end;
 end;
 
-function get_interactive_wow64_processes(const only_pid: DWORD;
-    out scan_succeeded: Boolean): TArray<TncProcessInfo>;
+function get_interactive_processes(const only_pid: DWORD;
+    out scan_succeeded: Boolean; const shell_only: Boolean = False): TArray<TncProcessInfo>;
 var
-    snapshot, process_handle: THandle;
+    snapshot: THandle;
     entry: TProcessEntry32;
     session_id: DWORD;
-    wow64: BOOL;
     info: TncProcessInfo;
     list: TList<TncProcessInfo>;
 begin
-    // Native tasklist can omit WOW64 DLLs. A native module snapshot can inspect
-    // these apps directly, without invoking the unreliable 32-bit tasklist.
+    // Do not prefilter by DLL name: tasklist misses modules loaded via 8.3
+    // aliases, and can also omit WOW64 DLLs. Inspect both architectures below.
     scan_succeeded := False;
     list := TList<TncProcessInfo>.Create;
     try
@@ -1009,34 +1010,21 @@ begin
                 if (entry.th32ProcessID = 0) or
                     ((only_pid <> 0) and (only_pid <> entry.th32ProcessID)) then
                     Continue;
-                session_id := 0;
-                if not ProcessIdToSessionId(entry.th32ProcessID, session_id) or
-                    (session_id = 0) then
+                if shell_only and not SameText(string(entry.szExeFile), 'explorer.exe') and
+                    not SameText(string(entry.szExeFile), 'SearchHost.exe') then
                     Continue;
-                process_handle := OpenProcess(c_process_query_limited_information,
-                    False, entry.th32ProcessID);
-                if process_handle = 0 then
+                session_id := 0;
+                if not ProcessIdToSessionId(entry.th32ProcessID, session_id) then
                 begin
                     if get_process_name_by_pid(entry.th32ProcessID) <> '' then
                         scan_succeeded := False;
                     Continue;
                 end;
-                try
-                    wow64 := False;
-                    if not IsWow64Process(process_handle, wow64) then
-                    begin
-                        scan_succeeded := False;
-                        Continue;
-                    end;
-                    if wow64 then
-                    begin
-                        info.pid := entry.th32ProcessID;
-                        info.name := string(entry.szExeFile);
-                        list.Add(info);
-                    end;
-                finally
-                    CloseHandle(process_handle);
-                end;
+                if session_id = 0 then
+                    Continue;
+                info.pid := entry.th32ProcessID;
+                info.name := string(entry.szExeFile);
+                list.Add(info);
             until not Process32Next(snapshot, entry);
             if GetLastError <> ERROR_NO_MORE_FILES then
                 scan_succeeded := False;
@@ -1379,9 +1367,8 @@ end;
 
 function run_list_stale_tsf_holders_action: Boolean;
 var
-    incoming_dir, output_path, pid_text, name, path: string;
+    incoming_dir, output_path, pid_text, path: string;
     candidates: TArray<TncProcessInfo>;
-    inventory: TList<TncProcessInfo>;
     paths: TArray<string>;
     seen, excluded: TDictionary<Cardinal, Boolean>;
     inspector: TncTsfUpgradeInspector;
@@ -1408,25 +1395,13 @@ begin
     seen := TDictionary<Cardinal, Boolean>.Create;
     excluded := build_excluded_pid_set;
     inspector := nil;
-    inventory := TList<TncProcessInfo>.Create;
     complete := True;
     try
         try
             inspector := TncTsfUpgradeInspector.Create(incoming_dir);
-            for name in ['cassotis_ime_svr.dll', 'cassotis_ime_svr32.dll'] do
-            begin
-                // Inventory by module name includes older side-by-side directories,
-                // not just the currently registered runtime. This never closes apps.
-                candidates := get_processes_using_dll_checked(name, scanned);
-                if only_pid <> 0 then
-                    Writeln(Format('Inventory %s: %d processes, complete=%d',
-                        [name, Length(candidates), Ord(scanned)]));
-                complete := complete and scanned;
-                inventory.AddRange(candidates);
-            end;
-            inventory.AddRange(get_interactive_wow64_processes(only_pid, scanned));
+            candidates := get_interactive_processes(only_pid, scanned);
             complete := complete and scanned;
-            for info in inventory do
+            for info in candidates do
             begin
                 if seen.ContainsKey(info.pid) or excluded.ContainsKey(info.pid) or
                     ((only_pid <> 0) and (info.pid <> only_pid)) then
@@ -1443,10 +1418,14 @@ begin
                     if get_process_name_by_pid(info.pid) <> '' then
                     begin
                         complete := False;
-                        rows.Add(Format('%s (PID %d) [unverified, error %d]',
+                        Writeln(Format('TSF inspection unverified: %s (PID %d), error %d',
                             [info.name, info.pid, error_code]));
                     end;
-                    Continue;
+                    // An inaccessible process is not evidence of a TSF holder.
+                    // Keep the incomplete warning, without asking users to close
+                    // protected/system processes. Still inspect partial results.
+                    if Length(paths) = 0 then
+                        Continue;
                 end;
                 changed := False;
                 for path in paths do
@@ -1478,10 +1457,205 @@ begin
         report.SaveToFile(output_path, TEncoding.UTF8);
         Result := True;
     finally
-        inventory.Free;
         inspector.Free;
         excluded.Free;
         seen.Free;
+        rows.Free;
+        report.Free;
+    end;
+end;
+
+function new_tsf_registration_verified(const inspector: TncTsfUpgradeInspector): Boolean;
+var
+    registry: TRegistry;
+    view: REGSAM;
+    index: Integer;
+    path: string;
+begin
+    Result := False;
+    for index := 0 to 1 do
+    begin
+        if index = 0 then
+            view := KEY_WOW64_64KEY
+        else
+            view := KEY_WOW64_32KEY;
+        registry := TRegistry.Create(KEY_READ or view);
+        try
+            registry.RootKey := HKEY_CLASSES_ROOT;
+            if not registry.OpenKeyReadOnly('CLSID\' + GUIDToString(CLSID_NcTextService) +
+                '\InprocServer32') then
+                Exit;
+            path := registry.ReadString('');
+            if inspector.CompareModule(path) <> tmc_same then
+                Exit;
+        finally
+            registry.Free;
+        end;
+    end;
+    Result := True;
+end;
+
+function run_stale_shell_holders_action(const restart: Boolean): Boolean;
+var
+    incoming_dir, output_path, pid_text, windows_dir, path, detail: string;
+    buffer: array[0..MAX_PATH] of Char;
+    candidates: TArray<TncProcessInfo>;
+    paths: TArray<string>;
+    info: TncProcessInfo;
+    caller, identity, rechecked: TncShellIdentity;
+    process: THandle;
+    access, error_code, only_pid, count: DWORD;
+    complete, scanned, changed, attempted_explorer: Boolean;
+    inspector: TncTsfUpgradeInspector;
+    comparison: TncTsfModuleComparison;
+    report, rows, diagnostics: TStringList;
+    backend: IncShellRestartBackend;
+begin
+    Result := False;
+    get_param_value('new_runtime_dir', incoming_dir);
+    get_param_value('output_path', output_path);
+    get_param_value('pid', pid_text);
+    if (incoming_dir = '') or (output_path = '') then
+        Exit;
+    only_pid := 0;
+    if (pid_text <> '') and (not TryStrToUInt(pid_text, only_pid) or (only_pid = 0)) then
+        Exit;
+    report := TStringList.Create;
+    rows := TStringList.Create;
+    diagnostics := TStringList.Create;
+    inspector := nil;
+    attempted_explorer := False;
+    try
+        try
+            inspector := TncTsfUpgradeInspector.Create(incoming_dir);
+            count := GetWindowsDirectory(@buffer[0], Length(buffer));
+            if (count = 0) or (count >= DWORD(Length(buffer))) then
+                raise EInOutError.Create('Cannot resolve the Windows directory');
+            SetString(windows_dir, PChar(@buffer[0]), count);
+            if not nc_read_shell_identity(GetCurrentProcess, caller) then
+                raise EInOutError.Create('Cannot verify the shell handoff caller identity');
+            // ExecAsOriginalUser can still be elevated when Setup was started
+            // as administrator. Match the owner/session, not the caller's UAC level.
+            diagnostics.Add(Format('caller_pid=%d session=%d elevated=%d',
+                [caller.pid, caller.session_id, Ord(caller.elevated)]));
+            // Reopening the shell before both registrations succeed reloads old code.
+            if restart and not new_tsf_registration_verified(inspector) then
+                raise EInOutError.Create('New TSF registration is not verified; shell left running');
+            candidates := get_interactive_processes(only_pid, scanned, True);
+            complete := scanned;
+            if not scanned then
+                diagnostics.Add('Shell inventory is partial; verified entries remain eligible');
+            for info in candidates do
+            begin
+                if not SameText(info.name, 'explorer.exe') and
+                    not SameText(info.name, 'SearchHost.exe') then
+                    Continue;
+                access := c_process_query_limited_information or SYNCHRONIZE;
+                if restart and SameText(info.name, 'SearchHost.exe') then
+                    access := access or PROCESS_TERMINATE;
+                process := OpenProcess(access, False, info.pid);
+                if process = 0 then
+                begin
+                    complete := False;
+                    diagnostics.Add(Format('%s (PID %d): OpenProcess error=%d',
+                        [info.name, info.pid, GetLastError]));
+                    Continue;
+                end;
+                try
+                    if not nc_read_shell_identity(process, identity) then
+                    begin
+                        complete := False;
+                        diagnostics.Add(Format('%s (PID %d): identity unavailable', [info.name, info.pid]));
+                        Continue;
+                    end;
+                    if not nc_shell_restart_allowed(identity, caller, windows_dir, True, tmc_changed) then
+                    begin
+                        diagnostics.Add(Format('%s (PID %d): not eligible; image=%s same_user=%d ' +
+                            'same_session=%d elevated=%d', [info.name, info.pid, identity.image_path,
+                            Ord(identity.owner_sid = caller.owner_sid),
+                            Ord(identity.session_id = caller.session_id), Ord(identity.elevated)]));
+                        Continue;
+                    end;
+                    scanned := nc_process_tsf_module_paths(identity.pid, paths, error_code);
+                    changed := False;
+                    for path in paths do
+                    begin
+                        comparison := inspector.CompareModule(path);
+                        if comparison = tmc_unknown then
+                            scanned := False
+                        else if comparison = tmc_changed then
+                            changed := True;
+                    end;
+                    if not scanned then
+                    begin
+                        complete := False;
+                        diagnostics.Add(Format('%s (PID %d): modules unverified, error=%d',
+                            [info.name, info.pid, error_code]));
+                        Continue;
+                    end;
+                    if not changed then
+                    begin
+                        diagnostics.Add(Format('%s (PID %d): no changed TSF module', [info.name, info.pid]));
+                        Continue;
+                    end;
+                    // Keep the handle throughout inspection and execution. Check again
+                    // rather than trusting a PID from the pre-install plan report.
+                    if (WaitForSingleObject(process, 0) <> WAIT_TIMEOUT) or
+                        not nc_read_shell_identity(process, rechecked) or
+                        not nc_same_shell_instance(identity, rechecked) then
+                    begin
+                        diagnostics.Add(Format('%s (PID %d): exited or identity changed', [info.name, info.pid]));
+                        Continue;
+                    end;
+                    if not restart then
+                        rows.Add(Format('auto=%s (PID %d)', [info.name, identity.pid]))
+                    else
+                    begin
+                        attempted_explorer := attempted_explorer or
+                            (nc_shell_kind(identity.image_path, windows_dir) = sk_explorer);
+                        backend := nc_native_shell_backend(process, identity);
+                        try
+                            if not nc_execute_shell_restart(
+                                nc_shell_kind(identity.image_path, windows_dir), backend, detail) then
+                                complete := False;
+                            rows.Add(Format('%s (PID %d): %s', [info.name, identity.pid, detail]));
+                        finally
+                            backend := nil;
+                        end;
+                    end;
+                finally
+                    CloseHandle(process);
+                end;
+            end;
+        except
+            on E: Exception do
+            begin
+                complete := False;
+                Writeln('Shell handoff not completed: ' + E.Message);
+                diagnostics.Add(E.Message);
+                if restart then
+                    rows.Add(E.Message);
+            end;
+        end;
+        if restart then
+            report.Add('cassotis_tsf_shell_result_v1')
+        else
+            report.Add('cassotis_tsf_shell_plan_v2');
+        if restart and attempted_explorer and
+            (nc_desktop_state(caller, rechecked) <> ds_ready) then
+        begin
+            complete := False;
+            rows.Add('desktop_recovery_required=1');
+        end;
+        report.Add('complete=' + IntToStr(Ord(complete)));
+        report.AddStrings(rows);
+        for detail in diagnostics do
+            report.Add('diagnostic=' + detail);
+        report.SaveToFile(output_path, TEncoding.UTF8);
+        Result := True;
+    finally
+        inspector.Free;
+        diagnostics.Free;
         rows.Free;
         report.Free;
     end;
@@ -2327,6 +2501,29 @@ begin
     Result := (not Failed(hr)) and apply_tip_user_registration(False);
 end;
 
+function run_shell_recovery_action: Boolean;
+var
+    parent_text, shell_text, low_text, high_text, ready_name, done_name, log_path: string;
+    parent_pid, shell_pid, code: DWORD;
+    created: TFileTime;
+begin
+    Result := False;
+    get_param_value('parent_pid', parent_text);
+    get_param_value('shell_pid', shell_text);
+    get_param_value('shell_created_low', low_text);
+    get_param_value('shell_created_high', high_text);
+    get_param_value('ready_event', ready_name);
+    get_param_value('done_event', done_name);
+    get_param_value('log_path', log_path);
+    if not TryStrToUInt(parent_text, parent_pid) or not TryStrToUInt(shell_text, shell_pid) or
+        not TryStrToUInt(low_text, created.dwLowDateTime) or
+        not TryStrToUInt(high_text, created.dwHighDateTime) then
+        Exit;
+    code := nc_run_shell_recovery(parent_pid, shell_pid, created, ready_name, done_name, log_path);
+    Writeln(Format('Shell recovery result=%d', [code]));
+    Result := code = ERROR_SUCCESS;
+end;
+
 function run_action: Boolean;
 var
     action: string;
@@ -2339,6 +2536,11 @@ begin
     end;
 
     action := LowerCase(ParamStr(1));
+    if action = 'watch_shell_restart' then
+    begin
+        Result := run_shell_recovery_action;
+        Exit;
+    end;
     if action = 'register' then
     begin
         Result := register_profile;
@@ -2390,6 +2592,16 @@ begin
     if action = 'list_stale_tsf_holders' then
     begin
         Result := run_list_stale_tsf_holders_action;
+        Exit;
+    end;
+    if action = 'list_stale_shell_holders' then
+    begin
+        Result := run_stale_shell_holders_action(False);
+        Exit;
+    end;
+    if action = 'restart_stale_shell_holders' then
+    begin
+        Result := run_stale_shell_holders_action(True);
         Exit;
     end;
 

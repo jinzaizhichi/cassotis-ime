@@ -108,7 +108,7 @@ Filename: "{#InstallRuntimeDir}\cassotis_ime_profile_reg.exe"; \
 Filename: "{#InstallRuntimeDir}\cassotis_ime_profile_reg.exe"; \
     Parameters: "start"; \
     Flags: runhidden waituntilterminated runasoriginaluser; \
-    AfterInstall: FinalizeTsfUpgradeNotice; \
+    AfterInstall: RestartTsfShellApplications; \
     StatusMsg: "Verifying Cassotis IME runtime..."
 Filename: "{sys}\cmd.exe"; \
     Parameters: "/c start """" explorer.exe"; \
@@ -135,6 +135,7 @@ chs.RuntimeReleaseFailed=词库文件仍被占用，无法继续安装。请关�
 chs.RuntimeReleaseLockedFile=仍被占用的文件：
 chs.RuntimeReleaseProcesses=检测到的相关进程：
 chs.RuntimeGuardFailed=无法建立安装期间的后台启动保护，安装已停止。请关闭其他安装程序后重试。
+chs.RuntimePreparationFailed=安装准备失败，尚未开始复制文件。请重试；若问题仍然出现，请将安装日志提供给开发者。
 chs.RuntimeReleaseRetry=请关闭占用文件的程序后选择“重试”，或选择“取消”中止安装；不会跳过词库更新。
 chs.ForceCloseRuntimePrompt=为完成升级安装，安装程序将自动关闭以下正在占用旧版本文件的进程：
 chs.ForceCloseRuntimeContinue=点击“确定”继续，点击“取消”中止安装。
@@ -145,9 +146,10 @@ chs.TsfUpgradeAfter=新版已安装，但以下应用中的输入组件修复尚
 chs.TsfUpgradeIncomplete=未能完整核实所有相关进程。为确保新版修复生效，请重启使用过输入法的应用，或保存工作后注销 Windows 再登录。
 chs.TsfUpgradeRecheck=重新检查
 chs.TsfUpgradeLater=稍后重启应用，继续安装
-chs.TsfUpgradeCancel=取消安装
 chs.TsfUpgradeFinished=安装完成，部分应用仍需重启。相关修复将在这些应用完整退出并重新打开后生效。
 chs.TsfUpgradeMore=其余进程见安装日志；安装完成页将再次列出仍需重启的应用。
+chs.TsfRestartShell=正在更新 Windows 桌面与搜索组件，任务栏可能短暂消失...
+chs.TsfDesktopRecovery=桌面或任务栏尚未确认恢复。可按 Ctrl+Shift+Esc 打开任务管理器，选择“运行新任务”，输入 explorer.exe（不要勾选管理员权限）；若仍未恢复，请保存工作后注销 Windows 并重新登录。
 english.PreparingStopRuntime=Stopping existing Cassotis IME runtime...
 english.PreparingUnregisterRuntime=Disabling existing Cassotis IME components...
 english.PreparingForceCloseRuntime=Closing applications still using existing runtime files...
@@ -156,6 +158,7 @@ english.RuntimeReleaseFailed=Dictionary files are still in use. Close the applic
 english.RuntimeReleaseLockedFile=File still in use:
 english.RuntimeReleaseProcesses=Related processes detected:
 english.RuntimeGuardFailed=Setup could not prevent the old runtime from restarting. Close other installers and try again.
+english.RuntimePreparationFailed=Setup preparation failed. No files have been installed. Retry, or send the Setup log to the developer if the problem persists.
 english.RuntimeReleaseRetry=Close the application using this file and choose Retry, or choose Cancel to abort Setup. Dictionary updates will not be skipped.
 english.ForceCloseRuntimePrompt=To continue the upgrade, Setup will automatically close the following processes that are still using existing runtime files:
 english.ForceCloseRuntimeContinue=Click OK to continue, or Cancel to abort Setup.
@@ -166,9 +169,10 @@ english.TsfUpgradeAfter=The new version is installed, but its text service fixes
 english.TsfUpgradeIncomplete=Some related processes could not be fully verified. Restart applications that have used the input method, or save your work and sign out of Windows, to ensure the new fixes take effect.
 english.TsfUpgradeRecheck=Recheck
 english.TsfUpgradeLater=Restart applications later and continue
-english.TsfUpgradeCancel=Cancel Setup
 english.TsfUpgradeFinished=Installation complete. Some applications still need restarting before the updated text service fixes take effect.
 english.TsfUpgradeMore=Additional processes are listed in the Setup log. The finished page will recheck and list applications that still need restarting.
+english.TsfRestartShell=Updating the Windows desktop and Search. The taskbar may briefly disappear...
+english.TsfDesktopRecovery=The desktop or taskbar has not been verified as restored. Press Ctrl+Shift+Esc, choose Run new task, and enter explorer.exe without administrative privileges. If it still does not recover, save your work and sign out of Windows, then sign back in.
 
 [Code]
 #include "runtime_upgrade_guard.iss"
@@ -190,6 +194,8 @@ var
     LastRuntimeFileError: Cardinal;
     TsfIncomingExtracted: Boolean;
     TsfUpgradeFinalized: Boolean;
+    TsfShellRestartFailed: Boolean;
+    TsfDesktopRecoveryRequired: Boolean;
     TsfFinishedMemo: TNewMemo;
     TsfRecheckButton: TNewButton;
     TsfOriginalFinishedText: string;
@@ -306,18 +312,54 @@ begin
         TsfUpgradeApplications);
 end;
 
+function GetTsfManualRestartApplications: string;
+var
+    PlanPath: string;
+    Plan: TArrayOfString;
+    ResultCode, Index: Integer;
+begin
+    Result := TsfUpgradeApplications;
+    try
+        PlanPath := ExpandConstant('{tmp}\cassotis_tsf_shell_plan.txt');
+        DeleteFile(PlanPath);
+        { Plan as the desktop owner, not the elevated installer account. }
+        if ExecAsOriginalUser(GetInstallerProfileRegPath,
+            'list_stale_shell_holders -new_runtime_dir "' + ExpandConstant('{tmp}') +
+            '" -output_path "' + PlanPath + '"', '', SW_HIDE, ewWaitUntilTerminated,
+            ResultCode) and (ResultCode = 0) then
+        begin
+            if LoadStringsFromFile(PlanPath, Plan) then
+            begin
+                for Index := 0 to GetArrayLength(Plan) - 1 do
+                    Log('TSF shell plan: ' + Plan[Index]);
+                Result := TsfManualRestartApplications(Plan);
+            end
+            else
+                Log('TSF shell plan: report not readable: ' + PlanPath);
+        end
+        else
+            Log('TSF shell plan: helper failed, code=' + IntToStr(ResultCode));
+    except
+        Log('Could not plan automatic shell restart: ' + GetExceptionMessage);
+    end;
+end;
+
 function ConfirmTsfApplicationRestart: Boolean;
 var
     Choice, Index: Integer;
-    Text: string;
+    Text, ManualApplications: string;
     Lines: TStringList;
 begin
     Result := False;
     while True do
     begin
         ScanTsfUpgradeApplications;
-        if not TsfUpgradeNoticeRequired then
+        ManualApplications := GetTsfManualRestartApplications;
+        if ManualApplications = '' then
         begin
+            { System shell targets are handled after registration. Any incomplete
+              scan is still reported on the finished page, never called clean. }
+            Log('No verified applications require a manual pre-install restart.');
             Result := True;
             Exit;
         end;
@@ -334,7 +376,7 @@ begin
             Text := Text + #13#10#13#10 + CustomMessage('TsfUpgradeIncomplete');
         Lines := TStringList.Create;
         try
-            Lines.Text := TsfUpgradeApplications;
+            Lines.Text := ManualApplications;
             for Index := 0 to Lines.Count - 1 do
             begin
                 if Index >= 12 then
@@ -347,10 +389,8 @@ begin
         finally
             Lines.Free;
         end;
-        Choice := TaskDialogMsgBox(CustomMessage('TsfUpgradeTitle'), Text,
-            mbInformation, MB_YESNOCANCEL, [CustomMessage('TsfUpgradeRecheck'),
-             CustomMessage('TsfUpgradeLater'),
-             CustomMessage('TsfUpgradeCancel')], 0);
+        Choice := ShowTsfUpgradeRestartDialog(CustomMessage('TsfUpgradeTitle'), Text,
+            CustomMessage('TsfUpgradeRecheck'), CustomMessage('TsfUpgradeLater'));
         case Choice of
             IDYES: Continue;
             IDNO:
@@ -376,6 +416,9 @@ begin
         WizardForm.FinishedLabel.Caption := CustomMessage('TsfUpgradeFinished');
         TsfFinishedMemo.Text := TsfUpgradeNoticeText(CustomMessage('TsfUpgradeAfter'),
             CustomMessage('TsfUpgradeIncomplete'));
+        if TsfDesktopRecoveryRequired then
+            TsfFinishedMemo.Text := TsfFinishedMemo.Text + #13#10#13#10 +
+                CustomMessage('TsfDesktopRecovery');
     end
     else
         WizardForm.FinishedLabel.Caption := TsfOriginalFinishedText;
@@ -396,10 +439,51 @@ procedure FinalizeTsfUpgradeNotice;
 begin
     { Inspect again: applications may have survived or started during extraction. }
     ScanTsfUpgradeApplications;
+    if TsfShellRestartFailed then
+        TsfUpgradeScanComplete := False;
     TsfUpgradeFinalized := True;
     if TsfUpgradeNoticeRequired then
         Log(TsfUpgradeNoticeText(CustomMessage('TsfUpgradeAfter'),
             CustomMessage('TsfUpgradeIncomplete')));
+end;
+
+procedure RestartTsfShellApplications;
+var
+    RuntimeDir, ReportPath: string;
+    Lines: TArrayOfString;
+    ResultCode, Index: Integer;
+begin
+    TsfShellRestartFailed := True;
+    TsfDesktopRecoveryRequired := False;
+    WizardForm.StatusLabel.Caption := CustomMessage('TsfRestartShell');
+    try
+        RuntimeDir := ExpandConstant('{#InstallRuntimeDir}');
+        ReportPath := ExpandConstant('{tmp}\cassotis_tsf_shell_result.txt');
+        DeleteFile(ReportPath);
+        { Called only after the new components are registered and host started.
+          The helper revalidates registration and live process identities. }
+        if ExecAsOriginalUser(AddBackslash(RuntimeDir) + 'cassotis_ime_profile_reg.exe',
+            'restart_stale_shell_holders -new_runtime_dir "' + RuntimeDir +
+            '" -output_path "' + ReportPath + '"', '', SW_HIDE, ewWaitUntilTerminated,
+            ResultCode) and (ResultCode = 0) then
+        begin
+            if LoadStringsFromFile(ReportPath, Lines) then
+            begin
+                if GetArrayLength(Lines) >= 2 then
+                    TsfShellRestartFailed := (Lines[0] <> 'cassotis_tsf_shell_result_v1') or
+                        (Lines[1] <> 'complete=1');
+                for Index := 0 to GetArrayLength(Lines) - 1 do
+                begin
+                    Log(Lines[Index]);
+                    if Lines[Index] = 'desktop_recovery_required=1' then
+                        TsfDesktopRecoveryRequired := True;
+                end;
+            end;
+        end;
+    except
+        Log('Automatic shell restart failed: ' + GetExceptionMessage);
+    end;
+    FinalizeTsfUpgradeNotice;
 end;
 
 procedure CurPageChanged(CurPageID: Integer);
@@ -846,7 +930,7 @@ begin
     end;
 end;
 
-function PrepareToInstall(var NeedsRestart: Boolean): String;
+function PrepareRuntimeForInstall: String;
 var
     RootRuntimeDir: string;
     LegacyRuntimeDir: string;
@@ -855,11 +939,8 @@ var
     LockedFile: string;
     SessionId: DWORD;
     ErrorCode: Cardinal;
-    Prepared: Boolean;
 begin
-    NeedsRestart := False;
-    Result := '';
-    Prepared := False;
+    Result := CustomMessage('RuntimePreparationFailed');
     ForceStopApprovalGranted := False;
     Log('Versioned runtime destination: ' + ExpandConstant('{#InstallRuntimeDir}'));
     RootRuntimeDir := ExpandConstant('{app}');
@@ -896,45 +977,39 @@ begin
         Result := ExpandConstant('{cm:RuntimeGuardFailed}') + #13#10 + SysErrorMessage(ErrorCode);
         Exit;
     end;
-    try
-        UpdatePreparingStatus(
-            ExpandConstant('{cm:PreparingStopRuntime}'),
-            GetRuntimeDataDir,
-            0,
-            0
-        );
-        if (ActiveRuntimeDir <> '') or
-            FileExists(AddBackslash(GetRuntimeDataDir) + 'dict_sc.db') or
-            FileExists(AddBackslash(GetRuntimeDataDir) + 'dict_tc.db') then
-        begin
-            if not ConfirmForceStopProcesses(ActiveRuntimeDir) then
-            begin
-                Result := ExpandConstant('{cm:ForceCloseRuntimeCanceled}');
-                Exit;
-            end;
-            { Keep the old registration intact until the new files are installed.
-              Singleton guards prevent old hosts restarting, even with old DLLs. }
-            TryForceStopProcessesUsingImeModules(ActiveRuntimeDir);
-        end;
-        if not WaitForRuntimeRelease(ActiveRuntimeDir, LockedFile) then
-        begin
-            Result := RuntimeReleaseFailureText(ActiveRuntimeDir, LockedFile);
-            Exit;
-        end;
-        if not ConfirmTsfApplicationRestart then
+    UpdatePreparingStatus(
+        ExpandConstant('{cm:PreparingStopRuntime}'),
+        GetRuntimeDataDir,
+        0,
+        0
+    );
+    if (ActiveRuntimeDir <> '') or
+        FileExists(AddBackslash(GetRuntimeDataDir) + 'dict_sc.db') or
+        FileExists(AddBackslash(GetRuntimeDataDir) + 'dict_tc.db') then
+    begin
+        if not ConfirmForceStopProcesses(ActiveRuntimeDir) then
         begin
             Result := ExpandConstant('{cm:ForceCloseRuntimeCanceled}');
             Exit;
         end;
-        Prepared := True;
-    finally
-        HidePreparingStatus;
-        if not Prepared then
-        begin
-            ReleaseRuntimeUpgradeGuards;
-        end;
+        { Keep the old registration intact until the new files are installed.
+          Singleton guards prevent old hosts restarting, even with old DLLs. }
+        TryForceStopProcessesUsingImeModules(ActiveRuntimeDir);
     end;
+    if not WaitForRuntimeRelease(ActiveRuntimeDir, LockedFile) then
+    begin
+        Result := RuntimeReleaseFailureText(ActiveRuntimeDir, LockedFile);
+        Exit;
+    end;
+    if not ConfirmTsfApplicationRestart then
+    begin
+        Result := ExpandConstant('{cm:ForceCloseRuntimeCanceled}');
+        Exit;
+    end;
+    Result := '';
 end;
+
+#include "runtime_prepare.iss"
 
 procedure DeinitializeSetup;
 begin
