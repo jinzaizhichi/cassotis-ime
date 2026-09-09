@@ -123290,6 +123290,18 @@ begin
             sort_candidates_lightweight(m_candidates);
             promote_short_exact_raw_weight_leader_local(m_candidates);
             ensure_short_two_single_pair_candidates_visible_local(m_candidates);
+            // Confirmed tails and literal user words can bypass short-exact
+            // display ranking. Their prefix recall must not depend on it.
+            if ((m_confirmed_text <> '') or
+                (Length(literal_user_candidates) > 0)) and
+                build_exact_leading_prefix_partial_candidates(lookup_text,
+                exact_head_partial_candidates) then
+            begin
+                m_candidates := merge_candidate_lists(m_candidates,
+                    exact_head_partial_candidates, 0);
+                ensure_multi_char_partial_precedes_single_char_partial(
+                    m_candidates);
+            end;
             ensure_short_lexicon_prefix_completions_visible_local(
                 m_candidates);
             Inc(sort_elapsed_ms, Int64(GetTickCount64 - phase_start_tick));
@@ -184558,6 +184570,18 @@ var
                 Exit;
             end;
 
+            // Literal entries arrive through a separate lookup, but belong
+            // to the same leading exact cluster as base dictionary words.
+            if m_last_lookup_literal_user_fast and
+                (candidate_value.source = cs_user) and
+                (get_candidate_text_unit_count(candidate_text_local) =
+                expected_units) and (m_dictionary <> nil) and
+                m_dictionary.is_user_entry(normalized_pinyin,
+                candidate_text_local) then
+            begin
+                Exit(True);
+            end;
+
             if is_fuzzy_pinyin_active and
                 (candidate_value.fuzzy_cost > 0) and
                 (get_candidate_text_unit_count(candidate_text_local) =
@@ -190326,6 +190350,71 @@ var
                 end;
             end;
 
+            procedure append_nasal_boundary_singles_local;
+            var
+                first_key, head_key, tail_key: string;
+                tail_parts: TncPinyinParseResult;
+                singles: TncCandidateList;
+                item, reserved: TncCandidate;
+                idx, before_count, first_added, insert_at: Integer;
+            begin
+                if is_shuangpin_input or (Length(syllables) < 2) or
+                    (Pos('''', m_composition_text) > 0) then Exit;
+                first_key := normalize_pinyin_text(syllables[0].text);
+                if (Length(first_key) < 3) or
+                    (Copy(first_key, Length(first_key) - 1, 2) <> 'ng') or
+                    (Copy(normalized_pinyin, 1, Length(first_key)) <> first_key) then Exit;
+                head_key := Copy(first_key, 1, Length(first_key) - 1);
+                if not nc_is_canonical_pinyin_syllable(head_key) then Exit;
+                tail_key := Copy(normalized_pinyin, Length(head_key) + 1, MaxInt);
+                tail_parts := get_effective_compact_pinyin_syllables(tail_key);
+                if (Length(tail_parts) = 0) or (Length(tail_parts[0].text) < 2) or
+                    (tail_parts[0].text[1] <> 'g') then Exit;
+                for idx := 0 to High(tail_parts) do
+                    if not nc_is_canonical_pinyin_syllable(tail_parts[idx].text) then Exit;
+                if not lookup_display_exact_cached(head_key, singles) then Exit;
+
+                // Keep the preferred ng parse. Alternative n/g characters are
+                // selectable prefixes, not new paths or learned compounds.
+                first_added := -1;
+                for idx := 0 to High(singles) do
+                begin
+                    item := singles[idx];
+                    if (item.comment <> '') or
+                        (get_candidate_text_unit_count(item.text) <> 1) then Continue;
+                    item.comment := tail_key;
+                    item.display_kind := cdk_default;
+                    before_count := Length(pool_candidates_local);
+                    append_pool_candidate_local(item, -1, False, False);
+                    if (first_added < 0) and
+                        (Length(pool_candidates_local) > before_count) then
+                        first_added := before_count;
+                end;
+                if first_added < 0 then Exit;
+
+                // One alternative before the long tail of ng homophones; all
+                // remaining characters stay pageable. Never displace Top1/2
+                // or move a single character ahead of word/exact candidates.
+                insert_at := 0;
+                while (insert_at < first_added) and
+                    ((get_candidate_text_unit_count(pool_candidates_local[insert_at].text) <> 1) or
+                    (pool_candidates_local[insert_at].comment = '')) do Inc(insert_at);
+                insert_at := Min(first_added, Max(2, insert_at + 1));
+                reserved := pool_candidates_local[first_added];
+                for idx := first_added downto insert_at + 1 do
+                begin
+                    pool_candidates_local[idx] := pool_candidates_local[idx - 1];
+                    pool_source_indices_local[idx] := pool_source_indices_local[idx - 1];
+                end;
+                pool_candidates_local[insert_at] := reserved;
+                pool_source_indices_local[insert_at] := -1;
+                if expected_units < c_long_sentence_full_path_min_syllables then
+                begin
+                    Result := Copy(pool_candidates_local, 0, visible_page_size);
+                    visible_source_indices := Copy(pool_source_indices_local, 0, visible_page_size);
+                end;
+            end;
+
             procedure build_short_visible_candidate_pool_local;
             var
                 candidate_idx_local: Integer;
@@ -190416,6 +190505,7 @@ var
                             candidate_local.display_kind = cdk_lm_compound);
                     end;
 
+                    append_nasal_boundary_singles_local;
                     m_long_visible_candidate_pool_cache := Copy(
                         pool_candidates_local, 0, Length(pool_candidates_local));
                     m_long_visible_candidate_pool_source_indices_cache := Copy(
@@ -190476,6 +190566,7 @@ var
                 append_short_prefixes_from_list_local(m_candidates,
                     visible_source_indices, True, True);
                 append_all_first_syllable_singles_local;
+                append_nasal_boundary_singles_local;
 
                 m_long_visible_candidate_pool_cache := Copy(
                     pool_candidates_local, 0, Length(pool_candidates_local));
