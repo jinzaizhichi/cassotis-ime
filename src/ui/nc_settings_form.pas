@@ -140,7 +140,10 @@ type
     end;
 
     TncApplySettingsProc = reference to procedure(const engine_config: TncEngineConfig;
-        const log_config: TncLogConfig; const status_widget_visible: Boolean);
+        const log_config: TncLogConfig; const status_widget_visible: Boolean;
+        const status_widget_transparency: Integer);
+    TncPreviewStatusWidgetProc = reference to procedure(const transparency: Integer;
+        const preview_visible: Boolean);
     TncClearUserDictionaryProc = reference to function: Boolean;
 
     TncSettingsForm = class(TForm)
@@ -172,6 +175,8 @@ type
         m_combo_punctuation_mode: TComboBox;
         m_chk_full_width_mode: TncModernCheckBox;
         m_chk_show_status_widget: TncModernCheckBox;
+        m_track_status_widget_transparency: TTrackBar;
+        m_label_status_widget_transparency: TLabel;
         m_combo_candidate_font: TComboBox;
         m_track_candidate_font_size: TTrackBar;
         m_candidate_font_size_labels:
@@ -202,6 +207,9 @@ type
         m_engine_config: TncEngineConfig;
         m_log_config: TncLogConfig;
         m_status_widget_visible: Boolean;
+        m_status_widget_transparency: Integer;
+        m_loading_controls: Boolean;
+        m_preview_status_widget_proc: TncPreviewStatusWidgetProc;
         m_apply_proc: TncApplySettingsProc;
         m_clear_user_dictionary_proc: TncClearUserDictionaryProc;
         m_dirty: Boolean;
@@ -220,6 +228,9 @@ type
         procedure add_advanced_controls;
         procedure update_scaled_control_metrics;
         procedure mark_dirty(Sender: TObject);
+        procedure on_status_widget_transparency_change(Sender: TObject);
+        procedure on_page_change(Sender: TObject);
+        procedure preview_status_widget;
         procedure update_apply_button;
         procedure update_logging_controls;
         procedure update_fuzzy_pinyin_controls;
@@ -289,11 +300,16 @@ type
         constructor Create(AOwner: TComponent); override;
         destructor Destroy; override;
         class function ExecuteDialog(const owner: TComponent; var config: TncEngineConfig; var log_config: TncLogConfig;
-            var status_widget_visible: Boolean; const on_apply: TncApplySettingsProc;
-            const on_clear_user_dictionary: TncClearUserDictionaryProc): Boolean; static;
+            var status_widget_visible: Boolean; var status_widget_transparency: Integer;
+            const on_apply: TncApplySettingsProc;
+            const on_clear_user_dictionary: TncClearUserDictionaryProc;
+            const on_preview_status_widget: TncPreviewStatusWidgetProc): Boolean; static;
     end;
 
 implementation
+
+uses
+    nc_status_widget_appearance;
 
 const
     c_dialog_width = 596;
@@ -321,7 +337,7 @@ const
     c_hint_width = c_section_width - (c_label_left * 2);
     c_general_row_gap = 8;
     c_candidate_preview_height = 152;
-    c_appearance_group_height = 408;
+    c_appearance_group_height = 446;
     c_tbm_get_channel_rect = WM_USER + 26;
     c_official_website_url = 'https://www.yanquan.org';
 
@@ -363,6 +379,7 @@ resourcestring
     SLabelPunctuationMode = '标点';
     SCheckFullWidthMode = '使用全角输入';
     SCheckShowStatusWidget = '显示状态浮窗';
+    SLabelStatusWidgetTransparency = '浮窗透明度';
     SLabelCandidateFont = '候选字体';
     SLabelCandidateSize = '大小';
     SLabelCandidatePageSize = '每页候选';
@@ -1393,6 +1410,7 @@ begin
     m_engine_config := build_default_engine_config_value;
     m_log_config := build_default_log_config_value;
     m_status_widget_visible := True;
+    m_status_widget_transparency := c_default_status_widget_transparency;
     configure_form;
     configure_tabs;
     configure_buttons;
@@ -1412,8 +1430,9 @@ begin
 end;
 
 class function TncSettingsForm.ExecuteDialog(const owner: TComponent; var config: TncEngineConfig;
-    var log_config: TncLogConfig; var status_widget_visible: Boolean; const on_apply: TncApplySettingsProc;
-    const on_clear_user_dictionary: TncClearUserDictionaryProc): Boolean;
+    var log_config: TncLogConfig; var status_widget_visible: Boolean; var status_widget_transparency: Integer;
+    const on_apply: TncApplySettingsProc; const on_clear_user_dictionary: TncClearUserDictionaryProc;
+    const on_preview_status_widget: TncPreviewStatusWidgetProc): Boolean;
 var
     form: TncSettingsForm;
 begin
@@ -1422,6 +1441,8 @@ begin
         form.m_engine_config := config;
         form.m_log_config := log_config;
         form.m_status_widget_visible := status_widget_visible;
+        form.m_status_widget_transparency := nc_clamp_status_widget_transparency(status_widget_transparency);
+        form.m_preview_status_widget_proc := on_preview_status_widget;
         form.m_apply_proc := on_apply;
         form.m_clear_user_dictionary_proc := on_clear_user_dictionary;
         form.load_from_config;
@@ -1429,9 +1450,16 @@ begin
         config := form.m_engine_config;
         log_config := form.m_log_config;
         status_widget_visible := form.m_status_widget_visible;
+        status_widget_transparency := form.m_status_widget_transparency;
         Result := form.m_applied;
     finally
-        form.Free;
+        try
+            // Cancel, Esc, close and exceptions all restore the last applied value.
+            if Assigned(on_preview_status_widget) then
+                on_preview_status_widget(form.m_status_widget_transparency, False);
+        finally
+            form.Free;
+        end;
     end;
 end;
 
@@ -1664,6 +1692,7 @@ begin
     BringWindowToTop(Handle);
     SetForegroundWindow(Handle);
     SetActiveWindow(Handle);
+    preview_status_widget;
 end;
 
 procedure TncSettingsForm.WMDpiChanged(var Message: TMessage);
@@ -1773,6 +1802,7 @@ begin
     m_page_control.Margins.Bottom := 0;
     m_page_control.Style := tsFlatButtons;
     m_page_control.HotTrack := True;
+    m_page_control.OnChange := on_page_change;
 
     m_tab_general := TTabSheet.Create(m_page_control);
     m_tab_general.PageControl := m_page_control;
@@ -2030,6 +2060,28 @@ begin
 
     top := scale_ui(c_untitled_section_inner_top);
     m_chk_show_status_widget := create_check_box(Self, appearance_group, top, SCheckShowStatusWidget, mark_dirty);
+
+    Inc(top, scale_ui(c_row_height + c_general_row_gap));
+    create_label(Self, appearance_group, SLabelStatusWidgetTransparency, top);
+    m_track_status_widget_transparency := TTrackBar.Create(Self);
+    m_track_status_widget_transparency.Name := 'StatusWidgetTransparency';
+    m_track_status_widget_transparency.Parent := appearance_group;
+    m_track_status_widget_transparency.SetBounds(scale_ui(c_control_left - 10),
+        top - scale_ui(3), scale_ui(280), scale_ui(30));
+    m_track_status_widget_transparency.Min := 0;
+    m_track_status_widget_transparency.Max := c_max_status_widget_transparency;
+    m_track_status_widget_transparency.LineSize := 1;
+    m_track_status_widget_transparency.PageSize := 10;
+    m_track_status_widget_transparency.TickStyle := tsNone;
+    m_label_status_widget_transparency := TLabel.Create(Self);
+    m_label_status_widget_transparency.Name := 'StatusWidgetTransparencyValue';
+    m_label_status_widget_transparency.Parent := appearance_group;
+    m_label_status_widget_transparency.SetBounds(scale_ui(c_control_left + 284),
+        top + scale_ui(4), scale_ui(48), scale_ui(24));
+    m_label_status_widget_transparency.AutoSize := False;
+    m_label_status_widget_transparency.Caption := '0%';
+    m_label_status_widget_transparency.Font.Color := RGB(90, 100, 115);
+    m_track_status_widget_transparency.OnChange := on_status_widget_transparency_change;
 
     Inc(top, scale_ui(c_row_height + c_general_row_gap));
     create_label(Self, appearance_group, SLabelCandidateFont, top);
@@ -2755,6 +2807,28 @@ begin
     update_apply_button;
 end;
 
+procedure TncSettingsForm.on_status_widget_transparency_change(Sender: TObject);
+begin
+    m_label_status_widget_transparency.Caption :=
+        IntToStr(m_track_status_widget_transparency.Position) + '%';
+    if m_loading_controls then Exit;
+    mark_dirty(Sender);
+    preview_status_widget;
+end;
+
+procedure TncSettingsForm.on_page_change(Sender: TObject);
+begin
+    preview_status_widget;
+end;
+
+procedure TncSettingsForm.preview_status_widget;
+begin
+    if m_loading_controls or (m_track_status_widget_transparency = nil) or
+        not Assigned(m_preview_status_widget_proc) then Exit;
+    m_preview_status_widget_proc(m_track_status_widget_transparency.Position,
+        Visible and (m_page_control.ActivePage = m_tab_appearance));
+end;
+
 procedure TncSettingsForm.update_apply_button;
 begin
     if m_btn_apply <> nil then
@@ -2849,6 +2923,7 @@ begin
     else if m_page_control.ActivePage = m_tab_appearance then
     begin
         m_chk_show_status_widget.Checked := True;
+        m_track_status_widget_transparency.Position := c_default_status_widget_transparency;
         candidate_font_name := Trim(default_engine_config.candidate_font_name);
         if candidate_font_name = '' then
         begin
@@ -3436,6 +3511,16 @@ begin
     begin
         m_chk_show_status_widget.Checked := m_status_widget_visible;
     end;
+    if m_track_status_widget_transparency <> nil then
+    begin
+        m_loading_controls := True;
+        try
+            m_track_status_widget_transparency.Position := m_status_widget_transparency;
+            m_label_status_widget_transparency.Caption := IntToStr(m_status_widget_transparency) + '%';
+        finally
+            m_loading_controls := False;
+        end;
+    end;
     if m_combo_candidate_font <> nil then
     begin
         candidate_font_name := Trim(m_engine_config.candidate_font_name);
@@ -3796,9 +3881,10 @@ begin
     m_engine_config := next_config;
     m_log_config := next_log_config;
     m_status_widget_visible := next_status_widget_visible;
+    m_status_widget_transparency := m_track_status_widget_transparency.Position;
     if Assigned(m_apply_proc) then
     begin
-        m_apply_proc(m_engine_config, m_log_config, m_status_widget_visible);
+        m_apply_proc(m_engine_config, m_log_config, m_status_widget_visible, m_status_widget_transparency);
     end;
     m_dirty := False;
     m_applied := True;

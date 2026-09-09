@@ -1,0 +1,19 @@
+<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+    <PropertyGroup>
+        <MainSource>build_profile_icon.dpr</MainSource>
+        <SanitizedProjectName>build_profile_icon</SanitizedProjectName>
+        <Config Condition="'$(Config)'==''">Release</Config>
+        <Platform Condition="'$(Platform)'==''">Win64</Platform>
+        <AppType>Console</AppType>
+        <FrameworkType>VCL</FrameworkType>
+        <DCC_Namespace>System;Xml;Data;Datasnap;Web;Soap;$(DCC_Namespace)</DCC_Namespace>
+        <DCC_UnitSearchPath>../src/ui;$(DCC_UnitSearchPath)</DCC_UnitSearchPath>
+        <DCC_ExeOutput>../out</DCC_ExeOutput>
+        <DCC_DcuOutput>../dcu/profile_icon_builder</DCC_DcuOutput>
+        <PreBuildEvent><![CDATA["$(BDS)\bin\brcc32.exe" -fo"$(MSBuildProjectDirectory)\cassotis_ime_tray_host_mark.res" "$(MSBuildProjectDirectory)\cassotis_ime_tray_host_mark.rc"]]></PreBuildEvent>
+    </PropertyGroup>
+    <ItemGroup>
+        <DelphiCompile Include="$(MainSource)"><MainSource>MainSource</MainSource></DelphiCompile>
+    </ItemGroup>
+    <Import Project="$(BDS)\Bin\CodeGear.Delphi.Targets" Condition="Exists('$(BDS)\Bin\CodeGear.Delphi.Targets')"/>
+</Project>

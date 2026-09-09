@@ -278,7 +278,7 @@ type
 implementation
 
 uses
-    nc_version_info;
+    nc_version_info, nc_profile_icon;
 
 procedure signal_tray_profile_event(const active: Boolean); forward;
 procedure log_tsf_boundary_exception(const operation: string); forward;
@@ -3416,8 +3416,6 @@ var
     system_item_seen_count: Integer;
     module_path: array[0..MAX_PATH - 1] of Char;
     module_len: Cardinal;
-    base_dir: string;
-    candidate: string;
     icon_path: string;
     large_icon: HICON;
     small_icon: HICON;
@@ -3454,28 +3452,7 @@ begin
     end;
     if module_len > 0 then
     begin
-        base_dir := IncludeTrailingPathDelimiter(ExtractFilePath(module_path));
-        candidate := base_dir + 'cassotis_ime_tray_host.exe';
-        if FileExists(candidate) then
-        begin
-            icon_path := candidate;
-        end
-        else
-        begin
-            candidate := base_dir + 'cassotis_ime_host.exe';
-            if FileExists(candidate) then
-            begin
-                icon_path := candidate;
-            end
-            else
-            begin
-                candidate := base_dir + 'cassotis_ime_svr.dll';
-                if FileExists(candidate) then
-                begin
-                    icon_path := candidate;
-                end;
-            end;
-        end;
+        icon_path := nc_resolve_profile_icon_path(string(module_path));
     end;
 
     if icon_path <> '' then

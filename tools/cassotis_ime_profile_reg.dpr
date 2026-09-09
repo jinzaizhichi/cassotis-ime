@@ -19,6 +19,7 @@ uses
     ComObj,
     nc_tsf_guids in '..\src\tsf\nc_tsf_guids.pas',
     nc_tsf_upgrade_scan in '..\src\common\nc_tsf_upgrade_scan.pas',
+    nc_profile_icon in '..\src\common\nc_profile_icon.pas',
     nc_runtime_process_policy in '..\src\common\nc_runtime_process_policy.pas';
 
 const
@@ -2200,8 +2201,6 @@ var
     profile_key: string;
     module_path: array[0..MAX_PATH - 1] of Char;
     module_len: Cardinal;
-    base_dir: string;
-    candidate: string;
     profile_enabled_flag: Integer;
 
     function resolve_profile_icon_path: WideString;
@@ -2214,31 +2213,7 @@ var
             Exit;
         end;
 
-        base_dir := IncludeTrailingPathDelimiter(ExtractFilePath(module_path));
-
-        // Prefer tray host icon first so profile branding is consistent with
-        // the user-facing app icon in taskbar/tray.
-        candidate := base_dir + 'cassotis_ime_tray_host.exe';
-        if FileExists(candidate) then
-        begin
-            Result := candidate;
-            Exit;
-        end;
-
-        // Fallbacks in the same deployment folder.
-        candidate := base_dir + 'cassotis_ime_host.exe';
-        if FileExists(candidate) then
-        begin
-            Result := candidate;
-            Exit;
-        end;
-
-        candidate := base_dir + 'cassotis_ime_svr.dll';
-        if FileExists(candidate) then
-        begin
-            Result := candidate;
-            Exit;
-        end;
+        Result := nc_resolve_profile_icon_path(string(module_path));
     end;
 
     function is_profile_enabled: Boolean;

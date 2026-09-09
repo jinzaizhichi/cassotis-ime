@@ -31,6 +31,8 @@ uses
     nc_version_info,
     nc_shortcut,
     nc_status_widget_policy,
+    nc_status_widget_appearance,
+    nc_tray_icon_appearance,
     nc_settings_form,
     nc_types;
 
@@ -75,6 +77,8 @@ type
         m_icon_chinese_simplified: TIcon;
         m_icon_chinese_traditional: TIcon;
         m_icon_english: TIcon;
+        m_tray_icon_theme: TncTrayIconTheme;
+        m_last_tray_theme_check_tick: UInt64;
         m_last_tray_mode: TncInputMode;
         m_last_tray_variant: TncDictionaryVariant;
         m_tray_state_inited: Boolean;
@@ -97,6 +101,8 @@ type
         m_status_saved_origin: TPoint;
         m_status_drag_source: TObject;
         m_settings_dialog_open: Boolean;
+        m_status_widget_transparency: Integer;
+        m_status_widget_preview: Boolean;
         m_engine_active: Boolean;
         m_profile_active: Boolean;
         m_profile_active_pending: Boolean;
@@ -134,6 +140,7 @@ type
         procedure enforce_application_toolwindow_style;
         procedure enforce_host_form_toolwindow_style;
         procedure configure_tray;
+        procedure refresh_tray_icon_appearance;
         procedure configure_menu;
         procedure configure_status_widget;
         procedure apply_status_widget_font_metrics(const dpi: Integer);
@@ -145,6 +152,7 @@ type
         procedure queue_status_widget_metrics_refresh;
         procedure enforce_status_form_toolwindow_style;
         procedure apply_status_widget_visibility;
+        procedure preview_status_widget(const transparency: Integer; const preview_visible: Boolean);
         procedure refresh_state_from_host;
         procedure start_active_state_thread;
         procedure stop_active_state_thread;
@@ -152,7 +160,7 @@ type
         procedure save_config;
         procedure update_shortcut_hints;
         procedure apply_settings(const config: TncEngineConfig; const log_config: TncLogConfig;
-            const status_widget_visible: Boolean);
+            const status_widget_visible: Boolean; const status_widget_transparency: Integer);
         procedure sync_status_widget_origin_from_window;
         function apply_runtime_state_to_host: Boolean;
         function reload_host_config: Boolean;
@@ -426,6 +434,9 @@ end;
 
 procedure TncTrayHost.WndProc(var Message: TMessage);
 begin
+    if (Message.Msg = WM_SETTINGCHANGE) or (Message.Msg = WM_THEMECHANGED) or
+        (Message.Msg = WM_DISPLAYCHANGE) or (Message.Msg = WM_DPICHANGED) then
+        m_last_tray_theme_check_tick := 0;
     if (get_nc_open_settings_message <> 0) and
         (Cardinal(Message.Msg) = get_nc_open_settings_message) then
     begin
@@ -476,6 +487,7 @@ begin
     m_status_saved_origin := Point(0, 0);
     m_status_drag_source := nil;
     m_settings_dialog_open := False;
+    m_status_widget_transparency := c_default_status_widget_transparency;
     m_engine_active := False;
     m_profile_active := False;
     m_profile_active_pending := False;
@@ -709,6 +721,7 @@ begin
     m_icon_chinese_simplified.Free;
     m_icon_chinese_traditional.Free;
     m_icon_english.Free;
+    m_tray_icon_theme.Free;
     if m_status_hint_window <> nil then
     begin
         m_status_hint_window.Free;
@@ -974,6 +987,7 @@ procedure TncTrayHost.handle_status_label_click(const source: TObject);
 var
     cursor_point: TPoint;
 begin
+    if m_settings_dialog_open then Exit;
     cursor_point := Mouse.CursorPos;
 
     if (source = m_status_label_mode) and status_point_in_control(m_status_label_mode, cursor_point) then
@@ -1088,6 +1102,8 @@ begin
 
         if custom_icon.Handle <> 0 then
         begin
+            m_tray_icon_theme := TncTrayIconTheme.Create(custom_icon, HInstance,
+                c_status_logo_mark_resource_name);
             m_icon_chinese_simplified.Assign(custom_icon);
             m_icon_chinese_traditional.Assign(custom_icon);
             m_icon_english.Assign(custom_icon);
@@ -1097,12 +1113,25 @@ begin
     end;
 
     m_tray_icon := TTrayIcon.Create(Self);
-    m_tray_icon.Visible := True;
+    m_tray_icon.Visible := False;
     if (m_icon_chinese_simplified <> nil) and (m_icon_chinese_simplified.Handle <> 0) then
     begin
-        m_tray_icon.Icon.Assign(m_icon_chinese_simplified);
+        nc_set_tray_icon(m_tray_icon, m_icon_chinese_simplified);
     end;
     m_tray_icon.Hint := 'Cassotis IME (中文)';
+    refresh_tray_icon_appearance;
+    m_tray_icon.Visible := True;
+end;
+
+procedure TncTrayHost.refresh_tray_icon_appearance;
+begin
+    if (m_tray_icon_theme = nil) or (m_tray_icon = nil) then Exit;
+    if not m_tray_icon_theme.refresh(nc_read_tray_icon_appearance) then Exit;
+    m_icon_chinese_simplified.Assign(m_tray_icon_theme.icon);
+    m_icon_chinese_traditional.Assign(m_tray_icon_theme.icon);
+    m_icon_english.Assign(m_tray_icon_theme.icon);
+    // Publish the new handle without removing/re-adding the notification icon.
+    nc_set_tray_icon(m_tray_icon, m_tray_icon_theme.icon);
 end;
 
 procedure TncTrayHost.configure_menu;
@@ -1681,6 +1710,7 @@ begin
     x_value := work_area.Right - m_status_form.Width - 12;
     y_value := work_area.Bottom - m_status_form.Height - 12;
     visible_value := True;
+    m_status_widget_transparency := c_default_status_widget_transparency;
 
     if (m_config_path <> '') and FileExists(m_config_path) then
     begin
@@ -1691,6 +1721,7 @@ begin
         end;
         try
             try
+                m_status_widget_transparency := nc_read_status_widget_transparency(ini);
                 visible_value := ini.ReadBool(c_ui_section, c_status_widget_visible_key, True);
                 x_value := ini.ReadInteger(c_ui_section, c_status_widget_x_key, x_value);
                 y_value := ini.ReadInteger(c_ui_section, c_status_widget_y_key, y_value);
@@ -1702,6 +1733,7 @@ begin
         end;
     end;
 
+    nc_apply_status_widget_transparency(m_status_form, m_status_widget_transparency);
     position_adjusted := fit_origin_to_monitor_work_area(x_value, y_value);
     m_status_form.SetBounds(x_value, y_value, m_status_form.Width, m_status_form.Height);
     refresh_status_widget_frame;
@@ -1773,6 +1805,8 @@ begin
             end;
             ini.WriteInteger(c_ui_section, c_status_widget_x_key, saved_x);
             ini.WriteInteger(c_ui_section, c_status_widget_y_key, saved_y);
+            // Visibility/position autosaves must never commit a live preview.
+            nc_write_status_widget_transparency(ini, m_status_widget_transparency);
             ini.UpdateFile;
         except
             // Do not fail the tray host because of a damaged legacy INI.
@@ -2028,6 +2062,16 @@ begin
     end;
 end;
 
+procedure TncTrayHost.preview_status_widget(const transparency: Integer; const preview_visible: Boolean);
+begin
+    m_status_widget_preview := m_settings_dialog_open and preview_visible;
+    if m_status_widget_preview then
+        nc_apply_status_widget_transparency(m_status_form, transparency)
+    else
+        nc_apply_status_widget_transparency(m_status_form, m_status_widget_transparency);
+    apply_status_widget_visibility;
+end;
+
 procedure TncTrayHost.apply_status_widget_visibility;
 var
     should_show: Boolean;
@@ -2056,15 +2100,13 @@ begin
         // still using Cassotis.
         should_show := False;
     end;
-    if m_settings_dialog_open then
-    begin
-        should_show := False;
-    end;
     if m_status_dragging and m_item_status_widget.Checked then
     begin
         // Do not hide during drag on transient active-state flips.
         should_show := True;
     end;
+    if m_settings_dialog_open then
+        should_show := m_status_widget_preview;
 
     status_visible := m_status_form.Visible or IsWindowVisible(m_status_form.Handle);
 
@@ -2094,7 +2136,7 @@ begin
         hide_status_hint;
         if status_visible then
         begin
-            save_status_widget_state;
+            if not m_settings_dialog_open then save_status_widget_state;
             m_status_form.Hide;
         end;
     end;
@@ -2272,20 +2314,7 @@ end;
 
 procedure TncTrayHost.WMNcOpenSettings(var Message: TMessage);
 begin
-    if m_settings_dialog_open then
-    begin
-        Message.Result := 0;
-        Exit;
-    end;
-
-    m_settings_dialog_open := True;
-    try
-        show_settings_dialog;
-    finally
-        m_settings_dialog_open := False;
-        m_last_state_poll_tick := 0;
-        refresh_state_from_host;
-    end;
+    show_settings_dialog;
     Message.Result := 0;
 end;
 
@@ -2366,10 +2395,12 @@ begin
 end;
 
 procedure TncTrayHost.apply_settings(const config: TncEngineConfig; const log_config: TncLogConfig;
-    const status_widget_visible: Boolean);
+    const status_widget_visible: Boolean; const status_widget_transparency: Integer);
 begin
     m_engine_config := config;
     m_log_config := log_config;
+    m_status_widget_transparency := nc_clamp_status_widget_transparency(status_widget_transparency);
+    nc_apply_status_widget_transparency(m_status_form, m_status_widget_transparency);
     save_config;
     if m_item_status_widget <> nil then
     begin
@@ -2421,23 +2452,43 @@ var
     next_config: TncEngineConfig;
     next_log_config: TncLogConfig;
     status_widget_visible: Boolean;
+    status_widget_transparency: Integer;
 begin
+    if m_settings_dialog_open then Exit;
     next_config := m_engine_config;
     next_log_config := m_log_config;
     status_widget_visible := (m_item_status_widget <> nil) and m_item_status_widget.Checked;
+    status_widget_transparency := m_status_widget_transparency;
     if m_status_form <> nil then
     begin
         hide_status_hint;
     end;
-    TncSettingsForm.ExecuteDialog(Self, next_config, next_log_config, status_widget_visible,
-        procedure(const config: TncEngineConfig; const log_config: TncLogConfig; const next_status_widget_visible: Boolean)
-        begin
-            apply_settings(config, log_config, next_status_widget_visible);
-        end,
-        function: Boolean
-        begin
-            Result := Self.clear_user_dictionary;
-        end);
+    m_settings_dialog_open := True;
+    try
+        apply_status_widget_visibility;
+        TncSettingsForm.ExecuteDialog(Self, next_config, next_log_config, status_widget_visible,
+            status_widget_transparency,
+            procedure(const config: TncEngineConfig; const log_config: TncLogConfig;
+                const next_status_widget_visible: Boolean; const next_transparency: Integer)
+            begin
+                apply_settings(config, log_config, next_status_widget_visible, next_transparency);
+            end,
+            function: Boolean
+            begin
+                Result := Self.clear_user_dictionary;
+            end,
+            procedure(const transparency: Integer; const preview_visible: Boolean)
+            begin
+                preview_status_widget(transparency, preview_visible);
+            end);
+    finally
+        m_status_widget_preview := False;
+        m_settings_dialog_open := False;
+        nc_apply_status_widget_transparency(m_status_form, m_status_widget_transparency);
+        m_last_state_poll_tick := 0;
+        refresh_state_from_host;
+        apply_status_widget_visibility;
+    end;
 end;
 
 procedure TncTrayHost.update_menu;
@@ -2477,14 +2528,13 @@ begin
         end;
     end;
 
-    // Force a tray refresh. Some shells cache icon handles aggressively and
-    // may not repaint on plain Assign().
+    // Preserve the existing mode-change refresh; appearance changes update in place.
     if should_refresh_icon and (m_tray_icon <> nil) then
     begin
         m_tray_icon.Visible := False;
         if (target_icon <> nil) and (target_icon.Handle <> 0) then
         begin
-            m_tray_icon.Icon.Assign(target_icon);
+            nc_set_tray_icon(m_tray_icon, target_icon);
         end;
         m_tray_icon.Hint := 'Cassotis IME (' + mode_text + ')';
         m_tray_icon.Visible := True;
@@ -2526,7 +2576,7 @@ procedure TncTrayHost.status_mouse_down(Sender: TObject; Button: TMouseButton; S
 var
     window_rect: TRect;
 begin
-    if (Button <> mbLeft) or (m_status_form = nil) then
+    if (Button <> mbLeft) or (m_status_form = nil) or m_settings_dialog_open then
     begin
         Exit;
     end;
@@ -2808,6 +2858,13 @@ var
     style_refresh_interval: UInt64;
 begin
     now_tick := GetTickCount64;
+
+    if (m_last_tray_theme_check_tick = 0) or
+        (now_tick - m_last_tray_theme_check_tick >= c_style_refresh_interval_idle_ms) then
+    begin
+        refresh_tray_icon_appearance;
+        m_last_tray_theme_check_tick := now_tick;
+    end;
 
     if m_menu_popup_active and (not has_popup_menu_window) then
     begin
