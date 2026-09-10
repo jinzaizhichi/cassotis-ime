@@ -4413,7 +4413,10 @@ begin
         (key_code = VK_OEM_7) or
         (key_code = VK_BACK) or
         (key_code = VK_SPACE) or
-        (key_code = VK_RETURN);
+        (key_code = VK_RETURN) or
+        // Do not drop a paging key merely because TEST_KEY cannot reach the
+        // cold/warming host. PROCESS_KEY remains authoritative for the action.
+        nc_composition_navigation_skips_host_test(key_code, key_state);
 end;
 
 function TncTextService.get_config_write_time: TDateTime;

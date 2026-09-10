@@ -69,12 +69,30 @@ function nc_candidate_page_key_matches_previous(
 function nc_candidate_page_key_matches_next(
     const scheme: TncCandidatePageKeyScheme; const key_code: Word;
     const key_state: TncKeyState): Boolean;
+function nc_composition_navigation_skips_host_test(const key_code: Word;
+    const key_state: TncKeyState): Boolean;
 
 implementation
 
 uses
     System.SysUtils,
     System.Classes;
+
+function nc_composition_navigation_skips_host_test(const key_code: Word;
+    const key_state: TncKeyState): Boolean;
+begin
+    Result := False;
+    if key_state.shift_down or key_state.ctrl_down or key_state.alt_down then Exit;
+    // During a composition these punctuation keys are consumed even when they
+    // are not the configured paging pair. Tab is different: it still requires
+    // a completion or an explicit paging binding, so it must not be included.
+    case key_code of
+        VK_PRIOR, VK_NEXT, VK_LEFT, VK_RIGHT, VK_UP, VK_DOWN,
+        VK_OEM_MINUS, VK_OEM_PLUS, VK_OEM_4, VK_OEM_6,
+        VK_OEM_COMMA, VK_OEM_PERIOD:
+            Result := True;
+    end;
+end;
 
 function normalize_key_code(const key_code: Word): Word;
 begin

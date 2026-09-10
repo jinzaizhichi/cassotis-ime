@@ -12,6 +12,7 @@ uses
     Winapi.Windows,
     nc_types,
     nc_candidate_presentation,
+    nc_prefix_completion_policy,
     nc_shortcut,
     nc_dictionary_intf,
     nc_local_repair_guard,
@@ -635,6 +636,7 @@ type
         m_cached_dictionary_simplified: TncDictionaryProvider;
         m_cached_dictionary_traditional: TncDictionaryProvider;
         m_defer_optional_dictionary_models: Boolean;
+        m_candidate_navigation_started: Boolean;
         m_dictionary_path: string;
         m_dictionary_write_time: TDateTime;
         m_user_dictionary_path: string;
@@ -711,6 +713,8 @@ type
         m_short_two_single_pair_texts: TArray<string>;
         m_short_three_exact_pair_query: string;
         m_short_three_exact_pair_texts: TArray<string>;
+        m_short_three_char_pair_path: string;
+        m_short_three_char_pair_evidence: Integer;
         m_short_exact_lexicon_completion_query: string;
         m_short_exact_lexicon_completion_texts: TArray<string>;
         m_short_exact_lexicon_completion_candidates: TncCandidateList;
@@ -1099,6 +1103,8 @@ type
             const dictionary: TncDictionaryProvider);
         function dictionary_models_deferred: Boolean;
         function rebuild_candidates_after_dictionary_upgrade: Boolean;
+        function try_upgrade_dictionary_from(const ready_engine: TncEngine;
+            out candidates_rebuilt: Boolean): Boolean;
         procedure reload_dictionary_if_needed;
         procedure prewarm_dictionary_caches;
         procedure set_external_left_context(const left_context: string;
@@ -1768,6 +1774,8 @@ begin
     SetLength(m_candidate_segment_paths, 0);
     m_short_three_exact_pair_query := '';
     SetLength(m_short_three_exact_pair_texts, 0);
+    m_short_three_char_pair_path := '';
+    m_short_three_char_pair_evidence := 0;
     m_short_exact_lexicon_completion_query := '';
     SetLength(m_short_exact_lexicon_completion_texts, 0);
     SetLength(m_short_exact_lexicon_completion_candidates, 0);
@@ -4320,6 +4328,7 @@ begin
     m_last_candidates_incrementally_reusable := True;
     m_composition_built_incrementally := False;
     m_runtime_chain_text := '';
+    m_candidate_navigation_started := False;
     m_runtime_common_pattern_text := '';
     m_runtime_redup_text := '';
     SetLength(m_runtime_long_chain_candidates, 0);
@@ -4365,6 +4374,8 @@ begin
     SetLength(m_short_two_single_pair_texts, 0);
     m_short_three_exact_pair_query := '';
     SetLength(m_short_three_exact_pair_texts, 0);
+    m_short_three_char_pair_path := '';
+    m_short_three_char_pair_evidence := 0;
     m_short_exact_lexicon_completion_query := '';
     SetLength(m_short_exact_lexicon_completion_texts, 0);
     SetLength(m_short_exact_lexicon_completion_candidates, 0);
@@ -5131,6 +5142,24 @@ begin
     end;
     build_candidates;
     normalize_page_and_selection;
+end;
+
+function TncEngine.try_upgrade_dictionary_from(const ready_engine: TncEngine;
+    out candidates_rebuilt: Boolean): Boolean;
+begin
+    candidates_rebuilt := False;
+    Result := False;
+    if (ready_engine = nil) or (ready_engine = Self) or
+        (ready_engine.m_dictionary = nil) or
+        ready_engine.dictionary_models_deferred or
+        (not dictionary_models_deferred) then Exit;
+    // A background handoff must not replace numbered choices already being
+    // browsed, even after the user has returned to page one. Keep the standby
+    // provider owned by ready_engine until the composition is edited or ended.
+    if (m_composition_text <> '') and m_candidate_navigation_started then Exit;
+    adopt_ready_dictionary_provider(ready_engine.detach_dictionary_provider);
+    candidates_rebuilt := rebuild_candidates_after_dictionary_upgrade;
+    Result := True;
 end;
 
 procedure TncEngine.free_dictionary_provider(var provider: TncDictionaryProvider);
@@ -8786,7 +8815,6 @@ var
     learned_query_choice_override_cache: TDictionary<string, Byte>;
     stronger_query_choice_competitor_cache: TDictionary<string, Byte>;
     limit: Integer;
-    i: Integer;
     fallback_comment: string;
     has_raw_candidates: Boolean;
     has_segment_candidates: Boolean;
@@ -8806,7 +8834,6 @@ var
     interactive_head_key: string;
     interactive_query_text: string;
     interactive_tail_key: string;
-    interactive_prefix_len: Integer;
     interactive_best_idx: Integer;
     interactive_best_score: Integer;
     interactive_score: Integer;
@@ -8847,6 +8874,7 @@ var
     sort_elapsed_ms: Int64;
     path_search_elapsed_ms: Int64;
     short4_has_strong_exact: Boolean;
+    short_four_model_evidence_applied: Boolean;
     short4_prefix_candidates_ready: Boolean;
     short4_is_particle_tail: Boolean;
     short4_tail_key: string;
@@ -9615,6 +9643,8 @@ var
             Exit;
         end;
 
+        if SameText(query_key_local, lookup_text) then
+            short_four_model_evidence_applied := True;
         sort_candidates_lightweight(candidates_local);
         if (((not has_full_query_exact_local) and
             (best_evidence_local > 0)) or
@@ -45321,6 +45351,7 @@ var
                     (query_path_raw_local * 3) div 5 + 28));
             end;
 
+            if Result = 0 then Exit;
             path_penalty_local := Max(0, get_cached_query_segment_path_penalty(
                 lookup_text, path_value));
             if path_penalty_local > 0 then
@@ -45468,6 +45499,134 @@ var
                 end;
             end;
         end;
+
+        procedure consider_attested_char_pair_local;
+        const
+            c_min_component_weight = 80;
+            c_min_trigram_score = -3072;
+            c_min_particle_bigram_score = -6144;
+            c_min_conditional_score = -12288;
+            c_min_competitor_margin = 1024;
+            // Below the display-stage dictionary-exact override threshold.
+            c_char_evidence = 350;
+        var
+            ngrams_local: TArray<string>;
+            observed_scores_local: TArray<Integer>;
+            text_scores_local: TArray<Integer>;
+            context_scores_local: TArray<Integer>;
+            units_local: TArray<string>;
+            idx_local, best_idx_local: Integer;
+            score_local, best_score_local, next_score_local: Integer;
+            particle_key_local, particle_text_local, particle_head_local: string;
+            left_context_local: string;
+            particle_query_local, attested_local: Boolean;
+
+            function path_is_attested_local(const index: Integer): Boolean;
+            begin
+                Result := observed_scores_local[index * 3] >= c_min_trigram_score;
+                if (not Result) and particle_query_local and
+                    (pair_splits_local[index] = 2) and
+                    (Copy(pair_texts_local[index], Length(pair_texts_local[index]),
+                    1) = particle_text_local) then
+                    Result := observed_scores_local[index * 3 + 1] >=
+                        c_min_particle_bigram_score;
+            end;
+        begin
+            // This is a bounded fallback for missing word transitions, not a
+            // replacement for them. Backoff probability alone cannot admit a path.
+            if has_usable_model_evidence_local or
+                (Length(pair_texts_local) < 2) then Exit;
+            SetLength(ngrams_local, Length(pair_texts_local) * 3);
+            for idx_local := 0 to High(pair_texts_local) do
+            begin
+                units_local := split_text_units(pair_texts_local[idx_local]);
+                if Length(units_local) <> 3 then Exit;
+                ngrams_local[idx_local * 3] := pair_texts_local[idx_local];
+                ngrams_local[idx_local * 3 + 1] := units_local[1] + units_local[2];
+                ngrams_local[idx_local * 3 + 2] := units_local[0];
+            end;
+            if (not m_dictionary.get_char_lm_attested_scores(ngrams_local,
+                observed_scores_local)) or
+                (Length(observed_scores_local) <> Length(ngrams_local)) then Exit;
+            particle_query_local := try_get_short_particle_tail_query_parts(
+                lookup_text, particle_key_local, particle_text_local,
+                particle_head_local);
+            attested_local := False;
+            for idx_local := 0 to High(pair_texts_local) do
+                if path_is_attested_local(idx_local) then
+                begin
+                    attested_local := True;
+                    Break;
+                end;
+            if not attested_local then Exit;
+            if (not m_dictionary.get_char_lm_continuation_scores('', pair_texts_local,
+                text_scores_local)) or
+                (Length(text_scores_local) <> Length(pair_texts_local)) then Exit;
+            best_idx_local := -1;
+            best_score_local := Low(Integer);
+            next_score_local := Low(Integer);
+            for idx_local := 0 to High(pair_texts_local) do
+            begin
+                if observed_scores_local[idx_local * 3 + 2] = Low(Integer) then Continue;
+                // Rank whole phrases, without an artificial sentence end. The
+                // scorer returns a per-character mean; all paths have three units.
+                score_local := 3 * text_scores_local[idx_local];
+                if score_local > best_score_local then
+                begin
+                    next_score_local := best_score_local;
+                    best_score_local := score_local;
+                    best_idx_local := idx_local;
+                end
+                else next_score_local := Max(next_score_local, score_local);
+            end;
+            if m_config.debug_mode and (best_idx_local >= 0) then
+                m_last_full_path_debug_info := m_last_full_path_debug_info +
+                    Format(' [s3char=%s score=%d next=%d obs=%d/%d w=%d/%d]',
+                    [pair_texts_local[best_idx_local], best_score_local,
+                    next_score_local, observed_scores_local[best_idx_local * 3],
+                    observed_scores_local[best_idx_local * 3 + 1],
+                    pair_head_weights_local[best_idx_local],
+                    pair_tail_weights_local[best_idx_local]]);
+            if (best_idx_local < 0) or (next_score_local = Low(Integer)) or
+                (best_score_local - observed_scores_local[
+                best_idx_local * 3 + 2] < c_min_conditional_score) or
+                (best_score_local - next_score_local < c_min_competitor_margin) or
+                (pair_head_weights_local[best_idx_local] < c_min_component_weight) or
+                (pair_tail_weights_local[best_idx_local] < c_min_component_weight) or
+                (get_cached_query_segment_path_penalty(lookup_text,
+                pair_paths_local[best_idx_local]) > 0) then Exit;
+
+            if not path_is_attested_local(best_idx_local) then Exit;
+
+            // A context-free phrase preference must not overrule a conflicting
+            // preceding context. Leave that decision to the contextual ranker.
+            left_context_local := Trim(m_segment_left_context);
+            if left_context_local = '' then
+                left_context_local := Trim(m_external_left_context);
+            if left_context_local = '' then
+                left_context_local := Trim(m_left_context);
+            left_context_local := context_model_tail(left_context_local);
+            if left_context_local <> '' then
+            begin
+                if (not get_cached_char_lm_scores(pair_texts_local,
+                    context_scores_local, clsm_context, left_context_local)) or
+                    (Length(context_scores_local) <> Length(pair_texts_local)) then Exit;
+                for idx_local := 0 to High(pair_texts_local) do
+                    if (idx_local <> best_idx_local) and
+                        (3 * (Int64(context_scores_local[best_idx_local]) -
+                        context_scores_local[idx_local]) < c_min_competitor_margin) then
+                    begin
+                        if m_config.debug_mode then
+                            m_last_full_path_debug_info := m_last_full_path_debug_info +
+                                ' [s3char-context-abstain]';
+                        Exit;
+                    end;
+            end;
+
+            pair_model_evidence_local[best_idx_local] := 3 * c_char_evidence;
+            m_short_three_char_pair_path := pair_paths_local[best_idx_local];
+            m_short_three_char_pair_evidence := c_char_evidence;
+        end;
     begin
         if short_three_exact_pair_prepared then
         begin
@@ -45477,6 +45636,8 @@ var
         SetLength(short_three_exact_pair_candidates, 0);
         SetLength(short_three_exact_pair_paths, 0);
         SetLength(short_three_exact_pair_rank_scores, 0);
+        m_short_three_char_pair_path := '';
+        m_short_three_char_pair_evidence := 0;
 
         if (m_dictionary = nil) or (input_syllable_count <> 3) or
             has_explicit_apostrophe_input or
@@ -45510,10 +45671,6 @@ var
                 Break;
             end;
         end;
-        if not has_usable_model_evidence_local then
-        begin
-            Exit;
-        end;
         SetLength(pair_texts_local, 0);
         SetLength(pair_paths_local, 0);
         SetLength(pair_splits_local, 0);
@@ -45545,6 +45702,8 @@ var
         begin
             Exit;
         end;
+
+        consider_attested_char_pair_local;
 
         SetLength(pair_final_ranks_local, Length(pair_texts_local));
         SetLength(accepted_indices_local, 0);
@@ -122368,292 +122527,137 @@ var
 
     procedure ensure_short_lexicon_prefix_completions_visible_local(
         var candidates: TncCandidateList);
-    const
-        c_short_long_completion_limit = 2;
-        c_general_completion_min_prior = 120;
-        c_popular_vertical_min_prior = 480;
     var
-        prefix_results_local: TncCandidateList;
-        completion_evidence_local: TncOneKeyCompletionList;
-        completion_evidence_loaded_local: Boolean;
-        text_units_local: TArray<string>;
-        candidate_text_local: string;
-        prefix_text_local: string;
-        candidate_score_local: Integer;
-        candidate_anchored_local: Boolean;
-        completion_anchor_flags_local: TArray<Boolean>;
-        completion_popularity_scores_local: TArray<Integer>;
-        candidate_popularity_local: Integer;
-        completion_idx_local: Integer;
-        prefix_idx_local: Integer;
-        unit_idx_local: Integer;
-        long_completion_count_local: Integer;
+        evidence_local: TncOneKeyCompletionList;
+        ranks_local: TArray<Int64>;
+        distant_flags_local: TArray<Boolean>;
+        exact_flags_local: TArray<Boolean>;
+        item_local: TncOneKeyCompletion;
+        candidate_local: TncCandidate;
+        units_local: TArray<string>;
+        prefix_local: string;
+        anchored_local, distant_local, exact_local: Boolean;
+        rank_local: Int64;
+        idx_local, evidence_idx_local, unit_idx_local, insert_idx_local, move_idx_local: Integer;
+        count_local, keep_local, distant_count_local, predicted_count_local: Integer;
 
-        function long_completion_popularity_local(
-            const text_value_local: string): Integer;
-        var
-            evidence_local: TncOneKeyCompletion;
-        begin
-            Result := -1;
-            if not completion_evidence_loaded_local then
-            begin
-                // Reuse the bounded, cached completion evidence pool. Never
-                // let a vertical lexicon weight alone admit a distant title.
-                m_dictionary.lookup_one_key_completions(lookup_text,
-                    completion_evidence_local);
-                completion_evidence_loaded_local := True;
-            end;
-            for evidence_local in completion_evidence_local do
-            begin
-                if (evidence_local.source <> okcs_base_exact) or
-                    (not evidence_local.has_popularity_prior) or
-                    (not SameText(evidence_local.text, text_value_local)) then
-                begin
-                    Continue;
-                end;
-                if ((evidence_local.vertical_layer_kind = 0) and
-                    (evidence_local.popularity_prior >= c_general_completion_min_prior) and
-                    ((evidence_local.corpus_score > 0) or
-                    (evidence_local.document_score > 0) or
-                    (evidence_local.source_count >= 2))) or
-                    ((evidence_local.popularity_prior >= c_popular_vertical_min_prior) and
-                    (evidence_local.source_count >= 2)) then
-                begin
-                    Result := evidence_local.popularity_prior;
-                end;
-                Exit;
-            end;
-        end;
-
-        function has_visible_exact_prefix_local(
-            const text_value_local: string): Boolean;
-        var
-            visible_idx_local: Integer;
+        function has_visible_exact_prefix_local(const text_value: string): Boolean;
+        var visible_idx: Integer;
         begin
             Result := False;
-            for visible_idx_local := 0 to High(candidates) do
-            begin
-                if (Trim(candidates[visible_idx_local].comment) = '') and
-                    (get_candidate_text_unit_count(
-                    Trim(candidates[visible_idx_local].text)) =
+            for visible_idx := 0 to High(candidates) do
+                if (Trim(candidates[visible_idx].comment) = '') and
+                    (get_candidate_text_unit_count(candidates[visible_idx].text) =
                     input_syllable_count) and
-                    SameText(Trim(candidates[visible_idx_local].text),
-                    text_value_local) then
-                begin
+                    SameText(Trim(candidates[visible_idx].text), text_value) then
                     Exit(True);
-                end;
-            end;
         end;
 
-        function already_collected_local(const text_value_local: string): Boolean;
-        var
-            collected_idx_local: Integer;
+        function already_collected_local(const text_value: string): Boolean;
+        var collected_idx: Integer;
         begin
             Result := False;
-            for collected_idx_local := 0 to
+            for collected_idx := 0 to
                 High(m_short_exact_lexicon_completion_candidates) do
-            begin
-                if SameText(Trim(m_short_exact_lexicon_completion_candidates[
-                    collected_idx_local].text), text_value_local) then
-                begin
-                    Exit(True);
-                end;
-            end;
-        end;
-
-        procedure collect_candidate_local(const candidate_value_local: TncCandidate;
-            const score_value_local: Integer; const anchored_value_local: Boolean;
-            const popularity_value_local: Integer);
-        var
-            candidate_local: TncCandidate;
-            insert_idx_local: Integer;
-            move_idx_local: Integer;
-            old_count_local: Integer;
-        begin
-            // Keep ordinary short extensions ahead of the few admitted long
-            // predictions, whose evidence is independent of lexicon weight.
-            insert_idx_local := 0;
-            while insert_idx_local <
-                Length(m_short_exact_lexicon_completion_candidates) do
-            begin
-                if (completion_popularity_scores_local[insert_idx_local] < 0) and
-                    (popularity_value_local >= 0) then
-                begin
-                    Inc(insert_idx_local);
-                    Continue;
-                end;
-                if (completion_popularity_scores_local[insert_idx_local] >= 0) and
-                    (popularity_value_local < 0) then
-                begin
-                    Break;
-                end;
-                if completion_popularity_scores_local[insert_idx_local] <
-                    popularity_value_local then
-                begin
-                    Break;
-                end;
-                if completion_popularity_scores_local[insert_idx_local] >
-                    popularity_value_local then
-                begin
-                    Inc(insert_idx_local);
-                    Continue;
-                end;
-                if completion_anchor_flags_local[insert_idx_local] and
-                    (not anchored_value_local) then
-                begin
-                    Inc(insert_idx_local);
-                    Continue;
-                end;
-                if completion_anchor_flags_local[insert_idx_local] =
-                    anchored_value_local then
-                begin
-                    if m_short_exact_lexicon_completion_candidates[
-                        insert_idx_local].score >= score_value_local then
-                    begin
-                        Inc(insert_idx_local);
-                        Continue;
-                    end;
-                end;
-                Break;
-            end;
-
-            old_count_local := Length(
-                m_short_exact_lexicon_completion_candidates);
-            SetLength(m_short_exact_lexicon_completion_candidates,
-                old_count_local + 1);
-            SetLength(completion_anchor_flags_local, old_count_local + 1);
-            SetLength(completion_popularity_scores_local, old_count_local + 1);
-            for move_idx_local :=
-                High(m_short_exact_lexicon_completion_candidates) downto
-                insert_idx_local + 1 do
-            begin
-                m_short_exact_lexicon_completion_candidates[move_idx_local] :=
-                    m_short_exact_lexicon_completion_candidates[
-                    move_idx_local - 1];
-                completion_anchor_flags_local[move_idx_local] :=
-                    completion_anchor_flags_local[move_idx_local - 1];
-                completion_popularity_scores_local[move_idx_local] :=
-                    completion_popularity_scores_local[move_idx_local - 1];
-            end;
-            candidate_local := candidate_value_local;
-            candidate_local.score := score_value_local;
-            candidate_local.source := cs_rule;
-            candidate_local.has_dict_weight := True;
-            candidate_local.dict_weight := score_value_local;
-            m_short_exact_lexicon_completion_candidates[insert_idx_local] :=
-                candidate_local;
-            completion_anchor_flags_local[insert_idx_local] :=
-                anchored_value_local;
-            completion_popularity_scores_local[insert_idx_local] :=
-                popularity_value_local;
+                if SameText(m_short_exact_lexicon_completion_candidates[
+                    collected_idx].text, text_value) then Exit(True);
         end;
     begin
         if (m_dictionary = nil) or (lookup_text = '') or
-            (input_syllable_count < 2) or
-            (not m_dictionary.lookup_full_pinyin_prefix(lookup_text,
-            prefix_results_local)) then
-        begin
-            Exit;
-        end;
-
+            (input_syllable_count < 2) then Exit;
+        // An empty admitted pool is still authoritative. Later display passes
+        // must not refill it from the old, unfiltered prefix probe.
+        m_short_exact_lexicon_completion_query := normalize_pinyin_text(lookup_text);
         SetLength(m_short_exact_lexicon_completion_candidates, 0);
         SetLength(m_short_exact_lexicon_completion_texts, 0);
-        SetLength(completion_anchor_flags_local, 0);
-        SetLength(completion_popularity_scores_local, 0);
-        completion_evidence_loaded_local := False;
-        for prefix_idx_local := 0 to High(prefix_results_local) do
+        if not m_dictionary.lookup_candidate_prefix_completions(lookup_text,
+            evidence_local) then Exit;
+        for evidence_idx_local := 0 to High(evidence_local) do
         begin
-            if (prefix_results_local[prefix_idx_local].source = cs_user) or
-                (Trim(prefix_results_local[prefix_idx_local].comment) <> '') then
-            begin
-                Continue;
-            end;
+            item_local := evidence_local[evidence_idx_local];
+            if item_local.source <> okcs_base_exact then Continue;
+            item_local.text := Trim(item_local.text);
+            exact_local := (item_local.full_pinyin <> '') and
+                SameText(item_local.full_pinyin, lookup_text);
+            units_local := split_text_units(item_local.text);
+            if (Length(units_local) < input_syllable_count) and
+                (not exact_local) then Continue;
+            if (Length(units_local) = input_syllable_count) and
+                has_visible_exact_prefix_local(item_local.text) then Continue;
+            if already_collected_local(item_local.text) then Continue;
+            prefix_local := '';
+            for unit_idx_local := 0 to Min(input_syllable_count,
+                Length(units_local)) - 1 do
+                prefix_local := prefix_local + units_local[unit_idx_local];
+            anchored_local := has_visible_exact_prefix_local(prefix_local);
+            distant_local :=
+                (not exact_local) and
+                (input_syllable_count < c_long_sentence_full_path_min_syllables) and
+                (Length(units_local) >= c_long_sentence_full_path_min_syllables);
+            // A compact exact may use a different syllable split from the
+            // primary parser. Restore it independently of prediction budgets.
+            if exact_local then rank_local := Int64(High(Integer)) * 1000000 + item_local.weight
+            else if not nc_prefix_completion_rank(item_local, input_syllable_count,
+                Length(units_local), anchored_local, distant_local,
+                rank_local) then Continue;
 
-            candidate_text_local := Trim(prefix_results_local[
-                prefix_idx_local].text);
-            text_units_local := split_text_units(candidate_text_local);
-            candidate_popularity_local := -1;
-            // Long extensions of a short query need independent evidence and
-            // share two slots across all pages. Tab and full-query exacts do
-            // not use this display-only gate.
-            if (input_syllable_count < c_long_sentence_full_path_min_syllables) and
-                (Length(text_units_local) >= c_long_sentence_full_path_min_syllables) then
+            insert_idx_local := 0;
+            count_local := Length(m_short_exact_lexicon_completion_candidates);
+            while insert_idx_local < count_local do
             begin
-                candidate_popularity_local :=
-                    long_completion_popularity_local(candidate_text_local);
-                if candidate_popularity_local < 0 then
+                if distant_flags_local[insert_idx_local] <> distant_local then
                 begin
-                    Continue;
-                end;
+                    if not distant_local then Break;
+                end
+                else if rank_local > ranks_local[insert_idx_local] then Break;
+                Inc(insert_idx_local);
             end;
-            if Length(text_units_local) < input_syllable_count then
+            SetLength(m_short_exact_lexicon_completion_candidates, count_local + 1);
+            SetLength(ranks_local, count_local + 1);
+            SetLength(distant_flags_local, count_local + 1);
+            SetLength(exact_flags_local, count_local + 1);
+            for move_idx_local := count_local downto insert_idx_local + 1 do
             begin
-                Continue;
+                m_short_exact_lexicon_completion_candidates[move_idx_local] :=
+                    m_short_exact_lexicon_completion_candidates[move_idx_local - 1];
+                ranks_local[move_idx_local] := ranks_local[move_idx_local - 1];
+                distant_flags_local[move_idx_local] := distant_flags_local[move_idx_local - 1];
+                exact_flags_local[move_idx_local] := exact_flags_local[move_idx_local - 1];
             end;
-            if (Length(text_units_local) = input_syllable_count) and
-                has_visible_exact_prefix_local(candidate_text_local) then
-            begin
-                // The ordinary exact lookup already owns this candidate. Do
-                // not mark it as a predictive completion or disable learning.
-                Continue;
-            end;
-            prefix_text_local := '';
-            for unit_idx_local := 0 to input_syllable_count - 1 do
-            begin
-                prefix_text_local := prefix_text_local +
-                    text_units_local[unit_idx_local];
-            end;
-            candidate_anchored_local :=
-                has_visible_exact_prefix_local(prefix_text_local);
-            if already_collected_local(candidate_text_local) then
-            begin
-                Continue;
-            end;
-
-            candidate_score_local := prefix_results_local[
-                prefix_idx_local].score;
-            if prefix_results_local[prefix_idx_local].has_dict_weight then
-            begin
-                candidate_score_local := prefix_results_local[
-                    prefix_idx_local].dict_weight;
-            end;
-            collect_candidate_local(prefix_results_local[prefix_idx_local],
-                candidate_score_local, candidate_anchored_local,
-                candidate_popularity_local);
+            candidate_local := Default(TncCandidate);
+            candidate_local.text := item_local.text;
+            candidate_local.source := cs_rule;
+            candidate_local.has_dict_weight := True;
+            candidate_local.dict_weight := item_local.weight;
+            candidate_local.score := item_local.weight;
+            m_short_exact_lexicon_completion_candidates[insert_idx_local] := candidate_local;
+            ranks_local[insert_idx_local] := rank_local;
+            distant_flags_local[insert_idx_local] := distant_local;
+            exact_flags_local[insert_idx_local] := exact_local;
         end;
 
-        long_completion_count_local := 0;
-        for completion_idx_local := 0 to
-            High(completion_popularity_scores_local) do
+        keep_local := 0;
+        distant_count_local := 0;
+        predicted_count_local := 0;
+        for idx_local := 0 to High(m_short_exact_lexicon_completion_candidates) do
         begin
-            if completion_popularity_scores_local[completion_idx_local] >= 0 then
+            if (not exact_flags_local[idx_local]) and
+                (predicted_count_local >= c_short_prefix_completion_limit) then Continue;
+            if distant_flags_local[idx_local] then
             begin
-                Inc(long_completion_count_local);
-                if long_completion_count_local > c_short_long_completion_limit then
-                begin
-                    SetLength(m_short_exact_lexicon_completion_candidates,
-                        completion_idx_local);
-                    Break;
-                end;
+                if distant_count_local >= c_short_long_prefix_completion_limit then Continue;
+                Inc(distant_count_local);
             end;
+            m_short_exact_lexicon_completion_candidates[keep_local] :=
+                m_short_exact_lexicon_completion_candidates[idx_local];
+            if not exact_flags_local[idx_local] then Inc(predicted_count_local);
+            Inc(keep_local);
         end;
-
-        if Length(m_short_exact_lexicon_completion_candidates) = 0 then
-        begin
-            Exit;
-        end;
-
-        m_short_exact_lexicon_completion_query :=
-            normalize_pinyin_text(lookup_text);
-        SetLength(m_short_exact_lexicon_completion_texts,
-            Length(m_short_exact_lexicon_completion_candidates));
-        for completion_idx_local := 0 to
-            High(m_short_exact_lexicon_completion_candidates) do
-        begin
-            m_short_exact_lexicon_completion_texts[completion_idx_local] :=
-                Trim(m_short_exact_lexicon_completion_candidates[
-                completion_idx_local].text);
-        end;
+        SetLength(m_short_exact_lexicon_completion_candidates, keep_local);
+        SetLength(m_short_exact_lexicon_completion_texts, keep_local);
+        for idx_local := 0 to keep_local - 1 do
+            m_short_exact_lexicon_completion_texts[idx_local] :=
+                m_short_exact_lexicon_completion_candidates[idx_local].text;
     end;
 
     procedure load_literal_user_candidates_local;
@@ -122706,44 +122710,102 @@ var
         end;
     end;
 
-begin
-    if (m_short_exact_pair_tail_query <> '') and
-        (not SameText(normalize_pinyin_text(m_composition_text),
-        m_short_exact_pair_tail_query)) then
+    procedure reconcile_short_model_candidates_local;
+    var
+        syllables_local: TncPinyinParseResult;
+        admitted_local, exact_local: TncCandidateList;
+        evidence_local: TncPairPathEvidenceList;
+        admitted_idx_local, candidate_idx_local, recovered_local: Integer;
+        found_local, new_admission_local, release_partial_lock_local: Boolean;
     begin
-        clear_short_exact_pair_tail_handoff;
+        if (m_dictionary = nil) or (m_composition_text = '') or
+            (input_syllable_count < 2) or (input_syllable_count > 4) or
+            has_explicit_apostrophe_input or
+            (not is_full_pinyin_key(lookup_text)) then Exit;
+
+        new_admission_local := False;
+        case input_syllable_count of
+            2:
+                begin
+                    new_admission_local := not short_two_single_pair_prepared;
+                    prepare_short_two_single_pair_candidates_local;
+                    admitted_local := short_two_single_pair_candidates;
+                end;
+            3:
+                begin
+                    new_admission_local := not short_three_exact_pair_prepared;
+                    prepare_short_three_exact_pair_candidates_local;
+                    admitted_local := short_three_exact_pair_candidates;
+                end;
+            4:
+                begin
+                    // Only recorded model paths belong to this common exit.
+                    // Existing grammatical fallbacks keep their own admission.
+                    if (not m_dictionary.get_exact_pair_path_evidence(lookup_text,
+                        evidence_local)) or (Length(evidence_local) = 0) then Exit;
+                    if lookup_exact_full_pinyin_cached_local(lookup_text,
+                        exact_local) and (Length(exact_local) > 0) then Exit;
+                    syllables_local := get_effective_compact_pinyin_syllables(
+                        lookup_text);
+                    new_admission_local := not short_four_model_evidence_applied;
+                    ensure_supported_short_four_two_exact_path_visible_local(
+                        syllables_local, admitted_local);
+                end;
+        end;
+        if Length(admitted_local) = 0 then Exit;
+
+        recovered_local := 0;
+        for admitted_idx_local := 0 to High(admitted_local) do
+        begin
+            found_local := False;
+            for candidate_idx_local := 0 to High(m_candidates) do
+                if (Trim(m_candidates[candidate_idx_local].comment) = '') and
+                    SameText(Trim(m_candidates[candidate_idx_local].text),
+                    Trim(admitted_local[admitted_idx_local].text)) then
+                begin
+                    found_local := True;
+                    Break;
+                end;
+            if not found_local then Inc(recovered_local);
+        end;
+
+        // Apply newly admitted evidence once, but do not repeat a decision that
+        // downstream context ranking has already seen. Missing paths are restored.
+        if new_admission_local or (recovered_local > 0) then
+            case input_syllable_count of
+                2: ensure_short_two_single_pair_candidates_visible_local(m_candidates);
+                3: ensure_short_three_exact_pair_candidates_visible_local(m_candidates);
+                4: m_candidates := merge_candidate_lists(admitted_local, m_candidates, 0);
+            end;
+
+        // Fast-display flags describe the resulting pool, not the shortcut that
+        // produced its seed. A validated complete path is no longer prefix-only.
+        m_last_lookup_prefix_partial_fast := False;
+        m_last_lookup_short312_head_fast := False;
+
+        release_partial_lock_local := m_has_forced_visible_top_candidate and
+            SameText(m_forced_visible_top_composition_text, m_composition_text) and
+            SameText(m_forced_visible_top_lookup_key, m_last_lookup_key) and
+            (Trim(m_forced_visible_top_candidate.comment) <> '') and
+            (m_forced_visible_top_candidate.source <> cs_user);
+        if release_partial_lock_local then
+        begin
+            m_has_forced_visible_top_candidate := False;
+            m_forced_visible_top_from_incremental_lm_prefix := False;
+        end;
+        if new_admission_local or (recovered_local > 0) or release_partial_lock_local then
+            m_visible_candidates_cache_valid := False;
+        if m_config.debug_mode then
+            m_last_lookup_debug_extra := m_last_lookup_debug_extra +
+                Format(' short-evidence-contract=[units=%d admitted=%d recovered=%d new=%d unlock=%d]',
+                [input_syllable_count, Length(admitted_local), recovered_local,
+                Ord(new_admission_local), Ord(release_partial_lock_local)]);
     end;
-    reset_debug_target_recall_metrics;
-    subspan_oracle_states := nil;
-    subspan_oracle_texts := nil;
-    subspan_oracle_scores := nil;
-    subspan_oracle_engine := nil;
-    subspan_oracle_budget_remaining := 0;
-    SetLength(literal_user_candidates, 0);
-    SetLength(incremental_partial_candidates, 0);
-    preferred_exact_candidate_cache := nil;
-    preferred_exact_syllable_count_cache := nil;
-    preferred_exact_state_cache := nil;
-    preferred_query_phrase_bonus_cache := nil;
-    preferred_query_phrase_text_cache := nil;
-    preferred_query_phrase_text_bonus_cache := nil;
-    learned_query_choice_override_cache := nil;
-    stronger_query_choice_competitor_cache := nil;
-    lookup_cache := m_build_lookup_cache;
-    if lookup_cache = nil then
+
+    procedure generate_candidates_local;
+    var
+        i, interactive_prefix_len: Integer;
     begin
-        lookup_cache := TDictionary<string, TncCandidateList>.Create;
-        m_build_lookup_cache := lookup_cache;
-    end;
-    try
-        preferred_exact_candidate_cache := TDictionary<string, TncCandidate>.Create;
-        preferred_exact_syllable_count_cache := TDictionary<string, Integer>.Create;
-        preferred_exact_state_cache := TDictionary<string, Byte>.Create;
-        preferred_query_phrase_bonus_cache := TDictionary<string, Integer>.Create;
-        preferred_query_phrase_text_cache := TDictionary<string, string>.Create;
-        preferred_query_phrase_text_bonus_cache := TDictionary<string, Integer>.Create;
-        learned_query_choice_override_cache := TDictionary<string, Byte>.Create;
-        stronger_query_choice_competitor_cache := TDictionary<string, Byte>.Create;
         if m_lookup_context_query_bonus_cache <> nil then
         begin
             m_lookup_context_query_bonus_cache.Clear;
@@ -122769,6 +122831,7 @@ begin
         short_extendable_tail_cache_value := False;
         skip_three_syllable_contextual_completion := False;
         short_two_single_pair_prepared := False;
+        short_four_model_evidence_applied := False;
         SetLength(short_two_single_pair_candidates, 0);
         SetLength(short_two_single_pair_paths, 0);
         SetLength(short_two_single_pair_rank_scores, 0);
@@ -122792,6 +122855,8 @@ begin
         SetLength(short_three_exact_pair_rank_scores, 0);
         m_short_three_exact_pair_query := '';
         SetLength(m_short_three_exact_pair_texts, 0);
+        m_short_three_char_pair_path := '';
+        m_short_three_char_pair_evidence := 0;
         m_short_exact_lexicon_completion_query := '';
         SetLength(m_short_exact_lexicon_completion_texts, 0);
         SetLength(m_short_exact_lexicon_completion_candidates, 0);
@@ -122811,9 +122876,14 @@ begin
             SetLength(previous_candidates, 0);
         end;
         m_last_candidates_incrementally_reusable := True;
+        // A model handoff can rebuild the same pinyin. Preserve the snapshots
+        // captured above, but never page new sources through an old display pool.
+        m_visible_candidates_cache_valid := False;
+        m_long_visible_candidate_pool_cache_valid := False;
         SetLength(m_candidates, 0);
         m_page_index := 0;
         m_selected_index := 0;
+        m_candidate_navigation_started := False;
         confirmed_prefix_boundary_partial_preferred := False;
         m_last_lookup_key := '';
         m_last_lookup_normalized_from := '';
@@ -124492,6 +124562,8 @@ begin
                     m_last_lookup_debug_extra := m_last_lookup_debug_extra + ' ' +
                         get_candidate_debug_summary(m_candidates[0]);
                 end;
+                m_last_lookup_debug_extra := m_last_lookup_debug_extra +
+                    m_last_full_path_debug_info;
             end;
             finalize_lookup_timing_info;
             m_page_index := 0;
@@ -130515,12 +130587,57 @@ begin
         note_ranked_top_candidate;
         m_page_index := 0;
         m_selected_index := 0;
-    finally
+    end;
+
+begin
+    if (m_short_exact_pair_tail_query <> '') and
+        (not SameText(normalize_pinyin_text(m_composition_text),
+        m_short_exact_pair_tail_query)) then
+    begin
+        clear_short_exact_pair_tail_handoff;
+    end;
+    reset_debug_target_recall_metrics;
+    subspan_oracle_states := nil;
+    subspan_oracle_texts := nil;
+    subspan_oracle_scores := nil;
+    subspan_oracle_engine := nil;
+    subspan_oracle_budget_remaining := 0;
+    input_syllable_count := 0;
+    SetLength(literal_user_candidates, 0);
+    SetLength(incremental_partial_candidates, 0);
+    preferred_exact_candidate_cache := nil;
+    preferred_exact_syllable_count_cache := nil;
+    preferred_exact_state_cache := nil;
+    preferred_query_phrase_bonus_cache := nil;
+    preferred_query_phrase_text_cache := nil;
+    preferred_query_phrase_text_bonus_cache := nil;
+    learned_query_choice_override_cache := nil;
+    stronger_query_choice_competitor_cache := nil;
+    lookup_cache := m_build_lookup_cache;
+    if lookup_cache = nil then
+    begin
+        lookup_cache := TDictionary<string, TncCandidateList>.Create;
+        m_build_lookup_cache := lookup_cache;
+    end;
+    try
+        preferred_exact_candidate_cache := TDictionary<string, TncCandidate>.Create;
+        preferred_exact_syllable_count_cache := TDictionary<string, Integer>.Create;
+        preferred_exact_state_cache := TDictionary<string, Byte>.Create;
+        preferred_query_phrase_bonus_cache := TDictionary<string, Integer>.Create;
+        preferred_query_phrase_text_cache := TDictionary<string, string>.Create;
+        preferred_query_phrase_text_bonus_cache := TDictionary<string, Integer>.Create;
+        learned_query_choice_override_cache := TDictionary<string, Byte>.Create;
+        stronger_query_choice_competitor_cache := TDictionary<string, Byte>.Create;
+        // Early returns stay inside generation. All successful paths share the
+        // same evidence/ownership boundary before the display stages see them.
+        generate_candidates_local;
+        reconcile_short_model_candidates_local;
         inject_literal_user_candidates_local;
         refresh_candidate_segment_paths;
         note_ranked_top_candidate;
         m_page_index := 0;
         m_selected_index := 0;
+    finally
         stronger_query_choice_competitor_cache.Free;
         learned_query_choice_override_cache.Free;
         preferred_query_phrase_text_bonus_cache.Free;
@@ -157964,10 +158081,12 @@ begin
                     normalize_page_and_selection;
                     if m_selected_index > 0 then
                     begin
+                        m_candidate_navigation_started := True;
                         Dec(m_selected_index);
                     end
                     else if m_page_index > 0 then
                     begin
+                        m_candidate_navigation_started := True;
                         Dec(m_page_index);
                         index := get_current_page_candidate_count(page_size);
                         if index > 0 then
@@ -157999,10 +158118,12 @@ begin
 
                     if (index > 0) and (m_selected_index < index - 1) then
                     begin
+                        m_candidate_navigation_started := True;
                         Inc(m_selected_index);
                     end
                     else if m_page_index < get_page_count_internal(page_size) - 1 then
                     begin
+                        m_candidate_navigation_started := True;
                         Inc(m_page_index);
                         m_selected_index := 0;
                         normalize_page_and_selection;
@@ -160706,6 +160827,19 @@ var
                 Exit;
             end;
 
+            if SameText(normalized_pinyin, m_short_three_exact_pair_query) and
+                (m_short_three_char_pair_evidence > 0) then
+            begin
+                parts_local := m_short_three_char_pair_path.Split(
+                    [c_segment_path_separator]);
+                if (Length(parts_local) = 2) and
+                    SameText(parts_local[0] + parts_local[1], text_value) then
+                begin
+                    encoded_path := m_short_three_char_pair_path;
+                    Exit(m_short_three_char_pair_evidence);
+                end;
+            end;
+
             if not pair_evidence_loaded then
             begin
                 pair_evidence_loaded := True;
@@ -160779,7 +160913,11 @@ var
             if not predictive_prefix_results_loaded then
             begin
                 predictive_prefix_results_loaded := True;
-                if (m_dictionary = nil) or
+                if SameText(normalized_pinyin,
+                    m_short_exact_lexicon_completion_query) then
+                    predictive_prefix_results :=
+                        Copy(m_short_exact_lexicon_completion_candidates)
+                else if (m_dictionary = nil) or
                     (not m_dictionary.lookup_full_pinyin_prefix(normalized_pinyin,
                     predictive_prefix_results)) then
                 begin
@@ -182880,6 +183018,32 @@ var
         Result := top_path_local <> '';
     end;
 
+    function has_admitted_short_complete_model_path_local: Boolean;
+    var
+        idx_local: Integer;
+        text_local: string;
+    begin
+        Result := False;
+        if (expected_units < 2) or (expected_units > 4) then Exit;
+        for idx_local := 0 to Min(31, High(m_candidates)) do
+        begin
+            if Trim(m_candidates[idx_local].comment) <> '' then Continue;
+            text_local := Trim(m_candidates[idx_local].text);
+            if get_candidate_text_unit_count(text_local) <> expected_units then
+                Continue;
+            case expected_units of
+                2: Result := is_current_short_two_single_pair_candidate_supported(
+                    normalized_pinyin, text_local);
+                3: Result := is_current_short_three_exact_pair_candidate_supported(
+                    normalized_pinyin, text_local);
+                4: Result := (m_candidates[idx_local].display_kind = cdk_lm_compound) and
+                    display_short_four_two_exact_path_is_supported_local(
+                    m_candidates[idx_local]);
+            end;
+            if Result then Exit;
+        end;
+    end;
+
     function top_display_candidate_can_use_short_prefix_fast_display_local:
         Boolean;
     const
@@ -182977,6 +183141,13 @@ var
             (Pos('''', m_last_lookup_key) > 0) then
         begin
             note_short_prefix_fast_reject_local('guard');
+            Exit;
+        end;
+        // A prefix-only display shortcut must not reinterpret an admitted model
+        // path as untrusted composition, even if its seed used a prefix shortcut.
+        if has_admitted_short_complete_model_path_local then
+        begin
+            note_short_prefix_fast_reject_local('modelpath');
             Exit;
         end;
         if (normalized_pinyin = 'naer') or (normalized_pinyin = 'ner') or
@@ -183077,6 +183248,8 @@ var
         begin
             Exit;
         end;
+
+        if has_admitted_short_complete_model_path_local then Exit;
 
         best_idx_local := -1;
         best_rank_local := Low(Integer);
@@ -190442,9 +190615,8 @@ var
                 seen_candidates_local := TDictionary<string, Boolean>.Create;
                 try
                     { Collect the processed first page and remaining source
-                      candidates once. Normalize prefix tiers before pagination
-                      so a filled first page cannot strand shorter words behind
-                      singles. Complete-candidate ranking is left unchanged. }
+                      candidates once. Merge scored word-prefix groups before
+                      pagination, keeping singles last and complete slots fixed. }
                     for candidate_idx_local := 0 to High(Result) do
                     begin
                         if candidate_idx_local < Length(visible_source_indices) then
@@ -191960,6 +192132,7 @@ begin
 
     if m_page_index < page_count - 1 then
     begin
+        m_candidate_navigation_started := True;
         Inc(m_page_index);
         m_selected_index := 0;
         Result := True;
@@ -191974,6 +192147,7 @@ function TncEngine.prev_page: Boolean;
 begin
     if m_page_index > 0 then
     begin
+        m_candidate_navigation_started := True;
         Dec(m_page_index);
         m_selected_index := 0;
         Result := True;

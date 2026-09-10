@@ -1923,13 +1923,13 @@ var
     session_id: string;
     session: TncHostSession;
     warmed_session: TncHostSession;
-    ready_dictionary: TncDictionaryProvider;
     create_start_tick: UInt64;
     total_elapsed_ms: Int64;
     should_requeue: Boolean;
     instance_id: UInt64;
     refreshed_candidates: Boolean;
     upgraded_dictionary: Boolean;
+    candidates_rebuilt: Boolean;
     refresh_generation: UInt64;
     candidates: TncCandidateList;
     one_key_completion: TncOneKeyCompletion;
@@ -1941,7 +1941,6 @@ begin
     session_id := '';
     session := nil;
     warmed_session := nil;
-    ready_dictionary := nil;
     should_requeue := False;
     instance_id := 0;
     refreshed_candidates := False;
@@ -1996,14 +1995,17 @@ begin
 
                         warmed_session := m_standby_session;
                         m_standby_session := nil;
-                        ready_dictionary :=
-                            warmed_session.engine.detach_dictionary_provider;
-                        session.engine.adopt_ready_dictionary_provider(
-                            ready_dictionary);
-                        ready_dictionary := nil;
+                        if not session.engine.try_upgrade_dictionary_from(
+                            warmed_session.engine, candidates_rebuilt) then
+                        begin
+                            m_standby_session := warmed_session;
+                            warmed_session := nil;
+                            should_requeue := True;
+                            Exit;
+                        end;
                         upgraded_dictionary := True;
 
-                        if session.engine.rebuild_candidates_after_dictionary_upgrade then
+                        if candidates_rebuilt then
                         begin
                             candidates := session.engine.get_candidates;
                             one_key_completion :=
@@ -2093,7 +2095,6 @@ begin
                 [session_id, Ord(upgraded_dictionary), total_elapsed_ms]));
         end;
     finally
-        ready_dictionary.Free;
         warmed_session.Free;
         m_lock.Acquire;
         try
