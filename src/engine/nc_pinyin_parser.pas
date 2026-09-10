@@ -515,12 +515,15 @@ var
     syllable: TncPinyinSyllable;
 begin
     Result := value;
-    if (Pos('ue', value) = 0) and (Pos('UE', value) = 0) and
+    if (Pos('v', value) = 0) and (Pos('V', value) = 0) and
+        (Pos('ue', value) = 0) and (Pos('UE', value) = 0) and
         (Pos('uE', value) = 0) and (Pos('Ue', value) = 0) then Exit;
     lower_value := LowerCase(value);
-    if (Pos('lue', lower_value) = 0) and (Pos('nue', lower_value) = 0) then Exit;
-    // Normalize complete syllables only, never lu'e. Equal-length aliases
-    // preserve raw key offsets for partial commits, editing and learning.
+    if (Pos('lue', lower_value) = 0) and (Pos('nue', lower_value) = 0) and
+        (Pos('jv', lower_value) = 0) and (Pos('qv', lower_value) = 0) and
+        (Pos('xv', lower_value) = 0) then Exit;
+    // Normalize complete syllables only, never join explicit boundaries.
+    // Equal-length aliases preserve raw key offsets for partial commits.
     parser := TncPinyinParser.Create;
     try
         syllables := parser.parse(lower_value);
@@ -529,7 +532,14 @@ begin
     end;
     for syllable in syllables do
         if (syllable.text = 'lue') or (syllable.text = 'nue') then
-            Result[syllable.start_index + 2] := 'v';
+            Result[syllable.start_index + 2] := 'v'
+        else if (Length(syllable.text) >= 2) and
+            CharInSet(syllable.text[1], ['j', 'q', 'x']) and
+            ((Copy(syllable.text, 2, MaxInt) = 'v') or
+             (Copy(syllable.text, 2, MaxInt) = 've') or
+             (Copy(syllable.text, 2, MaxInt) = 'van') or
+             (Copy(syllable.text, 2, MaxInt) = 'vn')) then
+            Result[syllable.start_index + 2] := 'u';
 end;
 
 end.

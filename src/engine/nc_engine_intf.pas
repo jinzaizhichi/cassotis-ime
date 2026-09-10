@@ -141422,7 +141422,7 @@ procedure TncEngine.apply_visible_local_repair(var candidates: TncCandidateList;
     var source_indices: TArray<Integer>; const expected_units: Integer);
 var
     text, path, key, segment, replacement, original_path: string;
-    document_key, preceding_text, aligned_pinyin: string;
+    document_key, preceding_text, aligned_pinyin, repair_query: string;
     refined_text, refined_pinyin: string;
     refinement_override: string;
     minimum_word_ratio, refined_word_ratio: Double;
@@ -141526,8 +141526,10 @@ begin
                 get_segment_path_for_candidate(candidates[0], source_indices[0]);
             m_debug_local_repair_guard.invoked := True;
         end;
+        // Model vocabularies use canonical syllables, with explicit boundaries intact.
+        repair_query := nc_normalize_umlaut_spelling(m_composition_text);
         try
-            repair_accepted := m_long_local_repair.try_repair(m_composition_text,
+            repair_accepted := m_long_local_repair.try_repair(repair_query,
                 candidates[0].text, document_key, preceding_text, text,
                 aligned_pinyin, minimum_word_ratio);
             if m_debug_capture_local_repair then
@@ -141566,7 +141568,7 @@ begin
             (preceding_text = '') and (text <> candidates[0].text) then
         begin
             try
-                if m_long_local_repair.try_repair(m_composition_text, text,
+                if m_long_local_repair.try_repair(repair_query, text,
                     document_key, preceding_text, refined_text, refined_pinyin,
                     refined_word_ratio) and (refined_pinyin = aligned_pinyin) and
                     (refined_word_ratio = minimum_word_ratio) and
@@ -157358,8 +157360,24 @@ var
         begin
             display_text := m_composition_text;
         end;
-        if (display_text = '') or (Pos('''', display_text) <= 0) then
+        if display_text = '' then
         begin
+            Exit;
+        end;
+
+        if Pos('''', display_text) <= 0 then
+        begin
+            // Lookup uses canonical spelling; partial selection must retain
+            // the user's equal-length alias in the unconsumed input.
+            if (not is_shuangpin_input) and
+                (Length(normalized_remaining) < Length(display_text)) then
+            begin
+                suffix_text := Copy(display_text,
+                    Length(display_text) - Length(normalized_remaining) + 1,
+                    Length(normalized_remaining));
+                if SameText(normalize_pinyin_text(suffix_text), normalized_remaining) then
+                    Result := suffix_text;
+            end;
             Exit;
         end;
 
