@@ -163643,6 +163643,169 @@ var
                 end));
         end;
 
+        function apply_context_supported_pair_ranking_local: Boolean;
+        const
+            c_min_exact_competitors = 2;
+            c_max_exact_competitors = 9;
+            c_max_pair_competitors = 2;
+            c_min_context_score = -6000;
+        var
+            context_local: string;
+            context_units_local: TArray<string>;
+            base_units_local, pair_units_local: TArray<string>;
+            texts_local, ngrams_local: TArray<string>;
+            indices_local, ngram_owners_local: TArray<Integer>;
+            context_scores_local, neutral_scores_local: TArray<Integer>;
+            attested_scores_local: TArray<Integer>;
+            prefix_scores_local: TArray<Integer>;
+            observed_local: TArray<Boolean>;
+            list_idx_local, idx_local, pair_count_local, exact_count_local: Integer;
+            best_idx_local, runner_score_local, ngram_idx_local: Integer;
+            lead_local, context_gain_local: Int64;
+            rank_item_local: TShortExactRankItem;
+            pair_local: Boolean;
+            base_prefix_local, pair_prefix_local: string;
+        begin
+            Result := False;
+            if (m_dictionary = nil) or has_user_exact or
+                (expected_units < 2) or (expected_units > 3) or
+                (Length(syllables) <> expected_units) or
+                (not is_full_pinyin_key(normalized_pinyin)) or
+                is_fuzzy_pinyin_active or (list.Count < 2) or
+                (not list[0].actual_full_exact) or
+                (list[0].context_exact_priority > 0) then Exit;
+
+            context_local := Trim(m_left_context);
+            if Trim(m_segment_left_context) <> '' then
+                context_local := Trim(m_segment_left_context)
+            else if Trim(m_external_left_context) <> '' then
+                context_local := Trim(m_external_left_context);
+            context_local := context_model_tail(context_local);
+            if context_local = '' then Exit;
+            context_units_local := split_text_units(context_local);
+            if Length(context_units_local) = 0 then Exit;
+
+            pair_count_local := 0;
+            exact_count_local := 0;
+            for list_idx_local := 0 to list.Count - 1 do
+            begin
+                rank_item_local := list[list_idx_local];
+                if (rank_item_local.candidate.comment <> '') or
+                    (get_candidate_text_unit_count(rank_item_local.candidate.text) <>
+                    expected_units) then Continue;
+                pair_local := (rank_item_local.transition_evidence > 0) and
+                    (rank_item_local.candidate.display_kind = cdk_lm_compound) and
+                    (not rank_item_local.actual_full_exact);
+                if not pair_local and not rank_item_local.actual_full_exact then
+                    Continue;
+                if query_choice_rank_bonus_local(rank_item_local.candidate.text) > 0 then
+                    Exit;
+                if pair_local then Inc(pair_count_local)
+                else Inc(exact_count_local);
+                if (pair_count_local > c_max_pair_competitors) or
+                    (exact_count_local > c_max_exact_competitors) then Exit;
+
+                idx_local := Length(texts_local);
+                SetLength(texts_local, idx_local + 1);
+                SetLength(indices_local, idx_local + 1);
+                texts_local[idx_local] := rank_item_local.candidate.text;
+                indices_local[idx_local] := list_idx_local;
+                if pair_local then
+                begin
+                    ngram_idx_local := Length(ngrams_local);
+                    SetLength(ngrams_local, ngram_idx_local + 1);
+                    SetLength(ngram_owners_local, ngram_idx_local + 1);
+                    ngrams_local[ngram_idx_local] :=
+                        context_units_local[High(context_units_local)] +
+                        rank_item_local.candidate.text;
+                    ngram_owners_local[ngram_idx_local] := idx_local;
+                    if (expected_units = 2) and (Length(context_units_local) > 1) then
+                    begin
+                        ngrams_local[ngram_idx_local] :=
+                            context_units_local[High(context_units_local) - 1] +
+                            ngrams_local[ngram_idx_local];
+                    end;
+                end;
+            end;
+            // A unique dictionary exact is not an ambiguous exact group. Leave
+            // that decision to the trained rankers instead of a local LM margin.
+            if (pair_count_local = 0) or
+                (exact_count_local < c_min_exact_competitors) or
+                (Length(indices_local) < 2) or (indices_local[0] <> 0) then Exit;
+
+            // Admission is unchanged. A backoff guess or a blue display marker
+            // alone cannot override an exact. Use the longest available context
+            // window, not a shorter common function-word fragment as fallback.
+            if (not m_dictionary.get_char_lm_attested_scores(ngrams_local,
+                attested_scores_local)) or
+                (Length(attested_scores_local) <> Length(ngrams_local)) then Exit;
+            SetLength(observed_local, Length(texts_local));
+            for idx_local := 0 to High(attested_scores_local) do
+                if attested_scores_local[idx_local] >= c_min_context_score then
+                    observed_local[ngram_owners_local[idx_local]] := True;
+            if (not get_cached_char_lm_scores(texts_local, context_scores_local,
+                clsm_short_context, context_local)) or
+                (Length(context_scores_local) <> Length(texts_local)) then Exit;
+
+            best_idx_local := 0;
+            for idx_local := 0 to High(context_scores_local) do
+            begin
+                if context_scores_local[idx_local] = Low(Integer) then Exit;
+                if context_scores_local[idx_local] > context_scores_local[best_idx_local] then
+                    best_idx_local := idx_local;
+            end;
+            if (best_idx_local = 0) or (not observed_local[best_idx_local]) or
+                (context_scores_local[best_idx_local] < c_min_context_score) then Exit;
+            runner_score_local := Low(Integer);
+            for idx_local := 0 to High(context_scores_local) do
+                if idx_local <> best_idx_local then
+                    runner_score_local := Max(runner_score_local, context_scores_local[idx_local]);
+            lead_local := Int64(context_scores_local[best_idx_local]) - runner_score_local;
+            if lead_local < c_decisive_transition_min_full_lm_lead then Exit;
+
+            // A frequent tail must not compensate for making the first changed
+            // prefix less compatible with the actual left context.
+            base_units_local := split_text_units(texts_local[0]);
+            pair_units_local := split_text_units(texts_local[best_idx_local]);
+            base_prefix_local := '';
+            pair_prefix_local := '';
+            for idx_local := 0 to expected_units - 2 do
+            begin
+                base_prefix_local := base_prefix_local + base_units_local[idx_local];
+                pair_prefix_local := pair_prefix_local + pair_units_local[idx_local];
+                if base_units_local[idx_local] = pair_units_local[idx_local] then Continue;
+                if (not get_cached_char_lm_scores(TArray<string>.Create(
+                    base_prefix_local, pair_prefix_local), prefix_scores_local,
+                    clsm_short_context, context_local)) or
+                    (Length(prefix_scores_local) <> 2) or
+                    (prefix_scores_local[0] = Low(Integer)) or
+                    (prefix_scores_local[1] < prefix_scores_local[0]) then Exit;
+                Break;
+            end;
+
+            // Context must add discriminating evidence, not just preserve a
+            // phrase's context-free advantage. Reuse the ordinary scoring cache.
+            if (not get_cached_char_lm_scores(TArray<string>.Create(texts_local[0],
+                texts_local[best_idx_local]), neutral_scores_local,
+                clsm_short_context, '')) or (Length(neutral_scores_local) <> 2) or
+                (neutral_scores_local[0] = Low(Integer)) or
+                (neutral_scores_local[1] = Low(Integer)) then Exit;
+            context_gain_local := Int64(context_scores_local[best_idx_local]) -
+                context_scores_local[0] -
+                (Int64(neutral_scores_local[1]) - neutral_scores_local[0]);
+            if context_gain_local < c_decisive_transition_min_suffix_lm_lead then Exit;
+
+            rank_item_local := list[indices_local[best_idx_local]];
+            rank_item_local.decisive_transition_override := True;
+            rank_item_local.category := 1;
+            list[indices_local[best_idx_local]] := rank_item_local;
+            if m_config.debug_mode then
+                m_last_lookup_debug_extra := m_last_lookup_debug_extra +
+                    Format(' shortctxpair=%s:lead=%d/gain=%d',
+                    [texts_local[best_idx_local], lead_local, context_gain_local]);
+            Result := True;
+        end;
+
         function apply_document_context_exact_reranker_local: Boolean;
         const
             c_document_exact_min_score = 280;
@@ -164115,6 +164278,11 @@ var
                 sort_short_exact_rank_items_local;
             end;
             note_short_exact_phase_local('document');
+            if apply_context_supported_pair_ranking_local then
+            begin
+                sort_short_exact_rank_items_local;
+            end;
+            note_short_exact_phase_local('contextpair');
             ensure_prefix_visible_on_first_page_local;
             note_short_exact_phase_local('visible');
             if short_exact_predictive_prefix_only_mode then
