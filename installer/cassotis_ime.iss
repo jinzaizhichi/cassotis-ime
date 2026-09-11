@@ -14,6 +14,9 @@
 #ifndef RuntimeBuildId
   #define RuntimeBuildId "manual"
 #endif
+#ifndef HasJointRepair
+  #define HasJointRepair 0
+#endif
 #define RuntimeRoot "{localappdata}\CassotisIme"
 #define InstallRuntimeDir "{app}\runtime\" + AppVersion + "_" + RuntimeBuildId
 
@@ -76,6 +79,11 @@ Source: "{#RuntimeDir}\local_repair\query_int8.onnx"; DestDir: "{#InstallRuntime
 Source: "{#RuntimeDir}\local_repair\vocab.json"; DestDir: "{#InstallRuntimeDir}\local_repair"; Flags: ignoreversion onlyifdoesntexist
 Source: "{#RuntimeDir}\local_repair\readings.json"; DestDir: "{#InstallRuntimeDir}\local_repair"; Flags: ignoreversion onlyifdoesntexist
 Source: "{#RuntimeDir}\local_repair\runtime_manifest.json"; DestDir: "{#InstallRuntimeDir}\local_repair"; Flags: ignoreversion onlyifdoesntexist
+#if HasJointRepair
+Source: "{#RuntimeDir}\local_repair\joint_query_int8.onnx"; DestDir: "{#InstallRuntimeDir}\local_repair"; Flags: ignoreversion onlyifdoesntexist
+Source: "{#RuntimeDir}\local_repair\joint_head_int8.onnx"; DestDir: "{#InstallRuntimeDir}\local_repair"; Flags: ignoreversion onlyifdoesntexist
+Source: "{#RuntimeDir}\local_repair\bilateral_head_int8.onnx"; DestDir: "{#InstallRuntimeDir}\local_repair"; Flags: ignoreversion onlyifdoesntexist
+#endif
 Source: "{#SourceRoot}\third_party\macbert\LICENSE"; DestDir: "{app}\licenses\macbert"; Flags: ignoreversion
 Source: "{#SourceRoot}\third_party\macbert\NOTICE"; DestDir: "{app}\licenses\macbert"; Flags: ignoreversion
 Source: "{#SourceRoot}\third_party\onnxruntime\LICENSE"; DestDir: "{app}\licenses\onnxruntime"; Flags: ignoreversion

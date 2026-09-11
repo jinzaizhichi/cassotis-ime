@@ -94,6 +94,19 @@ $runtimePayloadFiles = @(
     'out\local_repair\runtime_manifest.json'
 )
 
+$repairManifestPath = Join-Path $resolvedSourceRoot 'out\local_repair\runtime_manifest.json'
+require-path $repairManifestPath
+$repairManifest = Get-Content -LiteralPath $repairManifestPath -Raw -Encoding UTF8 | ConvertFrom-Json
+$hasJointRepair = ($repairManifest.enabled -eq $true) -and ($repairManifest.joint_bilateral -eq $true)
+if ($hasJointRepair) {
+    # Optional graphs must be present AND included in the immutable runtime ID.
+    $runtimePayloadFiles += @(
+        'out\local_repair\joint_query_int8.onnx',
+        'out\local_repair\joint_head_int8.onnx',
+        'out\local_repair\bilateral_head_int8.onnx'
+    )
+}
+
 $requiredFiles = @(
     'cassotis_ime_yanquan.ico',
     'version.props'
@@ -127,7 +140,7 @@ require-path (Join-Path $runtimeDataSourceDir 'dict_sc.db')
 require-path (Join-Path $runtimeDataSourceDir 'dict_tc.db')
 
 Write-Host "[installer] runtime_build_id=$runtimeBuildId"
-& $iscc ("/DAppVersion=$Version") ("/DRuntimeBuildId=$runtimeBuildId") ("/DSourceRoot=$resolvedSourceRoot") ("/DRuntimeDataSourceDir=$runtimeDataSourceDir") $resolvedScriptPath
+& $iscc ("/DAppVersion=$Version") ("/DRuntimeBuildId=$runtimeBuildId") ("/DSourceRoot=$resolvedSourceRoot") ("/DRuntimeDataSourceDir=$runtimeDataSourceDir") ("/DHasJointRepair=$([int]$hasJointRepair)") $resolvedScriptPath
 if ($LASTEXITCODE -ne 0) {
     throw "ISCC failed with exit code $LASTEXITCODE"
 }

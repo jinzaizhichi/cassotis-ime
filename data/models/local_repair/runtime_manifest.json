@@ -1,9 +1,37 @@
 {
   "format": 2,
   "enabled": true,
+  "joint_bilateral": true,
   "model": "pinyin-constrained local correction",
   "minimum_word_ratio": 0.01,
   "no_context_refinement_passes": 2,
+  "joint_validation": {
+    "policy": "frozen joint margin >=1; bilateral preference >=0; no extra reliability veto",
+    "scope": "6-40 characters without document context; existing word/path guards remain mandatory",
+    "independent_test": {
+      "rows": 8000,
+      "joint_rescues": 89,
+      "joint_harms": 21,
+      "bilateral_rescues": 87,
+      "bilateral_harms": 6
+    },
+    "host_acceptance": {
+      "baseline_commit": "f3510badeabd223c6535d81bc4255bb037271e1d",
+      "dictionary_sha256": "935cbf41cdfc90564e35037f2695bf68ec17d371b4cbeaa03f8003e2ae073109",
+      "rows": 16300,
+      "baseline_top1": 11698,
+      "baseline_top2": 12830,
+      "top1": 11827,
+      "top2": 12892,
+      "rescues": 229,
+      "harms": 100,
+      "short_context_differing_rows": 0,
+      "mean_increment_ms": 2.751718,
+      "latency_max_ms": 484,
+      "runtime_input_parity_rows": 16229,
+      "max_score_error": 0.0
+    }
+  },
   "refinement_validation": {
     "checkpoint_unchanged": true,
     "policy": "after guarded first edit only; at most four total edits and two spans; no reversals",
@@ -101,6 +129,9 @@
     }
   },
   "files": {
+    "joint_query_int8.onnx": "75f905ac1cfedbf883223e7406c70a407e6d8c2c7526cdda9431424f4494251f",
+    "joint_head_int8.onnx": "141ffa200b122ae5249f6c2bb7c5d647d276d12cfefb0c6b5d63d29afe04ed02",
+    "bilateral_head_int8.onnx": "e06a5b94cae57660a472d1b2aeca4460587f14b0f6a29eff337ebb95513dd53d",
     "context_int8.onnx": "eb3778b116cc1000ce86e980c26c6f376b4030b24ab4675aae7466e4feecd218",
     "query_int8.onnx": "558f6c89bfd66ebbb2217cec577cc2e62b125cd2a58bdcff10c673a0d1b8aec2",
     "vocab.json": "43b7a1613412edbe08a35147e567f6a795f3aeba719e872096208e6905c0ea47",

@@ -1061,7 +1061,18 @@ function build_and_copy_pinyin_transformer_runtime
     $local_completion_target = Join-Path $script_dir 'local_completion'
     $repair_source = Join-Path $root_dir 'data\models\local_repair'
     $repair_target = Join-Path $script_dir 'local_repair'
-    $repair_files = @('context_int8.onnx', 'query_int8.onnx', 'vocab.json', 'readings.json', 'runtime_manifest.json')
+    $repair_files = @('context_int8.onnx', 'query_int8.onnx', 'vocab.json', 'readings.json')
+    $repair_manifest_path = Join-Path $repair_source 'runtime_manifest.json'
+    if (Test-Path -LiteralPath $repair_manifest_path)
+    {
+        $repair_manifest = Get-Content -LiteralPath $repair_manifest_path -Raw -Encoding UTF8 | ConvertFrom-Json
+        if (($repair_manifest.enabled -eq $true) -and ($repair_manifest.joint_bilateral -eq $true))
+        {
+            $repair_files += @('joint_query_int8.onnx', 'joint_head_int8.onnx', 'bilateral_head_int8.onnx')
+        }
+    }
+    # Publish the enabling manifest only after its graphs have been copied.
+    $repair_files += 'runtime_manifest.json'
     $required_sources = @(
         $native_build,
         (Join-Path $runtime_source 'onnxruntime.dll'),

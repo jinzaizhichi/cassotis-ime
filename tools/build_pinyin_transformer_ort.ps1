@@ -1,6 +1,7 @@
 param(
     [string]$Configuration = 'Release',
     [string]$VcVarsPath = '',
+    [string]$OutputDirectory = '',
     [switch]$EnableExperimentalContextualRecall,
     [switch]$EnableExperimentalTop32CrossRanker,
     [switch]$StopLockingRuntime
@@ -144,7 +145,15 @@ $source = Join-Path $root 'src\host\native\nc_pinyin_transformer_ort.cpp'
 $include = Join-Path $root 'third_party\onnxruntime\include'
 $onnxLibrary = Join-Path $root 'third_party\onnxruntime\win64\onnxruntime.lib'
 $versionProps = Join-Path $root 'version.props'
-$output = Join-Path $root 'out\cassotis_pinyin_transformer_ort.dll'
+$outRoot = [IO.Path]::GetFullPath((Join-Path $root 'out'))
+if ([string]::IsNullOrWhiteSpace($OutputDirectory)) { $OutputDirectory = $outRoot }
+$OutputDirectory = [IO.Path]::GetFullPath($OutputDirectory)
+if (($OutputDirectory -ine $outRoot) -and
+    (-not $OutputDirectory.StartsWith($outRoot + '\', [StringComparison]::OrdinalIgnoreCase))) {
+    throw 'Native runtime output must remain inside this repository out directory.'
+}
+New-Item -ItemType Directory -Path $OutputDirectory -Force | Out-Null
+$output = Join-Path $OutputDirectory 'cassotis_pinyin_transformer_ort.dll'
 $build_id = '{0}_{1}' -f $PID, [Guid]::NewGuid().ToString('N')
 $intermediateDir = Join-Path $root ('out\_tmp_build\pinyin_transformer_ort\' + $build_id)
 $stagedOutput = Join-Path $intermediateDir 'cassotis_pinyin_transformer_ort.dll'
@@ -265,9 +274,9 @@ try {
 
     # Keep only the runtime DLL in out; linker artifacts are not release inputs.
     $staleReleaseArtifacts = @(
-        (Join-Path $root 'out\cassotis_pinyin_transformer_ort.exp'),
-        (Join-Path $root 'out\cassotis_pinyin_transformer_ort.lib'),
-        (Join-Path $root 'out\cassotis_pinyin_transformer_ort.obj')
+        (Join-Path $OutputDirectory 'cassotis_pinyin_transformer_ort.exp'),
+        (Join-Path $OutputDirectory 'cassotis_pinyin_transformer_ort.lib'),
+        (Join-Path $OutputDirectory 'cassotis_pinyin_transformer_ort.obj')
     )
     foreach ($artifact in $staleReleaseArtifacts) {
         if (Test-Path -LiteralPath $artifact) {
@@ -277,6 +286,11 @@ try {
 }
 finally {
     if (Test-Path -LiteralPath $intermediateDir) {
+        $resolvedIntermediate = [IO.Path]::GetFullPath($intermediateDir)
+        $allowedIntermediate = [IO.Path]::GetFullPath((Join-Path $root 'out\_tmp_build\pinyin_transformer_ort')) + '\'
+        if (-not $resolvedIntermediate.StartsWith($allowedIntermediate, [StringComparison]::OrdinalIgnoreCase)) {
+            throw 'Refusing to remove an intermediate directory outside the native build workspace.'
+        }
         Remove-Item -LiteralPath $intermediateDir -Recurse -Force -ErrorAction SilentlyContinue
     }
 }

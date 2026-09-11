@@ -468,6 +468,15 @@ type
         function allows_no_context_refinement: Boolean;
     end;
 
+    IncLongJointRepair = interface
+        ['{2064E122-3F7B-4475-B5C6-FCC98AD63949}']
+        function joint_ready: Boolean;
+        function try_finalize(const dictionary: TncDictionaryProvider;
+            const query_text, draft, path, current, second, aligned_pinyin: string;
+            const document_key, preceding_text: string;
+            out selected: TncValidatedRepairPath): Boolean;
+    end;
+
     TncLocalRepairGuardDebug = record
         query_text, draft, proposal, segment_path, aligned_pinyin, guarded: string;
         invoked, accepted: Boolean;
@@ -802,8 +811,10 @@ type
         m_long_neural_reranker: IncLongNeuralReranker;
         m_long_local_repair: IncLongLocalRepair;
         m_long_local_repair_policy: IncLongLocalRepairPolicy;
+        m_long_joint_repair: IncLongJointRepair;
         m_local_repair_query_key, m_local_repair_text, m_local_repair_draft: string;
         m_local_repair_original_path: string;
+        m_local_repair_baseline_text: string;
         m_local_repair_validated: TncValidatedRepairPath;
         m_repaired_completion_query_key: string;
         m_debug_capture_local_repair: Boolean;
@@ -4356,6 +4367,7 @@ begin
     m_local_repair_text := '';
     m_local_repair_draft := '';
     m_local_repair_original_path := '';
+    m_local_repair_baseline_text := '';
     m_local_repair_validated := Default(TncValidatedRepairPath);
     m_context_db_bonus_cache_key := '';
     SetLength(m_candidates, 0);
@@ -5095,13 +5107,16 @@ begin
     m_long_neural_reranker := reranker;
     m_long_local_repair := nil;
     m_long_local_repair_policy := nil;
+    m_long_joint_repair := nil;
     m_local_repair_query_key := '';
     m_local_repair_text := '';
     m_local_repair_draft := '';
     m_local_repair_original_path := '';
+    m_local_repair_baseline_text := '';
     m_local_repair_validated := Default(TncValidatedRepairPath);
     Supports(reranker, IncLongLocalRepair, m_long_local_repair);
     Supports(reranker, IncLongLocalRepairPolicy, m_long_local_repair_policy);
+    Supports(reranker, IncLongJointRepair, m_long_joint_repair);
     if (m_long_local_repair <> nil) and (m_document_context_model <> nil) then
     begin
         m_long_local_repair.set_document_context(
@@ -141423,15 +141438,15 @@ procedure TncEngine.apply_visible_local_repair(var candidates: TncCandidateList;
 var
     text, path, key, segment, replacement, original_path: string;
     document_key, preceding_text, aligned_pinyin, repair_query: string;
-    refined_text, refined_pinyin: string;
+    refined_text, refined_pinyin, joint_second: string;
     refinement_override: string;
     minimum_word_ratio, refined_word_ratio: Double;
     index, existing, saved_source, position, unit_index: Integer;
     original_segments: TArray<string>;
     candidate, saved: TncCandidate;
-    repair_accepted: Boolean;
+    repair_accepted, joint_available: Boolean;
     boundary_enabled, path_validation_enabled: Boolean;
-    validated, refined_path: TncValidatedRepairPath;
+    validated, refined_path, joint_path: TncValidatedRepairPath;
     procedure remember_validated_path(const source_index: Integer);
     begin
         if not m_local_repair_validated.exact_path or
@@ -141528,6 +141543,8 @@ begin
         end;
         // Model vocabularies use canonical syllables, with explicit boundaries intact.
         repair_query := nc_normalize_umlaut_spelling(m_composition_text);
+        joint_available := (preceding_text = '') and
+            (m_long_joint_repair <> nil) and m_long_joint_repair.joint_ready;
         try
             repair_accepted := m_long_local_repair.try_repair(repair_query,
                 candidates[0].text, document_key, preceding_text, text,
@@ -141538,7 +141555,11 @@ begin
                 m_debug_local_repair_guard.aligned_pinyin := aligned_pinyin;
                 m_debug_local_repair_guard.accepted := repair_accepted;
             end;
-            if not repair_accepted then Exit;
+            if not repair_accepted then
+            begin
+                if not joint_available or (aligned_pinyin = '') then Exit;
+                text := candidates[0].text;
+            end;
         except
             Exit;
         end;
@@ -141548,14 +141569,15 @@ begin
         path_validation_enabled := boundary_enabled or
             (GetEnvironmentVariable('CASSOTIS_TAB_REPAIRED_PREFIX') = '1');
         validated := Default(TncValidatedRepairPath);
-        if path_validation_enabled then
+        if path_validation_enabled and repair_accepted then
         begin
             validated := validate_local_repair_path(m_dictionary, candidates[0].text,
                 text, original_path, aligned_pinyin, minimum_word_ratio, boundary_enabled);
             text := validated.text;
         end
-        else text := guard_local_repair_words(m_dictionary, candidates[0].text,
-            text, original_path, aligned_pinyin, minimum_word_ratio);
+        else if repair_accepted then
+            text := guard_local_repair_words(m_dictionary, candidates[0].text,
+                text, original_path, aligned_pinyin, minimum_word_ratio);
         if m_debug_capture_local_repair then
             m_debug_local_repair_guard.guarded := text;
         // Reuse the guarded first pass as context, without changing its accepted
@@ -141594,6 +141616,35 @@ begin
                 // A failed optional pass must retain the valid first result.
             end;
         end;
+        m_local_repair_baseline_text := text;
+        if joint_available and path_validation_enabled then
+        begin
+            joint_second := '';
+            if Length(candidates) > 1 then
+            begin
+                joint_second := candidates[1].text;
+                if candidates[1].comment <> '' then
+                    joint_second := joint_second + '/' + candidates[1].comment
+                else if text = joint_second then joint_second := candidates[0].text;
+            end;
+            // The KEEP here is the settled, guarded/refined baseline result.
+            // Only this last stage may replace it; the complete path travels with it.
+            try
+                if m_long_joint_repair.try_finalize(m_dictionary, repair_query,
+                    candidates[0].text, original_path, text, joint_second,
+                    aligned_pinyin, document_key, preceding_text, joint_path) and
+                    joint_path.exact_path and (Length(joint_path.text) = expected_units) and
+                    (joint_path.aligned_pinyin = aligned_pinyin) and
+                    (StringReplace(joint_path.segment_path, #3, '', [rfReplaceAll]) =
+                    joint_path.text) then
+                begin
+                    text := joint_path.text;
+                    validated := joint_path;
+                end;
+            except
+                // Optional adjudication failure never discards the baseline.
+            end;
+        end;
         m_local_repair_query_key := key;
         m_local_repair_text := text;
         m_local_repair_draft := candidates[0].text;
@@ -141601,6 +141652,17 @@ begin
         m_local_repair_validated := validated;
     end;
     if text = candidates[0].text then Exit;
+    // Reproduce the baseline's swap before applying a different final winner.
+    // Otherwise replacing a repaired second item would silently change Top2.
+    if (Length(candidates) > 1) and
+        (m_local_repair_baseline_text = candidates[1].text) and
+        (candidates[1].comment = '') and
+        (text <> m_local_repair_baseline_text) then
+    begin
+        saved := candidates[0]; saved_source := source_indices[0];
+        candidates[0] := candidates[1]; source_indices[0] := source_indices[1];
+        candidates[1] := saved; source_indices[1] := saved_source;
+    end;
     // If repair selects an existing visible item, swap the records and their
     // source indices together. Otherwise replace only the first visible slot.
     for index := 1 to High(candidates) do
