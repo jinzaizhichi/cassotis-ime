@@ -16,6 +16,9 @@ uses
     nc_shortcut,
     nc_dictionary_intf,
     nc_local_repair_guard,
+{$IFDEF CASSOTIS_TAB_HANDOFF_DIAGNOSTICS}
+    nc_tab_repair_handoff,
+{$ENDIF}
     nc_dictionary_sqlite,
     nc_document_context_model,
     nc_pinyin_parser,
@@ -880,6 +883,9 @@ type
             var source_indices: TArray<Integer>; const expected_units: Integer);
         function has_validated_completion_prefix: Boolean;
         procedure refresh_validated_prefix_completion;
+{$IFDEF CASSOTIS_TAB_HANDOFF_DIAGNOSTICS}
+        procedure carry_validated_prefix_completion;
+{$ENDIF}
         function get_source_rank(const source: TncCandidateSource): Integer;
         function get_context_variants(const context_text: string): TArray<string>;
         function get_session_text_bonus(const candidate_text: string): Integer;
@@ -6088,7 +6094,11 @@ function TncEngine.has_validated_completion_prefix: Boolean;
 var key: string;
 begin
     Result := False;
-    if (GetEnvironmentVariable('CASSOTIS_TAB_REPAIRED_PREFIX') <> '1') or
+    if ((GetEnvironmentVariable('CASSOTIS_TAB_REPAIRED_PREFIX') <> '1')
+{$IFDEF CASSOTIS_TAB_HANDOFF_DIAGNOSTICS}
+        and (GetEnvironmentVariable('CASSOTIS_TAB_REPAIRED_PREFIX') <> 'carry')
+{$ENDIF}
+        ) or
         (not m_allow_one_key_completion_lookup) or (m_dictionary = nil) or
         (m_config.input_mode <> im_chinese) or m_has_pending_commit or
         (m_long_local_repair = nil) or (m_page_index <> 0) or
@@ -6118,6 +6128,41 @@ begin
     else key := key + #0;
     Result := key = m_local_repair_query_key;
 end;
+
+{$IFDEF CASSOTIS_TAB_HANDOFF_DIAGNOSTICS}
+procedure TncEngine.carry_validated_prefix_completion;
+var
+    syllables: TncPinyinParseResult;
+    aligned_query, query: string;
+    i: Integer;
+    profile_start: Int64;
+    eligible, applied: Boolean;
+begin
+    profile_start := nc_tab_handoff_profile_start;
+    eligible := False;
+    applied := False;
+    try
+        if (GetEnvironmentVariable('CASSOTIS_TAB_REPAIRED_PREFIX') <> 'carry') or
+            not (m_one_key_completion.source in [okcs_long_transition, okcs_long_neural]) or
+            (m_one_key_completion.anchor_text <> m_local_repair_draft) or
+            not has_validated_completion_prefix then Exit;
+        eligible := True;
+        syllables := get_effective_compact_pinyin_syllables(m_composition_text, False);
+        aligned_query := ''; query := '';
+        for i := 0 to High(syllables) do
+        begin
+            if i > 0 then aligned_query := aligned_query + #3;
+            aligned_query := aligned_query + normalize_pinyin_text(syllables[i].text);
+            query := query + normalize_pinyin_text(syllables[i].text);
+        end;
+        if query <> normalize_pinyin_text(m_composition_text) then Exit;
+        applied := nc_carry_repaired_tab_prefix(m_local_repair_draft, query, aligned_query,
+            m_local_repair_validated, m_one_key_completion);
+    finally
+        nc_tab_handoff_profile_finish(profile_start, eligible, applied);
+    end;
+end;
+{$ENDIF}
 
 procedure TncEngine.refresh_validated_prefix_completion;
 var
@@ -6243,6 +6288,9 @@ var
     begin
         // Tab consumes the settled visible result; it must never trigger an
         // earlier candidate-ranking pass while build_candidates is running.
+{$IFDEF CASSOTIS_TAB_HANDOFF_DIAGNOSTICS}
+        if GetEnvironmentVariable('CASSOTIS_TAB_REPAIRED_PREFIX') = 'carry' then Exit;
+{$ENDIF}
         if not has_validated_completion_prefix then Exit;
         visible := m_visible_candidates_cache;
         if Length(visible[0].text) <> Length(syllables) then Exit;
@@ -6627,7 +6675,11 @@ begin
     corrected_path := '';
     if m_dictionary <> nil then adopt_corrected_prefix;
     // A failed alignment check must not silently revive the obsolete draft.
-    if has_validated_completion_prefix and (not corrected_prefix) then Exit;
+    if has_validated_completion_prefix and (not corrected_prefix)
+{$IFDEF CASSOTIS_TAB_HANDOFF_DIAGNOSTICS}
+        and (GetEnvironmentVariable('CASSOTIS_TAB_REPAIRED_PREFIX') <> 'carry')
+{$ENDIF}
+        then Exit;
     if (m_dictionary = nil) or
         (Length(syllables) < c_min_long_syllables) or
         (compact_query = '') or (Length(completion_candidates) = 0) or
@@ -192051,6 +192103,11 @@ end;
 
 function TncEngine.get_one_key_completion: TncOneKeyCompletion;
 begin
+{$IFDEF CASSOTIS_TAB_HANDOFF_DIAGNOSTICS}
+    carry_validated_prefix_completion;
+    if GetEnvironmentVariable('CASSOTIS_TAB_REPAIRED_PREFIX') = 'carry' then
+        Exit(m_one_key_completion);
+{$ENDIF}
     if has_validated_completion_prefix and
         (m_local_repair_query_key <> m_repaired_completion_query_key) then
     begin
@@ -192333,6 +192390,9 @@ begin
     m_one_key_completion_query_prefix := request.query_prefix;
     m_one_key_completion_score := m_one_key_completion.weight;
     m_has_long_neural_completion_request := False;
+{$IFDEF CASSOTIS_TAB_HANDOFF_DIAGNOSTICS}
+    carry_validated_prefix_completion;
+{$ENDIF}
     Result := True;
 end;
 
