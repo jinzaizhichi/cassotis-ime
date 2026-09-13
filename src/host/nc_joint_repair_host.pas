@@ -49,7 +49,7 @@ type
         m_entries: TDictionary<string, TEntry>;
         m_segments: TDictionary<string, TPlan>;
         m_syllables: TArray<string>;
-        m_undo_margin: Double;
+        m_score_agreement: Boolean;
         function word_weight(const first, finish: Integer; const text: string;
             out weight: Integer): Boolean;
         function entry(const query, text: string; out weight: Integer;
@@ -57,17 +57,37 @@ type
         function segment(const text: string): TArray<TPart>;
     public
         constructor Create(const directory: string; const handle: Pointer;
-            const query: TQuery; const score: TScore; const audit: TAudit);
+            const query: TQuery; const score: TScore; const audit: TAudit;
+            const score_agreement: Boolean = False);
         destructor Destroy; override;
         function run(const dictionary: TncDictionaryProvider;
             const draft, path, current, second: string;
             const syllables: TArray<string>): TncJointRepairResult;
     end;
 
+function nc_joint_repair_proposal(const scores: TArray<Single>; const count: Integer;
+    const score_agreement, audit_available: Boolean): Integer;
+
 implementation
 
 uses System.JSON, System.IOUtils, System.Math, System.Diagnostics,
     System.Generics.Defaults;
+
+function nc_joint_repair_proposal(const scores: TArray<Single>; const count: Integer;
+    const score_agreement, audit_available: Boolean): Integer;
+var slot: Integer; margin: Double;
+begin
+    Result := 0;
+    if (count < 2) or (count > 9) or (Length(scores) < count) then Exit;
+    for slot := 0 to count - 1 do
+        if IsNan(scores[slot]) or IsInfinite(scores[slot]) then Exit;
+    for slot := 1 to count - 1 do
+        if scores[slot] > scores[Result] then Result := slot;
+    margin := Double(scores[Result]) - scores[0];
+    // A weak positive proposal is never sufficient without the frozen audit.
+    if (margin < 1.0) and not (score_agreement and audit_available and (margin > 0)) then
+        Result := 0;
+end;
 
 type
     TJointCachedDictionary = class(TncDictionaryProvider)
@@ -156,14 +176,15 @@ begin
 end;
 
 constructor TncJointRepairChooser.Create(const directory: string;
-    const handle: Pointer; const query: TQuery; const score: TScore; const audit: TAudit);
+    const handle: Pointer; const query: TQuery; const score: TScore; const audit: TAudit;
+    const score_agreement: Boolean);
 var vocabulary: TJSONObject; pair: TJSONPair; index: Integer;
 begin
     inherited Create;
     m_handle := handle; m_query := query; m_score := score; m_audit := audit;
     if (handle = nil) or not Assigned(query) or not Assigned(score) or not Assigned(audit) then
         raise Exception.Create('Incomplete joint repair ABI');
-    m_undo_margin := 1.0;
+    m_score_agreement := score_agreement;
     m_dictionary := TJointCachedDictionary.Create(nil);
     m_vocab := TDictionary<string, Integer>.Create;
     m_pinyin := TDictionary<string, Integer>.Create;
@@ -537,11 +558,8 @@ begin
         Result.head_ms := elapsed(start, TStopwatch.GetTimeStamp);
         Result.scores := scores;
         Result.features := feature;
-        for slot := 1 to texts.Count - 1 do if scores[slot] > scores[Result.selected] then Result.selected := slot;
-        if scores[Result.selected] - scores[0] < 1.0 then Result.selected := 0;
-        if (Result.selected <> 0) and (current <> draft) and
-            (Result.texts[Result.selected] = draft) and
-            (scores[Result.selected] - scores[0] < m_undo_margin) then Result.selected := 0;
+        Result.selected := nc_joint_repair_proposal(scores, texts.Count,
+            m_score_agreement, Assigned(m_audit));
         if Result.selected <> 0 then
         begin
             stage := TStopwatch.GetTimeStamp;
@@ -567,7 +585,9 @@ begin
                         @Result.audit_values[0]) <> 1 then
                         raise Exception.Create('Native bilateral audit failed');
                     // Frozen dev policy: preference >=0, no extra reliability cutoff.
-                    if Result.audit_values[0] < 0 then Result.audited_selected := 0;
+                    if IsNan(Result.audit_values[0]) or IsInfinite(Result.audit_values[0]) or
+                        IsNan(Result.audit_values[1]) or IsInfinite(Result.audit_values[1]) or
+                        (Result.audit_values[0] < 0) then Result.audited_selected := 0;
                     Result.audit_ms := elapsed(stage, TStopwatch.GetTimeStamp);
                 end;
             end;

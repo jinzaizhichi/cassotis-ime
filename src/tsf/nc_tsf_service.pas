@@ -278,7 +278,7 @@ type
 implementation
 
 uses
-    nc_version_info, nc_profile_icon;
+    nc_version_info, nc_profile_icon, nc_tsf_config_actions;
 
 procedure signal_tray_profile_event(const active: Boolean); forward;
 procedure log_tsf_boundary_exception(const operation: string); forward;
@@ -3331,8 +3331,7 @@ end;
 
 procedure TncTextService.toggle_dictionary_variant_by_shortcut;
 var
-    config_manager: TncConfigManager;
-    engine_config: TncEngineConfig;
+    variant: TncDictionaryVariant;
     variant_text: string;
     variant_applied: Boolean;
 begin
@@ -3341,49 +3340,35 @@ begin
         Exit;
     end;
 
-    variant_applied := False;
-    config_manager := nil;
     try
-        try
-            config_manager := TncConfigManager.create(m_config_path, clmBestEffort);
-            engine_config := config_manager.load_engine_config;
-            if engine_config.dictionary_variant = dv_traditional then
+        variant_applied := nc_tsf_toggle_dictionary_variant(m_config_path,
+            function(next_variant: TncDictionaryVariant): Boolean
             begin
-                engine_config.dictionary_variant := dv_simplified;
-                variant_text := 'simplified';
-            end
-            else
+                Result := (m_ipc_client <> nil) and
+                    m_ipc_client.set_dictionary_variant(m_session_id, next_variant);
+            end,
+            function: Boolean
             begin
-                engine_config.dictionary_variant := dv_traditional;
-                variant_text := 'traditional';
-            end;
-            if m_ipc_client <> nil then
-            begin
-                variant_applied := m_ipc_client.set_dictionary_variant(m_session_id,
-                    engine_config.dictionary_variant);
-            end;
-            if not variant_applied then
-            begin
-                config_manager.save_dictionary_variant_config(engine_config.dictionary_variant);
-            end;
-        finally
-            config_manager.Free;
-        end;
+                Result := (m_ipc_client <> nil) and
+                    m_ipc_client.reload_config(m_session_id);
+            end,
+            variant);
     except
         log_tsf_boundary_exception('ToggleDictionaryVariant');
         Exit;
     end;
 
-    if (not variant_applied) and (m_ipc_client <> nil) then
-    begin
-        m_ipc_client.reload_config(m_session_id);
-    end;
     cancel_composition;
 
     if (m_logger <> nil) and (m_logger.level <= ll_debug) then
     begin
-        m_logger.debug(Format('Shortcut %s toggled dictionary variant -> %s',
-            [nc_shortcut_to_text(m_shortcut_config.dictionary_variant_toggle), variant_text]));
+        if variant = dv_traditional then
+            variant_text := 'traditional'
+        else
+            variant_text := 'simplified';
+        m_logger.debug(Format('Shortcut %s toggled dictionary variant -> %s host_applied=%d',
+            [nc_shortcut_to_text(m_shortcut_config.dictionary_variant_toggle),
+            variant_text, Ord(variant_applied)]));
     end;
 end;
 

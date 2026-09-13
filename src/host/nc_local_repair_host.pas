@@ -146,7 +146,7 @@ var
     array_value: TJSONArray;
     char_id, py_id, index, refinement_passes: Integer;
     create_model: TCreateModel;
-    joint_requested: Boolean;
+    joint_requested, score_agreement: Boolean;
     query_file: string;
     attach_joint: TAttachJoint;
     joint_query: TncJointRepairChooser.TQuery;
@@ -190,6 +190,7 @@ begin
         m_refine_no_context := refinement_passes = 2;
         joint_requested := manifest.GetValue<Boolean>('joint_bilateral', False) and
             (GetEnvironmentVariable('CASSOTIS_DISABLE_JOINT_REPAIR') <> '1');
+        score_agreement := manifest.GetValue<Boolean>('joint_score_agreement', False);
     finally
         manifest.Free;
     end;
@@ -289,7 +290,7 @@ begin
                 PChar(TPath.Combine(path, 'bilateral_head_int8.onnx')),
                 @error[0], Length(error)) <> 1 then raise Exception.Create(string(error));
             m_joint := TncJointRepairChooser.Create(m_base, m_handle,
-                joint_query, joint_score, joint_audit);
+                joint_query, joint_score, joint_audit, score_agreement);
             append_log_line_shared(get_default_log_path,
                 '[INFO] joint repair INT8 chooser and bilateral audit ready in host' + sLineBreak);
         except
