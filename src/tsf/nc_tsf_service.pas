@@ -3352,7 +3352,12 @@ begin
                 Result := (m_ipc_client <> nil) and
                     m_ipc_client.reload_config(m_session_id);
             end,
-            variant);
+            variant,
+            function(out current_variant: TncDictionaryVariant): Boolean
+            begin
+                Result := (m_ipc_client <> nil) and
+                    m_ipc_client.get_dictionary_variant(m_session_id, current_variant);
+            end);
     except
         log_tsf_boundary_exception('ToggleDictionaryVariant');
         Exit;

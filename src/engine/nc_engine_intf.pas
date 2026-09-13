@@ -5074,6 +5074,9 @@ begin
     end;
 
     m_dictionary := dictionary;
+    if m_dictionary is TncSqliteDictionary then
+        TncSqliteDictionary(m_dictionary).set_user_dictionary_variant(
+            m_config.dictionary_variant);
     if m_dictionary <> nil then
     begin
         m_dictionary.set_debug_mode(m_config.debug_mode);
@@ -5379,6 +5382,7 @@ begin
     if (base_path <> '') or (user_path <> '') then
     begin
         sqlite_dict := TncSqliteDictionary.create(base_path, user_path);
+        sqlite_dict.set_user_dictionary_variant(m_config.dictionary_variant);
         if (m_defer_optional_dictionary_models and
             sqlite_dict.open_deferred) or
             ((not m_defer_optional_dictionary_models) and sqlite_dict.open) then
@@ -5530,6 +5534,7 @@ begin
     // prune while opening it, because simplified-only rows such as ci -> U+8BCD
     // look invalid against the traditional base dictionary, and vice versa.
     alt_dict := TncSqliteDictionary.Create(alt_base_path, get_default_user_dictionary_path, False);
+    alt_dict.set_user_dictionary_variant(alt_variant);
     if alt_dict.open then
     begin
         alt_dict.set_debug_mode(m_config.debug_mode);

@@ -44,6 +44,10 @@ type
         m_write_batch_depth: Integer;
         m_base_connection: TncSqliteConnection;
         m_user_connection: TncSqliteConnection;
+        m_user_script_enabled: Boolean;
+        m_user_script_variant: TncDictionaryVariant;
+        m_user_script_cache: TDictionary<string, string>;
+        m_user_storage_text_cache: TDictionary<string, string>;
         m_contains_popularity_cache: TDictionary<string, Integer>;
         m_prefix_popularity_cache: TDictionary<string, Integer>;
         m_pinyin_followup_popularity_cache: TDictionary<string, Integer>;
@@ -168,6 +172,8 @@ type
         m_process_user_data_generation: Integer;
         m_contains_popularity_index_checked: Boolean;
         m_contains_popularity_index_ready: Boolean;
+        function user_text_for_script(const pinyin, text: string): string;
+        function user_storage_text(const table_name, pinyin, text: string): string;
         function ensure_open: Boolean;
         function open_internal(const defer_optional_model_loads: Boolean): Boolean;
         procedure open_user_connection;
@@ -281,6 +287,7 @@ type
         function open: Boolean;
         function open_deferred: Boolean;
         function reload_user_dictionary: Boolean;
+        procedure set_user_dictionary_variant(const variant: TncDictionaryVariant);
         procedure close;
         procedure prewarm_short_lookup_caches;
         function get_prefix_popularity_hint(const prefix: string): Integer;
@@ -401,6 +408,8 @@ type
     end;
 
 implementation
+
+uses nc_chinese_script;
 
 var
     g_user_data_generation: Integer;
@@ -2459,6 +2468,8 @@ begin
     inherited create;
     m_base_db_path := base_db_path;
     m_user_db_path := user_db_path;
+    m_user_script_cache := TDictionary<string, string>.Create;
+    m_user_storage_text_cache := TDictionary<string, string>.Create;
     m_ready := False;
     m_base_ready := False;
     m_base_connection_read_only := False;
@@ -2611,6 +2622,8 @@ end;
 destructor TncSqliteDictionary.Destroy;
 begin
     close;
+    m_user_script_cache.Free;
+    m_user_storage_text_cache.Free;
     if m_fuzzy_lookup_result_cache_order <> nil then
     begin
         m_fuzzy_lookup_result_cache_order.Free;
@@ -3399,7 +3412,8 @@ begin
                     while step_result = SQLITE_ROW do
                     begin
                         candidate_pinyin := m_user_connection.column_text(stmt, 0);
-                        candidate_text := m_user_connection.column_text(stmt, 1);
+                        candidate_text := user_text_for_script(candidate_pinyin,
+                            m_user_connection.column_text(stmt, 1));
                         seen_key := candidate_pinyin + #0 + candidate_text + #0;
                         if seen.ContainsKey(seen_key) then
                         begin
@@ -4123,7 +4137,8 @@ var
             while step_result = SQLITE_ROW do
             begin
                 candidate_pinyin := m_user_connection.column_text(stmt, 0);
-                candidate_text := Trim(m_user_connection.column_text(stmt, 1));
+                candidate_text := user_text_for_script(candidate_pinyin,
+                    Trim(m_user_connection.column_text(stmt, 1)));
                 if literal_words then
                 begin
                     candidate_weight := 0;
@@ -6967,6 +6982,91 @@ begin
     end;
 end;
 
+procedure TncSqliteDictionary.set_user_dictionary_variant(
+    const variant: TncDictionaryVariant);
+begin
+    if m_user_script_enabled and (m_user_script_variant = variant) then Exit;
+    m_user_script_enabled := True;
+    m_user_script_variant := variant;
+    clear_user_read_caches;
+end;
+
+function TncSqliteDictionary.user_text_for_script(
+    const pinyin, text: string): string;
+const
+    sql = 'SELECT text FROM dict_base WHERE pinyin = ?1 ' +
+        'ORDER BY weight DESC, text ASC';
+var
+    key, simplified, base_text: string;
+    stmt: Psqlite3_stmt;
+begin
+    Result := text;
+    if (not m_user_script_enabled) or (text = '') then Exit;
+    key := pinyin + #1 + text;
+    if m_user_script_cache.TryGetValue(key, Result) then Exit;
+    Result := nc_convert_chinese_script(text, m_user_script_variant);
+    // Prefer the active lexicon for ambiguous glyphs and names retaining an
+    // unsimplified character; equivalence alone never admits a homophone.
+    if (Result <> text) and m_base_ready and (m_base_connection <> nil) then
+    begin
+        simplified := nc_convert_chinese_script(text, dv_simplified);
+        stmt := nil;
+        try
+            if m_base_connection.prepare(sql, stmt) and
+                m_base_connection.bind_text(stmt, 1, pinyin) then
+                while m_base_connection.step(stmt) = SQLITE_ROW do
+                begin
+                    base_text := m_base_connection.column_text(stmt, 0);
+                    if nc_convert_chinese_script(base_text, dv_simplified) = simplified then
+                    begin
+                        Result := base_text;
+                        Break;
+                    end;
+                end;
+        finally
+            if stmt <> nil then m_base_connection.finalize(stmt);
+        end;
+    end;
+    if m_user_script_cache.Count >= 4096 then m_user_script_cache.Clear;
+    m_user_script_cache.AddOrSetValue(key, Result);
+end;
+
+function TncSqliteDictionary.user_storage_text(
+    const table_name, pinyin, text: string): string;
+var
+    key, stored: string;
+    stmt: Psqlite3_stmt;
+begin
+    Result := text;
+    if (not m_user_script_enabled) or (not m_user_ready) or
+        (text = '') or (pinyin = '') then Exit;
+    key := table_name + #1 + pinyin + #1 + text;
+    if m_user_storage_text_cache.TryGetValue(key, Result) then Exit;
+    // Keep the stored identity for learning/removal. Do not rewrite the shared
+    // user database every time another session changes its display script.
+    Result := text;
+    stmt := nil;
+    try
+        if m_user_connection.prepare('SELECT text FROM ' + table_name +
+            ' WHERE pinyin = ?1 ORDER BY (text = ?2) DESC, text ASC', stmt) and
+            m_user_connection.bind_text(stmt, 1, pinyin) and
+            m_user_connection.bind_text(stmt, 2, text) then
+            while m_user_connection.step(stmt) = SQLITE_ROW do
+            begin
+                stored := m_user_connection.column_text(stmt, 0);
+                if (stored = text) or (user_text_for_script(pinyin, stored) = text) then
+                begin
+                    Result := stored;
+                    Break;
+                end;
+            end;
+    finally
+        if stmt <> nil then m_user_connection.finalize(stmt);
+    end;
+    if m_user_storage_text_cache.Count >= 4096 then m_user_storage_text_cache.Clear;
+    m_user_storage_text_cache.AddOrSetValue(key, Result);
+end;
+
 function TncSqliteDictionary.explicit_user_entry_exists(const pinyin: string; const text: string): Boolean;
 const
     user_phrase_sql = 'SELECT 1 FROM dict_user WHERE pinyin = ?1 AND text = ?2 LIMIT 1';
@@ -6997,7 +7097,8 @@ begin
         try
             if m_user_connection.prepare(user_phrase_sql, stmt) and
                 m_user_connection.bind_text(stmt, 1, pinyin_key) and
-                m_user_connection.bind_text(stmt, 2, text_key) then
+                m_user_connection.bind_text(stmt, 2,
+                user_storage_text('dict_user', pinyin_key, text_key)) then
             begin
                 step_result := m_user_connection.step(stmt);
                 Result := step_result = SQLITE_ROW;
@@ -7025,8 +7126,11 @@ function TncSqliteDictionary.resolve_literal_user_word_pinyin(
 const
     base_sql = 'SELECT pinyin, weight FROM dict_base WHERE text = ?1 ' +
         'ORDER BY weight DESC, pinyin ASC LIMIT 64';
-    user_sql = 'SELECT pinyin, weight FROM dict_user WHERE text = ?1 ' +
+    user_sql = 'SELECT pinyin, text FROM dict_user WHERE text = ?1 ' +
         'ORDER BY weight DESC, pinyin ASC LIMIT 64';
+    user_script_sql = 'SELECT pinyin, text FROM dict_user ' +
+        'WHERE pinyin >= ?1 AND pinyin < ?2 AND length(text) = ?3 ' +
+        'ORDER BY weight DESC, pinyin ASC';
 var
     query_key: string;
     text_key: string;
@@ -7052,12 +7156,29 @@ var
             begin
                 Exit;
             end;
+            if (connection = m_user_connection) and m_user_script_enabled then
+            begin
+                // Inverting NLS is lossy (e.g. hair vs. issue). Search the
+                // indexed initial range and compare the actual stored spelling.
+                if not (connection.bind_text(stmt, 1, Copy(query_key, 1, 1)) and
+                    connection.bind_text(stmt, 2,
+                    build_prefix_upper_bound(Copy(query_key, 1, 1))) and
+                    connection.bind_int(stmt, 3,
+                    get_valid_cjk_codepoint_count(text_key))) then Exit;
+            end;
 
             step_result := connection.step(stmt);
             while step_result = SQLITE_ROW do
             begin
                 candidate_pinyin := normalize_canonical_pinyin_key(
                     connection.column_text(stmt, 0));
+                if (connection = m_user_connection) and
+                    (user_text_for_script(candidate_pinyin,
+                    connection.column_text(stmt, 1)) <> text_key) then
+                begin
+                    step_result := connection.step(stmt);
+                    Continue;
+                end;
                 if literal_query_matches_full_pinyin(query_key,
                     candidate_pinyin) then
                 begin
@@ -7090,8 +7211,11 @@ begin
     begin
         Exit(True);
     end;
-    if m_user_ready and find_matching_pinyin(m_user_connection, user_sql,
-        full_pinyin) then
+    if m_user_ready and
+        ((m_user_script_enabled and find_matching_pinyin(m_user_connection,
+        user_script_sql, full_pinyin)) or
+        ((not m_user_script_enabled) and find_matching_pinyin(m_user_connection,
+        user_sql, full_pinyin))) then
     begin
         Exit(True);
     end;
@@ -7127,7 +7251,8 @@ begin
         if not (m_user_connection.prepare(insert_sql, stmt) and
             m_user_connection.bind_text(stmt, 1, pinyin_key) and
             m_user_connection.bind_text(stmt, 2, jianpin_key) and
-            m_user_connection.bind_text(stmt, 3, text_key)) then
+            m_user_connection.bind_text(stmt, 3,
+            user_storage_text('dict_user_literal', pinyin_key, text_key))) then
         begin
             Exit;
         end;
@@ -7226,7 +7351,8 @@ var
             begin
                 candidate_pinyin := normalize_canonical_pinyin_key(
                     m_user_connection.column_text(stmt, 0));
-                candidate_text := Trim(m_user_connection.column_text(stmt, 1));
+                candidate_text := user_text_for_script(candidate_pinyin,
+                    Trim(m_user_connection.column_text(stmt, 1)));
                 if (candidate_text = '') or seen.ContainsKey(candidate_text) or
                     (not literal_query_matches_full_pinyin(query_key,
                     candidate_pinyin)) then
@@ -10531,6 +10657,8 @@ end;
 
 procedure TncSqliteDictionary.clear_dictionary_lookup_caches;
 begin
+    if m_user_script_cache <> nil then m_user_script_cache.Clear;
+    if m_user_storage_text_cache <> nil then m_user_storage_text_cache.Clear;
     if m_fuzzy_lookup_result_cache <> nil then
     begin
         m_fuzzy_lookup_result_cache.Clear;
@@ -10954,7 +11082,8 @@ begin
                     step_result := m_user_connection.step(stmt);
                     if step_result = SQLITE_ROW then
                     begin
-                        text_value := Trim(m_user_connection.column_text(stmt, 0));
+                        text_value := user_text_for_script(cache_key,
+                            Trim(m_user_connection.column_text(stmt, 0)));
                         score_value := m_user_connection.column_int(stmt, 1);
                         add_or_merge_local(text_value, '', score_value,
                             cs_user);
@@ -11576,7 +11705,8 @@ begin
                     step_result := m_user_connection.step(stmt);
                     if step_result = SQLITE_ROW then
                     begin
-                        text_value := Trim(m_user_connection.column_text(stmt, 0));
+                        text_value := user_text_for_script(query_key,
+                            Trim(m_user_connection.column_text(stmt, 0)));
                         score_value := m_user_connection.column_int(stmt, 1);
                         if not strict_full_pinyin_text_alignment_valid(exact_query_key,
                             text_value) then
@@ -13882,7 +14012,8 @@ begin
                             step_result := m_user_connection.step(stmt);
                             Continue;
                         end;
-                        text_value := m_user_connection.column_text(stmt, 1);
+                        text_value := user_text_for_script(stat_pinyin_value,
+                            m_user_connection.column_text(stmt, 1));
                         commit_count := m_user_connection.column_int(stmt, 2);
                         last_used_value := m_user_connection.column_int(stmt, 3);
                         if full_pinyin_query and
@@ -13945,7 +14076,8 @@ begin
                     step_result := m_user_connection.step(stmt);
                     while step_result = SQLITE_ROW do
                     begin
-                        text_value := m_user_connection.column_text(stmt, 0);
+                        text_value := user_text_for_script(query_key,
+                            m_user_connection.column_text(stmt, 0));
                         last_used_value := m_user_connection.column_int(stmt, 2);
                         if full_pinyin_query and
                             (not full_pinyin_text_alignment_valid(query_key,
@@ -14031,7 +14163,8 @@ begin
                             Continue;
                         end;
 
-                        text_value := m_user_connection.column_text(stmt, 1);
+                        text_value := user_text_for_script(candidate_pinyin,
+                            m_user_connection.column_text(stmt, 1));
                         score_value := m_user_connection.column_int(stmt, 2);
                         last_used_value := m_user_connection.column_int(stmt, 3);
                         if normalized_base_entry_exists(candidate_pinyin, text_value) then
@@ -14680,6 +14813,13 @@ begin
             user_weight := m_user_connection.column_int(stmt, 2);
             commit_count := m_user_connection.column_int(stmt, 3);
             last_used_value := m_user_connection.column_int(stmt, 4);
+            if user_text_for_script(pinyin_value, text_value) <> text_value then
+            begin
+                // A shared entry written in the other script is not invalid
+                // just because this base dictionary uses different glyphs.
+                step_result := m_user_connection.step(stmt);
+                Continue;
+            end;
             text_unit_count := get_valid_cjk_codepoint_count(text_value);
 
             if (pinyin_value <> '') and is_full_pinyin_key(pinyin_value) and
@@ -14753,6 +14893,8 @@ var
     suppress_structured_rule_phrase_user_row: Boolean;
     suppress_admin_alias_user_row: Boolean;
     existing_user_entry: Boolean;
+    stored_user_text: string;
+    stored_stats_text: string;
 begin
     pinyin_key := LowerCase(Trim(pinyin));
     if (pinyin_key = '') or (text = '') or (not is_valid_learning_text(text)) or
@@ -14807,6 +14949,8 @@ begin
 
     // A positive explicit selection for the same query/text pair should
     // cancel any earlier "remove candidate" feedback for that exact pair.
+    stored_user_text := user_storage_text('dict_user', pinyin_key, text);
+    stored_stats_text := user_storage_text('dict_user_stats', pinyin_key, text);
     stmt := nil;
     try
         if m_user_connection.prepare(delete_penalty_sql, stmt) then
@@ -14828,7 +14972,8 @@ begin
     try
         if m_user_connection.prepare(update_stats_sql, stmt) then
         begin
-            if m_user_connection.bind_text(stmt, 1, pinyin_key) and m_user_connection.bind_text(stmt, 2, text) then
+            if m_user_connection.bind_text(stmt, 1, pinyin_key) and
+                m_user_connection.bind_text(stmt, 2, stored_stats_text) then
             begin
                 m_user_connection.step(stmt);
             end;
@@ -14844,7 +14989,8 @@ begin
     try
         if m_user_connection.prepare(insert_stats_sql, stmt) then
         begin
-            if m_user_connection.bind_text(stmt, 1, pinyin_key) and m_user_connection.bind_text(stmt, 2, text) then
+            if m_user_connection.bind_text(stmt, 1, pinyin_key) and
+                m_user_connection.bind_text(stmt, 2, stored_stats_text) then
             begin
                 m_user_connection.step(stmt);
             end;
@@ -14898,7 +15044,7 @@ begin
         try
             if m_user_connection.prepare(delete_user_sql, stmt) then
             begin
-                if m_user_connection.bind_text(stmt, 1, pinyin_key) and m_user_connection.bind_text(stmt, 2, text) then
+                if m_user_connection.bind_text(stmt, 1, pinyin_key) and m_user_connection.bind_text(stmt, 2, stored_user_text) then
                 begin
                     m_user_connection.step(stmt);
                 end;
@@ -14921,7 +15067,7 @@ begin
         try
             if m_user_connection.prepare(delete_user_sql, stmt) then
             begin
-                if m_user_connection.bind_text(stmt, 1, pinyin_key) and m_user_connection.bind_text(stmt, 2, text) then
+                if m_user_connection.bind_text(stmt, 1, pinyin_key) and m_user_connection.bind_text(stmt, 2, stored_user_text) then
                 begin
                     m_user_connection.step(stmt);
                 end;
@@ -14945,7 +15091,7 @@ begin
             if m_user_connection.prepare(delete_user_sql, stmt) then
             begin
                 if m_user_connection.bind_text(stmt, 1, pinyin_key) and
-                    m_user_connection.bind_text(stmt, 2, text) then
+                    m_user_connection.bind_text(stmt, 2, stored_user_text) then
                 begin
                     m_user_connection.step(stmt);
                 end;
@@ -14964,7 +15110,7 @@ begin
     try
         if m_user_connection.prepare(update_sql, stmt) then
         begin
-            if m_user_connection.bind_text(stmt, 1, pinyin_key) and m_user_connection.bind_text(stmt, 2, text) then
+            if m_user_connection.bind_text(stmt, 1, pinyin_key) and m_user_connection.bind_text(stmt, 2, stored_user_text) then
             begin
                 m_user_connection.step(stmt);
             end;
@@ -14980,7 +15126,7 @@ begin
     try
         if m_user_connection.prepare(insert_sql, stmt) then
         begin
-            if m_user_connection.bind_text(stmt, 1, pinyin_key) and m_user_connection.bind_text(stmt, 2, text) then
+            if m_user_connection.bind_text(stmt, 1, pinyin_key) and m_user_connection.bind_text(stmt, 2, stored_user_text) then
             begin
                 m_user_connection.step(stmt);
             end;
@@ -15348,7 +15494,8 @@ begin
         if (not m_user_connection.reset(m_stmt_query_choice_bonus)) or
             (not m_user_connection.clear_bindings(m_stmt_query_choice_bonus)) or
             (not m_user_connection.bind_text(m_stmt_query_choice_bonus, 1, normalized_query)) or
-            (not m_user_connection.bind_text(m_stmt_query_choice_bonus, 2, text_key)) then
+            (not m_user_connection.bind_text(m_stmt_query_choice_bonus, 2,
+            user_storage_text('dict_user_stats', normalized_query, text_key))) then
         begin
             Exit;
         end;
@@ -15543,7 +15690,8 @@ begin
         end;
         if not use_fallback_scan then
         begin
-            candidate_text := Trim(m_user_connection.column_text(m_stmt_query_latest_choice_text, 0));
+            candidate_text := user_text_for_script(normalized_query,
+                Trim(m_user_connection.column_text(m_stmt_query_latest_choice_text, 0)));
             last_used_unix := m_user_connection.column_int(m_stmt_query_latest_choice_text, 1);
             commit_count := m_user_connection.column_int(m_stmt_query_latest_choice_text, 2);
             if last_used_unix > 0 then
@@ -15603,7 +15751,8 @@ begin
                 step_result := m_user_connection.step(stmt);
                 while step_result = SQLITE_ROW do
                 begin
-                    candidate_text := Trim(m_user_connection.column_text(stmt, 0));
+                    candidate_text := user_text_for_script(normalized_query,
+                        Trim(m_user_connection.column_text(stmt, 0)));
                     if candidate_text <> '' then
                     begin
                         commit_count := m_user_connection.column_int(stmt, 1);
@@ -17765,10 +17914,42 @@ begin
 end;
 
 procedure TncSqliteDictionary.remove_user_entry(const pinyin: string; const text: string);
+var
+    aliases: TList<string>;
+    stmt: Psqlite3_stmt;
+    stored, stored_pinyin: string;
 begin
     // Prefer exact pinyin+text removal when key is available, but also clear
     // all rows by phrase text so legacy polluted variants are removed together.
-    purge_user_entry_internal(pinyin, text, True, True);
+    if (text = '') or (not ensure_open) or (not m_user_ready) then Exit;
+    aliases := TList<string>.Create;
+    try
+        aliases.Add(text);
+        if m_user_script_enabled then
+        begin
+            stmt := nil;
+            try
+                if m_user_connection.prepare(
+                    'SELECT pinyin, text FROM dict_user UNION ' +
+                    'SELECT pinyin, text FROM dict_user_literal UNION ' +
+                    'SELECT pinyin, text FROM dict_user_stats', stmt) then
+                    while m_user_connection.step(stmt) = SQLITE_ROW do
+                    begin
+                        stored_pinyin := m_user_connection.column_text(stmt, 0);
+                        stored := m_user_connection.column_text(stmt, 1);
+                        if (not aliases.Contains(stored)) and
+                            (user_text_for_script(stored_pinyin, stored) = text) then
+                            aliases.Add(stored);
+                    end;
+            finally
+                if stmt <> nil then m_user_connection.finalize(stmt);
+            end;
+        end;
+        for stored in aliases do
+            purge_user_entry_internal(pinyin, stored, True, True);
+    finally
+        aliases.Free;
+    end;
 end;
 
 function TncSqliteDictionary.clear_user_dictionary: Boolean;
