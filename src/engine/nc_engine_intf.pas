@@ -614,6 +614,9 @@ type
         m_composition_display_text: string;
         m_candidates: TncCandidateList;
         m_one_key_completion: TncOneKeyCompletion;
+        m_tab_projection_shown: TncOneKeyCompletion;
+        m_tab_projection_query, m_tab_projection_document: string;
+        m_tab_projection_raw_text, m_tab_projection_raw_path: string;
         m_debug_lexical_one_key_completion: TncOneKeyCompletion;
         m_debug_long_one_key_completion_pool: TncOneKeyCompletionList;
         m_debug_capture_long_one_key_completion_pool: Boolean;
@@ -882,6 +885,10 @@ type
         procedure apply_visible_local_repair(var candidates: TncCandidateList;
             var source_indices: TArray<Integer>; const expected_units: Integer);
         function has_validated_completion_prefix: Boolean;
+        function has_current_validated_completion_prefix: Boolean;
+        function project_validated_prefix_completion(
+            const completion: TncOneKeyCompletion): TncOneKeyCompletion;
+        function get_one_key_completion_for_commit: TncOneKeyCompletion;
         procedure refresh_validated_prefix_completion;
 {$IFDEF CASSOTIS_TAB_HANDOFF_DIAGNOSTICS}
         procedure carry_validated_prefix_completion;
@@ -1182,6 +1189,8 @@ type
         function get_one_key_completion: TncOneKeyCompletion;
         function get_long_neural_completion_request(
             out request: TncLongNeuralCompletionRequest): Boolean;
+        function get_prefetch_long_neural_completion_request(
+            out request: TncLongNeuralCompletionRequest): Boolean;
         function apply_long_neural_completion(
             const request: TncLongNeuralCompletionRequest;
             const completion_result: TncLongNeuralCompletionResult): Boolean;
@@ -1298,7 +1307,8 @@ uses
     nc_one_key_completion_difference_model,
     nc_one_key_completion_topk_model,
     nc_one_key_completion_ncgpt_model,
-    nc_one_key_completion_ncgpt_sparse_audit_model;
+    nc_one_key_completion_ncgpt_sparse_audit_model,
+    nc_tab_repair_projection;
 
 const
     c_suppress_nonlexicon_complete_long_candidates = True;
@@ -5819,6 +5829,9 @@ end;
 procedure TncEngine.clear_one_key_completion;
 begin
     m_repaired_completion_query_key := '';
+    m_tab_projection_shown := Default(TncOneKeyCompletion);
+    m_tab_projection_query := ''; m_tab_projection_document := '';
+    m_tab_projection_raw_text := ''; m_tab_projection_raw_path := '';
     m_one_key_completion := Default(TncOneKeyCompletion);
     m_debug_lexical_one_key_completion := Default(TncOneKeyCompletion);
     SetLength(m_debug_long_one_key_completion_pool, 0);
@@ -6096,15 +6109,21 @@ begin
 end;
 
 function TncEngine.has_validated_completion_prefix: Boolean;
+begin
+    Result := ((GetEnvironmentVariable('CASSOTIS_TAB_REPAIRED_PREFIX') = '1')
+{$IFDEF CASSOTIS_TAB_HANDOFF_DIAGNOSTICS}
+        or (GetEnvironmentVariable('CASSOTIS_TAB_REPAIRED_PREFIX') = 'carry')
+{$ENDIF}
+        ) and has_current_validated_completion_prefix;
+    if Result and (GetEnvironmentVariable('CASSOTIS_TAB_REPAIR_TRUST') = '1') and
+        (m_local_repair_validated.lm_gain < 80) then Result := False;
+end;
+
+function TncEngine.has_current_validated_completion_prefix: Boolean;
 var key: string;
 begin
     Result := False;
-    if ((GetEnvironmentVariable('CASSOTIS_TAB_REPAIRED_PREFIX') <> '1')
-{$IFDEF CASSOTIS_TAB_HANDOFF_DIAGNOSTICS}
-        and (GetEnvironmentVariable('CASSOTIS_TAB_REPAIRED_PREFIX') <> 'carry')
-{$ENDIF}
-        ) or
-        (not m_allow_one_key_completion_lookup) or (m_dictionary = nil) or
+    if (not m_allow_one_key_completion_lookup) or (m_dictionary = nil) or
         (m_config.input_mode <> im_chinese) or m_has_pending_commit or
         (m_long_local_repair = nil) or (m_page_index <> 0) or
         (m_config.pinyin_input_scheme <> pis_full_pinyin) or
@@ -6124,14 +6143,38 @@ begin
         not m_local_repair_validated.exact_path or
         (m_local_repair_validated.text <> m_local_repair_text) or
         (m_local_repair_validated.segment_path = '') then Exit;
-    if (GetEnvironmentVariable('CASSOTIS_TAB_REPAIR_TRUST') = '1') and
-        (m_local_repair_validated.lm_gain < 80) then Exit;
     key := m_composition_text + #0 + m_last_lookup_key + #0;
     if m_document_context_model <> nil then
         key := key + m_document_context_model.document_key + #0 +
             m_document_context_model.semantic_tail
     else key := key + #0;
     Result := key = m_local_repair_query_key;
+end;
+
+function TncEngine.project_validated_prefix_completion(
+    const completion: TncOneKeyCompletion): TncOneKeyCompletion;
+var
+    syllables: TncPinyinParseResult;
+    aligned_query, query: string;
+    i: Integer;
+begin
+    Result := completion;
+    if not (completion.source in [okcs_long_transition, okcs_long_neural]) or
+        (completion.text = '') or
+        (GetEnvironmentVariable('CASSOTIS_TAB_FINAL_REPAIR') = '0') or
+        (completion.anchor_text <> m_local_repair_draft) or
+        not has_current_validated_completion_prefix then Exit;
+    syllables := get_effective_compact_pinyin_syllables(m_composition_text, False);
+    aligned_query := ''; query := '';
+    for i := 0 to High(syllables) do
+    begin
+        if i > 0 then aligned_query := aligned_query + #3;
+        aligned_query := aligned_query + normalize_pinyin_text(syllables[i].text);
+        query := query + normalize_pinyin_text(syllables[i].text);
+    end;
+    if query <> normalize_pinyin_text(m_composition_text) then Exit;
+    nc_project_repaired_tab_prefix(m_local_repair_draft, query, aligned_query, m_local_repair_validated,
+        completion, Result);
 end;
 
 {$IFDEF CASSOTIS_TAB_HANDOFF_DIAGNOSTICS}
@@ -8767,14 +8810,36 @@ begin
     apply_long_completion;
 end;
 
+function TncEngine.get_one_key_completion_for_commit: TncOneKeyCompletion;
+var document_key: string;
+begin
+    document_key := '';
+    if m_document_context_model <> nil then document_key := m_document_context_model.document_key;
+    // A refreshed context must not change the text of an already shown Tab hint.
+    // Keep this snapshot separate from raw ranking and feedback state.
+    if (m_tab_projection_shown.text <> '') and (m_config.input_mode = im_chinese) and
+        (m_page_index = 0) and (m_tab_projection_query = m_composition_text) and
+        (m_tab_projection_document = document_key) and
+        (m_tab_projection_raw_text = m_one_key_completion.text) and
+        (m_tab_projection_raw_path = m_one_key_completion.path_text) and
+        (m_tab_projection_shown.full_pinyin = m_one_key_completion.full_pinyin) and
+        (m_tab_projection_shown.anchor_path = m_one_key_completion.anchor_path) and
+        (m_tab_projection_shown.suffix_text = m_one_key_completion.suffix_text) and
+        (m_tab_projection_shown.source = m_one_key_completion.source) then
+        Exit(m_tab_projection_shown);
+    Result := project_validated_prefix_completion(m_one_key_completion);
+end;
+
 function TncEngine.accept_one_key_completion: Boolean;
 var
     completion_text: string;
     completion_pinyin: string;
+    completion: TncOneKeyCompletion;
 begin
-    completion_text := Trim(m_one_key_completion.text);
+    completion := get_one_key_completion_for_commit;
+    completion_text := Trim(completion.text);
     completion_pinyin := normalize_pinyin_text(
-        m_one_key_completion.full_pinyin);
+        completion.full_pinyin);
     Result := completion_text <> '';
     if not Result then
     begin
@@ -90558,6 +90623,7 @@ var
         cache_key: string;
         cached_candidates: TncCandidateList;
         seen: TDictionary<string, Byte>;
+        protected_syllables: TncPinyinParseResult;
 
         function tail_is_single_initial_extension_local(
             const value: string): Boolean;
@@ -90572,7 +90638,17 @@ var
         end;
 
         function prefix_tail_alignment_allowed_local: Boolean;
+        var
+            part: TncPinyinSyllable;
         begin
+            // A trailing initial must not split a completed syllable:
+            // zhen+zheng+d is not zhen+zhen+gd. Alternate full-syllable
+            // parses (jian+gei vs jiang+ei) are deliberately unaffected.
+            for part in protected_syllables do
+                if (prefix_len > part.start_index) and
+                    (prefix_len < part.start_index + part.length) and
+                    nc_is_canonical_pinyin_syllable(part.text) then
+                    Exit(False);
             if is_full_pinyin_key(prefix_key) then
             begin
                 Exit(True);
@@ -90600,6 +90676,10 @@ var
             out_candidates := Copy(cached_candidates, 0, Length(cached_candidates));
             Exit(Length(out_candidates) > 0);
         end;
+
+        if has_raw_safe_trailing_initial_typing_state and
+            SameText(normalized_query, lookup_text) then
+            protected_syllables := get_effective_compact_pinyin_syllables(normalized_query);
 
         seen := TDictionary<string, Byte>.Create;
         try
@@ -149558,6 +149638,7 @@ begin
             parser.Free;
         end;
 
+        nc_merge_abbreviated_retroflex_initials(syllables);
         Result := syllables;
         apply_dictionary_supported_ng_boundary_shift_local(Result);
         // Explicit apostrophe input must preserve the user's syllable boundary.
@@ -192119,7 +192200,19 @@ begin
         refresh_validated_prefix_completion;
         m_repaired_completion_query_key := m_local_repair_query_key;
     end;
-    Result := m_one_key_completion;
+    Result := project_validated_prefix_completion(m_one_key_completion);
+    if Result.text <> m_one_key_completion.text then
+    begin
+        m_tab_projection_shown := Result;
+        m_tab_projection_query := m_composition_text;
+        m_tab_projection_document := '';
+        if m_document_context_model <> nil then
+            m_tab_projection_document := m_document_context_model.document_key;
+        m_tab_projection_raw_text := m_one_key_completion.text;
+        m_tab_projection_raw_path := m_one_key_completion.path_text;
+    end
+    else if m_tab_projection_shown.text <> '' then
+        m_tab_projection_shown := Default(TncOneKeyCompletion);
 end;
 
 function TncEngine.get_long_neural_completion_request(
@@ -192137,6 +192230,19 @@ begin
     begin
         request := m_long_neural_completion_request;
     end;
+end;
+
+function TncEngine.get_prefetch_long_neural_completion_request(
+    out request: TncLongNeuralCompletionRequest): Boolean;
+begin
+    request := Default(TncLongNeuralCompletionRequest);
+    // Only overlap an already prepared fallback request. Experimental repaired
+    // anchors must wait for visible repair; exact/static hints need no prefetch.
+    Result := (TThread.ProcessorCount >= 8) and
+        (m_page_index = 0) and (m_one_key_completion.text = '') and
+        (GetEnvironmentVariable('CASSOTIS_TAB_REPAIRED_PREFIX') <> '1') and
+        (GetEnvironmentVariable('CASSOTIS_TAB_REPAIRED_PREFIX') <> 'carry') and
+        get_long_neural_completion_request(request);
 end;
 
 function TncEngine.apply_long_neural_completion(

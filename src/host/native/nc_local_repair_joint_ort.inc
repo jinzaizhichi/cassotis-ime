@@ -12,6 +12,7 @@ struct LocalRepairJoint {
     std::array<int64_t, 40 * 99> readings{};
     std::array<LocalRepairEncoding, 2> cache;
     int next{}, count{};
+    uint64_t audit_cache_hits{}, audit_query_runs{};
     bool ready = false;
     bool trimmed = true;
     LocalRepairJoint(LocalRepairHandle& owner, const wchar_t* head_path,
@@ -66,6 +67,10 @@ struct LocalRepairJoint {
         for (auto& item : cache) item = LocalRepairEncoding{};
         hidden.fill(0); draft.fill(0); pinyin.fill(0); logits.fill(0); readings.fill(0);
     }
+    const LocalRepairEncoding* find(const int64_t* text, const int64_t* py, int n) const {
+        for (const auto& item : cache) if (item.matches(text, py, n)) return &item;
+        return nullptr;
+    }
     void remember(const int64_t* text, const int64_t* py, int n,
         const std::vector<Ort::Value>& results) {
         if (n < 6 || n > 40 || results.size() != 6) return;
@@ -80,6 +85,9 @@ struct LocalRepairJoint {
         std::copy_n(text, n, item.draft.begin());
         std::copy_n(py, n, item.pinyin.begin());
         const auto* states = results[3].GetTensorData<float>();
+        // The chooser uses FP16-rounded states; bilateral re-encoding used FP32.
+        // Preserve both so a cache hit cannot change the audit's INT8 inputs.
+        std::copy_n(states, n * 768, item.raw_hidden.begin());
         for (int i = 0; i < n * 768; ++i)
             item.hidden[i] = Ort::Float16_t(states[i]).ToFloat();
         std::copy_n(results[4].GetTensorData<float>(), n * 99, item.logits.begin());
@@ -118,9 +126,8 @@ extern "C" __declspec(dllexport) int __cdecl cassotis_lr_joint_query(
         if (!owner.joint || owner.context_ids != std::vector<int64_t>{3, 2}) return 0;
         auto& p = *owner.joint;
         p.ready = false;
-        for (const auto& item : p.cache) {
-            if (item.count != count || !std::equal(draft, draft + count, item.draft.begin()) ||
-                !std::equal(pinyin, pinyin + count, item.pinyin.begin())) continue;
+        if (const auto* cached = p.find(draft, pinyin, count)) {
+            const auto& item = *cached;
             p.hidden = item.hidden; p.draft = item.draft; p.pinyin = item.pinyin;
             p.logits = item.logits; p.readings = item.readings; p.count = count;
             std::copy_n(p.logits.data(), count * 99, logits);
@@ -205,7 +212,13 @@ extern "C" __declspec(dllexport) int __cdecl cassotis_lr_joint_audit(void* handl
             const int64_t* readings = p.readings.data();
             const float* hidden = p.hidden.data();
             const bool original = std::equal(texts[side], texts[side] + count, p.draft.begin());
-            if (!original) {
+            const auto* cached = original ? nullptr : p.find(texts[side], pinyin, count);
+            if (cached) {
+                hidden = cached->raw_hidden.data();
+                logits = cached->logits.data();
+                readings = cached->readings.data();
+                ++p.audit_cache_hits;
+            } else if (!original) {
                 int64_t shape[] = {1, count};
                 std::vector<Ort::Value> inputs;
                 inputs.emplace_back(Ort::Value::CreateTensor<int64_t>(p.cpu, const_cast<int64_t*>(texts[side]), count, shape, 2));
@@ -220,6 +233,7 @@ extern "C" __declspec(dllexport) int __cdecl cassotis_lr_joint_audit(void* handl
                 const char* in[] = {"draft_ids", "pinyin_ids", "keys", "values", "context_mask"};
                 const char* out[] = {"joint_hidden", "joint_scores", "joint_reading_ids"};
                 result = p.query.Run(Ort::RunOptions{nullptr}, in, inputs.data(), inputs.size(), out, 3);
+                ++p.audit_query_runs;
                 if (result[0].GetTensorTypeAndShapeInfo().GetElementCount() != size_t(count * 768) ||
                     result[1].GetTensorTypeAndShapeInfo().GetElementCount() != size_t(count * 99) ||
                     result[2].GetTensorTypeAndShapeInfo().GetElementCount() != size_t(count * 99)) return 0;
@@ -284,6 +298,19 @@ extern "C" __declspec(dllexport) int __cdecl cassotis_lr_joint_audit(void* handl
         const auto* values = result[0].GetTensorData<float>();
         if (!std::isfinite(values[0]) || !std::isfinite(values[1])) return 0;
         std::copy_n(values, 2, decision);
+        return 1;
+    } catch (...) { return 0; }
+}
+
+extern "C" __declspec(dllexport) int __cdecl cassotis_lr_joint_profile(
+    void* opaque, uint64_t* cache_hits, uint64_t* query_runs) {
+    if (!opaque || !cache_hits || !query_runs) return 0;
+    try {
+        auto& owner = *static_cast<LocalRepairHandle*>(opaque);
+        const std::lock_guard<std::mutex> guard(owner.lock);
+        if (!owner.joint) return 0;
+        *cache_hits = owner.joint->audit_cache_hits;
+        *query_runs = owner.joint->audit_query_runs;
         return 1;
     } catch (...) { return 0; }
 }

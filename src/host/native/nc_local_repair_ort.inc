@@ -1,10 +1,15 @@
 namespace {
 struct LocalRepairEncoding {
     std::array<float, 40 * 768> hidden{};
+    std::array<float, 40 * 768> raw_hidden{};
     std::array<int64_t, 40> draft{}, pinyin{};
     std::array<float, 40 * 99> logits{};
     std::array<int64_t, 40 * 99> readings{};
     int count{};
+    bool matches(const int64_t* text, const int64_t* py, int n) const {
+        return count == n && std::equal(text, text + n, draft.begin()) &&
+            std::equal(py, py + n, pinyin.begin());
+    }
 };
 struct LocalRepairJoint;
 struct LocalRepairHandle {

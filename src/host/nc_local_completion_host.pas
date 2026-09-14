@@ -16,7 +16,21 @@ type
         session_id: string;
         session_instance_id: UInt64;
         candidate_generation: UInt64;
+        prefetch_only: Boolean;
         request: TncLongNeuralCompletionRequest;
+    end;
+
+    TncLocalCompletionPrefetchCache = record
+    private
+        m_valid, m_accepted: Boolean;
+        m_task: TncLocalCompletionTask;
+        m_result: TncLongNeuralCompletionResult;
+    public
+        procedure clear;
+        procedure remember(const task: TncLocalCompletionTask; const accepted: Boolean;
+            const value: TncLongNeuralCompletionResult);
+        function take(const task: TncLocalCompletionTask; out accepted: Boolean;
+            out value: TncLongNeuralCompletionResult): Boolean;
     end;
 
     TncLocalCompletionResultEvent = reference to procedure(
@@ -100,6 +114,7 @@ type
         m_worker: TncLocalCompletionWorker;
         m_pending_task: TncLocalCompletionTask;
         m_has_pending_task: Boolean;
+        m_prefetch_cache: TncLocalCompletionPrefetchCache;
         m_result_event: TncLocalCompletionResultEvent;
         m_finished_event: TncLocalCompletionFinishedEvent;
         m_module: HMODULE;
@@ -138,6 +153,7 @@ type
             const capture_candidate_pool: Boolean = False);
         destructor Destroy; override;
         procedure enqueue(const task: TncLocalCompletionTask);
+        procedure prefetch(const task: TncLocalCompletionTask);
         function ready: Boolean;
         function last_error: string;
     end;
@@ -159,6 +175,53 @@ const
     c_completion_text_stride = 128;
     c_completion_pinyin_stride = 256;
     c_completion_path_stride = 128;
+
+procedure TncLocalCompletionPrefetchCache.clear;
+begin
+    m_valid := False;
+    m_accepted := False;
+    m_task := Default(TncLocalCompletionTask);
+    m_result := Default(TncLongNeuralCompletionResult);
+end;
+
+procedure TncLocalCompletionPrefetchCache.remember(const task: TncLocalCompletionTask;
+    const accepted: Boolean; const value: TncLongNeuralCompletionResult);
+begin
+    clear;
+    if not task.prefetch_only then Exit;
+    m_task := task;
+    m_result := value;
+    m_accepted := accepted;
+    m_valid := True;
+end;
+
+function TncLocalCompletionPrefetchCache.take(const task: TncLocalCompletionTask;
+    out accepted: Boolean; out value: TncLongNeuralCompletionResult): Boolean;
+begin
+    Result := m_valid and not task.prefetch_only and
+        (task.session_id = m_task.session_id) and
+        (task.session_instance_id = m_task.session_instance_id) and
+        (task.request.query_prefix = m_task.request.query_prefix) and
+        (task.request.query_syllables = m_task.request.query_syllables) and
+        (task.request.context_text = m_task.request.context_text) and
+        (task.request.phonetic_only = m_task.request.phonetic_only) and
+        (task.request.top1_text = m_task.request.top1_text) and
+        (task.request.top1_path = m_task.request.top1_path) and
+        (task.request.top1_anchor_path = m_task.request.top1_anchor_path) and
+        (task.request.top2_text = m_task.request.top2_text) and
+        (task.request.top2_path = m_task.request.top2_path) and
+        (task.request.top2_anchor_path = m_task.request.top2_anchor_path);
+    accepted := False;
+    value := Default(TncLongNeuralCompletionResult);
+    if Result then
+    begin
+        accepted := m_accepted;
+        value := m_result;
+    end;
+    // A single-use worker-owned slot. Delivery uses the new task's generation,
+    // never the speculative task's generation or callback.
+    clear;
+end;
 
 constructor TncLocalCompletionWorker.create(
     const owner: TncLocalCompletionHost);
@@ -821,7 +884,14 @@ begin
         begin
             Break;
         end;
-        accepted := run_task(task, completion_result);
+        if not m_prefetch_cache.take(task, accepted, completion_result) then
+            accepted := run_task(task, completion_result);
+        if task.prefetch_only then
+        begin
+            m_prefetch_cache.remember(task, accepted, completion_result);
+            if not ready then Break;
+            Continue;
+        end;
         // Production only needs accepted results. The optional finished event
         // lets synchronous benchmark bridges observe abstentions without
         // adding no-op main-thread callbacks to the normal Host path.
@@ -859,6 +929,14 @@ begin
         m_lock.Release;
     end;
     m_wakeup.SetEvent;
+end;
+
+procedure TncLocalCompletionHost.prefetch(const task: TncLocalCompletionTask);
+var speculative: TncLocalCompletionTask;
+begin
+    speculative := task;
+    speculative.prefetch_only := True;
+    enqueue(speculative);
 end;
 
 function TncLocalCompletionHost.ready: Boolean;

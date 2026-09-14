@@ -157,6 +157,7 @@ type
         procedure remove_user_candidate(const session_id: string; const candidate_index: Integer);
         procedure queue_long_neural_completion(
             const session: TncHostSession);
+        procedure prefetch_long_neural_completion(const session: TncHostSession);
         procedure handle_long_neural_completion(
             const task: TncLocalCompletionTask;
             const completion_result: TncLongNeuralCompletionResult);
@@ -899,8 +900,9 @@ begin
         Inc(m_candidate_generation);
         m_candidate_dirty := True;
     end;
-    if changed and (m_owner <> nil) and
-        (m_one_key_completion.text = '') then
+    // The engine owns eligibility, including guarded static long-hint challenges.
+    // An empty-only gate here would diverge from the benchmark/runtime contract.
+    if changed and (m_owner <> nil) then
     begin
         m_owner.queue_long_neural_completion(Self);
     end;
@@ -1288,6 +1290,19 @@ begin
     task.session_instance_id := session.instance_id;
     task.candidate_generation := session.candidate_generation;
     m_local_completion_host.enqueue(task);
+end;
+
+procedure TncEngineHost.prefetch_long_neural_completion(const session: TncHostSession);
+var task: TncLocalCompletionTask;
+begin
+    if (session = nil) or (session.engine = nil) or
+        (m_local_completion_host = nil) then Exit;
+    if session.engine.get_composition_text = session.m_preedit_text then Exit;
+    task := Default(TncLocalCompletionTask);
+    if not session.engine.get_prefetch_long_neural_completion_request(task.request) then Exit;
+    task.session_id := session.m_session_id;
+    task.session_instance_id := session.instance_id;
+    m_local_completion_host.prefetch(task);
 end;
 
 procedure TncEngineHost.handle_long_neural_completion(
@@ -2007,6 +2022,7 @@ begin
 
                         if candidates_rebuilt then
                         begin
+                            prefetch_long_neural_completion(session);
                             candidates := session.engine.get_candidates;
                             one_key_completion :=
                                 session.engine.get_one_key_completion;
@@ -2547,6 +2563,7 @@ begin
         if handled and session.engine.commit_text(commit_text) then
         begin
             readback_start_tick := GetTickCount64;
+            prefetch_long_neural_completion(session);
             candidates := session.engine.get_candidates;
             one_key_completion := session.engine.get_one_key_completion;
             display_text := session.engine.get_display_text;
@@ -2611,6 +2628,7 @@ begin
         if handled and (commit_text = '') then
         begin
             readback_start_tick := GetTickCount64;
+            prefetch_long_neural_completion(session);
             candidates := session.engine.get_candidates;
             one_key_completion := session.engine.get_one_key_completion;
             display_text := session.engine.get_display_text;
@@ -3504,6 +3522,7 @@ begin
 
         host_log(Format('[INFO] removed user candidate text=%s pinyin=%s', [candidate_text, pinyin_key]));
 
+        prefetch_long_neural_completion(session);
         candidates := session.engine.get_candidates;
         one_key_completion := session.engine.get_one_key_completion;
         page_index := session.engine.get_page_index;

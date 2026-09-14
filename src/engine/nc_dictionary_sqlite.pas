@@ -15,6 +15,7 @@ uses
     nc_dictionary_intf,
     nc_fuzzy_pinyin,
     nc_pinyin_parser,
+    nc_exact_component_sort,
     nc_sqlite;
 
 type
@@ -1789,6 +1790,8 @@ begin
         parser.Free;
     end;
 
+    nc_merge_abbreviated_retroflex_initials(syllables);
+
     if Length(syllables) < 2 then
     begin
         Exit;
@@ -1816,7 +1819,9 @@ begin
             Continue;
         end;
 
-        if (Length(syllable_text) = 1) and is_initial_letter(syllable_text[1]) then
+        if ((Length(syllable_text) = 1) and is_initial_letter(syllable_text[1])) or
+            (syllable_text = 'zh') or (syllable_text = 'ch') or
+            (syllable_text = 'sh') then
         begin
             tokens[idx].kind := mqt_initial;
             tokens[idx].text := syllable_text;
@@ -2182,7 +2187,10 @@ begin
         begin
             initial_value := LowerCase(Copy(syllables[idx].text, 1, 1));
         end;
-        if not mixed_initial_matches(query_tokens[idx].text[1], initial_value) then
+        if ((Length(query_tokens[idx].text) = 2) and
+            (query_tokens[idx].text <> initial_value)) or
+            ((Length(query_tokens[idx].text) = 1) and
+            (not mixed_initial_matches(query_tokens[idx].text[1], initial_value))) then
         begin
             Exit;
         end;
@@ -11013,30 +11021,8 @@ var
     end;
 
     procedure sort_local;
-    var
-        left_idx: Integer;
-        right_idx: Integer;
-        temp: TncCandidate;
     begin
-        for left_idx := 0 to list.Count - 2 do
-        begin
-            for right_idx := left_idx + 1 to list.Count - 1 do
-            begin
-                if (list[right_idx].score > list[left_idx].score) or
-                    ((list[right_idx].score = list[left_idx].score) and
-                    (list[right_idx].source = cs_user) and
-                    (list[left_idx].source <> cs_user)) or
-                    ((list[right_idx].score = list[left_idx].score) and
-                    (list[right_idx].source = list[left_idx].source) and
-                    (CompareText(list[right_idx].text,
-                    list[left_idx].text) < 0)) then
-                begin
-                    temp := list[left_idx];
-                    list[left_idx] := list[right_idx];
-                    list[right_idx] := temp;
-                end;
-            end;
-        end;
+        nc_sort_exact_components(list);
     end;
 begin
     SetLength(results, 0);

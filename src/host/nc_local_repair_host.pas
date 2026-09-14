@@ -106,6 +106,9 @@ begin
 end;
 
 destructor TncLocalRepairHost.Destroy;
+type TJointProfile = function(handle: Pointer; cache_hits, query_runs: PUInt64): Integer; cdecl;
+var profile: TJointProfile;
+    cache_hits, query_runs: UInt64;
 begin
     m_worker.Terminate;
     m_event.SetEvent;
@@ -122,6 +125,14 @@ begin
     end;
     m_run_lock.Acquire;
     try
+        if m_profile_enabled and (m_module <> 0) and (m_handle <> nil) then
+        begin
+            profile := GetProcAddress(m_module, 'cassotis_lr_joint_profile');
+            if Assigned(profile) and (profile(m_handle, @cache_hits, @query_runs) = 1) then
+                append_log_line_shared(get_default_log_path, Format(
+                    '[INFO] joint-repair audit cache_hits=%d query_runs=%d' + sLineBreak,
+                    [cache_hits, query_runs]));
+        end;
         m_joint.Free;
         m_joint_trace.Free;
         if (m_handle <> nil) and Assigned(m_destroy) then m_destroy(m_handle);
@@ -738,6 +749,14 @@ begin
                 trace.AddPair('selected', TJSONNumber.Create(value.selected));
                 trace.AddPair('audited_selected', TJSONNumber.Create(value.audited_selected));
                 trace.AddPair('path_valid', TJSONBool.Create(value.selected_path_valid));
+                trace.AddPair('encoder_ms', TJSONNumber.Create(value.encoder_ms));
+                trace.AddPair('beam_ms', TJSONNumber.Create(value.beam_ms));
+                trace.AddPair('guard_ms', TJSONNumber.Create(value.guard_ms));
+                trace.AddPair('feature_ms', TJSONNumber.Create(value.feature_ms));
+                trace.AddPair('head_ms', TJSONNumber.Create(value.head_ms));
+                trace.AddPair('final_path_ms', TJSONNumber.Create(value.final_path_ms));
+                trace.AddPair('audit_ms', TJSONNumber.Create(value.audit_ms));
+                trace.AddPair('total_ms', TJSONNumber.Create(value.total_ms));
                 m_joint_trace.WriteLine(trace.ToJSON);
             finally trace.Free; end;
         end;
