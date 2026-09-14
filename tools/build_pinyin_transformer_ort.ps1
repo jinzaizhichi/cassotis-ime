@@ -2,6 +2,7 @@ param(
     [string]$Configuration = 'Release',
     [string]$VcVarsPath = '',
     [string]$OutputDirectory = '',
+    [string]$SourceRoot = '',
     [switch]$EnableExperimentalContextualRecall,
     [switch]$EnableExperimentalTop32CrossRanker,
     [switch]$StopLockingRuntime
@@ -141,6 +142,9 @@ function publish_runtime_dll(
 }
 
 $root = Split-Path -Parent $PSScriptRoot
+if (-not [string]::IsNullOrWhiteSpace($SourceRoot)) {
+    $root = (Resolve-Path -LiteralPath $SourceRoot).Path
+}
 $source = Join-Path $root 'src\host\native\nc_pinyin_transformer_ort.cpp'
 $include = Join-Path $root 'third_party\onnxruntime\include'
 $onnxLibrary = Join-Path $root 'third_party\onnxruntime\win64\onnxruntime.lib'
