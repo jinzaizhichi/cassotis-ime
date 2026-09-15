@@ -970,7 +970,7 @@ begin
         m_candidate_window.update_candidates(m_candidates, m_page_index, m_page_count, m_selected_index,
             m_preedit_text, m_one_key_completion,
             m_engine.config.one_key_completion_key,
-            m_engine.config.debug_mode);
+            m_engine.config.debug_mode, m_engine.config.pinyin_input_scheme);
         m_last_candidate_debug_mode := m_engine.config.debug_mode;
     end;
     if candidate_generation = m_candidate_generation then
@@ -1020,7 +1020,7 @@ begin
         m_candidate_window.update_candidates(m_candidates, m_page_index, m_page_count, m_selected_index,
             m_preedit_text, m_one_key_completion,
             m_engine.config.one_key_completion_key,
-            m_engine.config.debug_mode);
+            m_engine.config.debug_mode, m_engine.config.pinyin_input_scheme);
         m_last_candidate_debug_mode := m_engine.config.debug_mode;
     end;
 

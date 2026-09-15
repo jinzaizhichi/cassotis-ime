@@ -22,7 +22,8 @@ uses
     nc_shortcut,
     nc_dpi_scale,
     nc_version_info,
-    nc_candidate_theme;
+    nc_candidate_theme,
+    nc_pinyin_input_diagnostics;
 
 type
     TncCandidateRemoveEvent = procedure(const candidate_index: Integer) of object;
@@ -47,6 +48,8 @@ type
         m_brand_text: string;
         m_page_label: TLabel;
         m_preedit_label: TLabel;
+        m_preedit_diagnostics: TncPinyinInputDiagnostics;
+        m_preedit_spans: TncPinyinDiagnosticSpans;
         m_border_color: TColor;
         m_color_scheme: Integer;
         m_color_theme: TncCandidateColorTheme;
@@ -138,7 +141,8 @@ type
             const selected_index: Integer; const preedit_text: string;
             const one_key_completion: TncOneKeyCompletion;
             const one_key_completion_key: TncOneKeyCompletionKey;
-            const debug_mode: Boolean);
+            const debug_mode: Boolean;
+            const pinyin_scheme: TncPinyinInputScheme = pis_full_pinyin);
         procedure show_at(const x: Integer; const y: Integer;
             const prefer_above: Boolean = False; const clearance: Integer = 0);
         procedure hide_window;
@@ -152,6 +156,9 @@ function nc_calculate_candidate_top(const anchor_y: Integer;
     const prefer_above: Boolean): Integer;
 
 implementation
+
+uses
+    nc_preedit_renderer;
 
 type
     TGetDpiForWindow = function(hwnd: HWND): UINT; stdcall;
@@ -511,6 +518,7 @@ begin
     m_list_padding := m_base_list_padding;
     m_show_page_text := False;
     m_show_preedit_text := False;
+    m_preedit_diagnostics := TncPinyinInputDiagnostics.Create;
     m_base_remove_button_size := 14;
     m_base_remove_button_gap := 5;
     m_remove_button_size := m_base_remove_button_size;
@@ -552,6 +560,7 @@ end;
 
 destructor TncCandidateWindow.Destroy;
 begin
+    m_preedit_diagnostics.Free;
     if m_candidate_weight_lines <> nil then
     begin
         m_candidate_weight_lines.Free;
@@ -1720,8 +1729,8 @@ begin
         Canvas.Font.Assign(m_preedit_label.Font);
         Canvas.Font.Color := m_preedit_label.Font.Color;
         SetTextColor(Canvas.Handle, ColorToRGB(Canvas.Font.Color));
-        draw_canvas_text(Canvas, m_preedit_label.Caption, preedit_rect,
-            DT_LEFT or DT_VCENTER or DT_SINGLELINE or DT_END_ELLIPSIS or DT_NOPREFIX);
+        nc_draw_preedit_text(Canvas, m_preedit_label.Caption, preedit_rect,
+            m_preedit_spans, nc_preedit_warning_color(m_color_theme.background_color));
     end;
 
     if m_show_page_text and (m_page_label.Caption <> '') and (not IsRectEmpty(m_page_rect)) then
@@ -2010,7 +2019,8 @@ procedure TncCandidateWindow.update_candidates(const candidates: TncCandidateLis
     const preedit_text: string;
     const one_key_completion: TncOneKeyCompletion;
     const one_key_completion_key: TncOneKeyCompletionKey;
-    const debug_mode: Boolean);
+    const debug_mode: Boolean;
+    const pinyin_scheme: TncPinyinInputScheme);
 const
     c_show_page_label = False;
 var
@@ -2089,6 +2099,7 @@ begin
     end;
     m_page_label.Visible := False;
 
+    m_preedit_spans := m_preedit_diagnostics.check(preedit_text, pinyin_scheme);
     if preedit_text <> '' then
     begin
         m_preedit_label.Caption := preedit_text;
