@@ -1,166 +1,38 @@
 {
-  "format": 2,
-  "enabled": true,
-  "joint_bilateral": true,
-  "joint_score_agreement": true,
-  "agreement_validation": {
-    "policy": "Keep existing margin >=1 decisions; additionally allow 0<margin<1 only after full path validation and frozen bilateral preference >=0",
-    "scope": "Existing no-document-context long-sentence joint repair only; no pool or graph change",
-    "independent_dev": { "rows": 8000, "rescues": 131, "harms": 46, "top1_net": 85, "top2_net": 78 },
-    "independent_test": { "rows": 8000, "rescues": 107, "harms": 63, "top1_net": 44, "top2_net": 32 },
-    "provenance": "Previous bilateral dev/test splits, not newly acquired unseen corpora; no training or benchmark threshold fitting",
-    "host_acceptance": {
-      "baseline_commit": "df0f01434aa3ba486ef4742d74c779b8bc518cba",
-      "dictionary_sha256": "25db42a5235a1b65d0dd11379a4e2786efe61edae98375cfc82168b9e7fb5a32",
-      "rows": 16300,
-      "baseline_top1": 11828,
-      "baseline_top2": 12894,
-      "top1": 11974,
-      "top2": 12947,
-      "rescues": 312,
-      "harms": 166,
-      "mean_increment_ms": 0.284417,
-      "p95_increment_ms": 0,
-      "latency_max_ms": 453,
-      "short_context_differing_rows": 0,
-      "runtime_input_parity_rows": 16229,
-      "max_score_error": 0.0,
-      "record": "tools/LONG_JOINT_AGREEMENT_EXECUTION.md"
-    }
-  },
-  "model": "pinyin-constrained local correction",
-  "minimum_word_ratio": 0.01,
-  "no_context_refinement_passes": 2,
-  "joint_validation": {
-    "policy": "frozen joint margin >=1; bilateral preference >=0; no extra reliability veto",
-    "scope": "6-40 characters without document context; existing word/path guards remain mandatory",
-    "independent_test": {
-      "rows": 8000,
-      "joint_rescues": 89,
-      "joint_harms": 21,
-      "bilateral_rescues": 87,
-      "bilateral_harms": 6
-    },
-    "host_acceptance": {
-      "baseline_commit": "f3510badeabd223c6535d81bc4255bb037271e1d",
-      "dictionary_sha256": "935cbf41cdfc90564e35037f2695bf68ec17d371b4cbeaa03f8003e2ae073109",
-      "rows": 16300,
-      "baseline_top1": 11698,
-      "baseline_top2": 12830,
-      "top1": 11827,
-      "top2": 12892,
-      "rescues": 229,
-      "harms": 100,
-      "short_context_differing_rows": 0,
-      "mean_increment_ms": 2.751718,
-      "latency_max_ms": 484,
-      "runtime_input_parity_rows": 16229,
-      "max_score_error": 0.0
-    }
-  },
-  "refinement_validation": {
-    "checkpoint_unchanged": true,
-    "policy": "after guarded first edit only; at most four total edits and two spans; no reversals",
-    "dev": { "rows": 3600, "top1_before": 2019, "top1_after": 2024, "top2_before": 2178, "top2_after": 2183 },
-    "test": { "rows": 3599, "top1_before": 2042, "top1_after": 2060, "top2_before": 2229, "top2_after": 2247 },
-    "measurement": "guard-point trace and native host; frozen independent policy, not benchmark training"
-  },
-  "word_calibration": {
-    "rows": 3600,
-    "split": "dev",
-    "minimum_word_ratio": 0.01,
-    "checkpoint_sha256": "371204f81f6d82f4677b5b235afad5bb04cb8829f07cd2cf4b7d67622394556f",
-    "baseline_top1": 1928,
-    "top1": 2033,
-    "baseline_top2": 2101,
-    "top2": 2192,
-    "rescues": 163,
-    "harms": 58,
-    "net": 105,
-    "changed": 864,
-    "observed_paths": 1808
-  },
-  "no_context": {
-    "edit": 0.8,
-    "margin": 0.0,
-    "max_edits": 4,
-    "max_spans": 2
-  },
-  "document_context": {
-    "edit": 0.9,
-    "margin": 0.0,
-    "max_edits": 4,
-    "max_spans": 2
-  },
-  "source_model": "hfl/chinese-macbert-base",
-  "source_revision": "a986e004d2a7f2a1c2f5a3edef4e20604a974ed1",
-  "license": "Apache-2.0",
-  "teacher_url": "https://huggingface.co/hfl/chinese-macbert-base",
-  "checkpoint_sha256": "371204f81f6d82f4677b5b235afad5bb04cb8829f07cd2cf4b7d67622394556f",
-  "max_characters": 40,
-  "context_characters": 256,
-  "dictionary_constraints_sha256": "5b5f5464f07071b2cf913e0f950bd182a5552c7361487355b733755ede3c6dd8",
-  "independent_calibration": {
-    "no_context": {
-      "rows": 3600,
-      "baseline_top1": 1928,
-      "top1": 2031,
-      "rescues": 182,
-      "harms": 79,
-      "net": 103,
-      "baseline_top2": 2101,
-      "thresholds": {
-        "edit": 0.8,
-        "margin": 0.0,
-        "max_edits": 4,
-        "max_spans": 2
-      },
-      "proposals": 1034,
-      "top2": 2181,
-      "split": "dev",
-      "eligible": 3565,
-      "checkpoint": "D:\\cassotis_ime\\out\\local_repair_20260905\\models\\student6\\epoch_6.pt",
-      "checkpoint_sha256": "371204f81f6d82f4677b5b235afad5bb04cb8829f07cd2cf4b7d67622394556f",
-      "inference_seconds": 0.0,
-      "gate_pass": true,
-      "context_dir": null,
-      "context_tail": 256,
-      "mask_disagreements": false
-    },
-    "document_context": {
-      "rows": 3600,
-      "baseline_top1": 1928,
-      "top1": 2147,
-      "rescues": 273,
-      "harms": 54,
-      "net": 219,
-      "baseline_top2": 2101,
-      "thresholds": {
-        "edit": 0.9,
-        "margin": 0.0,
-        "max_edits": 4,
-        "max_spans": 2
-      },
-      "proposals": 1005,
-      "top2": 2293,
-      "split": "dev",
-      "eligible": 3565,
-      "checkpoint": "D:\\cassotis_ime\\out\\local_repair_20260905\\models\\student6\\epoch_6.pt",
-      "checkpoint_sha256": "371204f81f6d82f4677b5b235afad5bb04cb8829f07cd2cf4b7d67622394556f",
-      "inference_seconds": 0.0,
-      "gate_pass": true,
-      "context_dir": "out\\local_repair_20260905\\data\\contexts",
-      "context_tail": 256,
-      "mask_disagreements": false
-    }
-  },
-  "files": {
-    "joint_query_int8.onnx": "75f905ac1cfedbf883223e7406c70a407e6d8c2c7526cdda9431424f4494251f",
-    "joint_head_int8.onnx": "141ffa200b122ae5249f6c2bb7c5d647d276d12cfefb0c6b5d63d29afe04ed02",
-    "bilateral_head_int8.onnx": "e06a5b94cae57660a472d1b2aeca4460587f14b0f6a29eff337ebb95513dd53d",
-    "context_int8.onnx": "eb3778b116cc1000ce86e980c26c6f376b4030b24ab4675aae7466e4feecd218",
-    "query_int8.onnx": "558f6c89bfd66ebbb2217cec577cc2e62b125cd2a58bdcff10c673a0d1b8aec2",
-    "vocab.json": "43b7a1613412edbe08a35147e567f6a795f3aeba719e872096208e6905c0ea47",
-    "readings.json": "cf4021fec90600462da7bd111928326aa8037b1c471e2984d6616e1cadce3baa"
-  }
+    "format":  2,
+    "enabled":  true,
+    "joint_bilateral":  true,
+    "joint_score_agreement":  true,
+    "model":  "pinyin-constrained local correction",
+    "minimum_word_ratio":  0.01,
+    "no_context_refinement_passes":  2,
+    "no_context":  {
+                       "edit":  0.8,
+                       "margin":  0.0,
+                       "max_edits":  4,
+                       "max_spans":  2
+                   },
+    "document_context":  {
+                             "edit":  0.9,
+                             "margin":  0.0,
+                             "max_edits":  4,
+                             "max_spans":  2
+                         },
+    "source_model":  "hfl/chinese-macbert-base",
+    "source_revision":  "a986e004d2a7f2a1c2f5a3edef4e20604a974ed1",
+    "license":  "Apache-2.0",
+    "teacher_url":  "https://huggingface.co/hfl/chinese-macbert-base",
+    "checkpoint_sha256":  "371204f81f6d82f4677b5b235afad5bb04cb8829f07cd2cf4b7d67622394556f",
+    "max_characters":  40,
+    "context_characters":  256,
+    "dictionary_constraints_sha256":  "5b5f5464f07071b2cf913e0f950bd182a5552c7361487355b733755ede3c6dd8",
+    "files":  {
+                  "joint_query_int8.onnx":  "75f905ac1cfedbf883223e7406c70a407e6d8c2c7526cdda9431424f4494251f",
+                  "joint_head_int8.onnx":  "141ffa200b122ae5249f6c2bb7c5d647d276d12cfefb0c6b5d63d29afe04ed02",
+                  "bilateral_head_int8.onnx":  "e06a5b94cae57660a472d1b2aeca4460587f14b0f6a29eff337ebb95513dd53d",
+                  "context_int8.onnx":  "eb3778b116cc1000ce86e980c26c6f376b4030b24ab4675aae7466e4feecd218",
+                  "query_int8.onnx":  "558f6c89bfd66ebbb2217cec577cc2e62b125cd2a58bdcff10c673a0d1b8aec2",
+                  "vocab.json":  "43b7a1613412edbe08a35147e567f6a795f3aeba719e872096208e6905c0ea47",
+                  "readings.json":  "cf4021fec90600462da7bd111928326aa8037b1c471e2984d6616e1cadce3baa"
+              }
 }

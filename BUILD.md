@@ -70,7 +70,7 @@ Options:
 .\rebuild_dict.ps1
 ```
 
-This script imports generated lexicon artifacts from a sibling `cassotis_lexicon` / `cassotis_lexicon_public` repository and rebuilds the runtime dictionaries:
+This script imports generated lexicon artifacts from the sibling [cassotis-lexicon](https://github.com/shenmin/cassotis-lexicon) repository and rebuilds the runtime dictionaries:
 
 1. Locates the lexicon repository
 2. Imports `dict_unihan_sc.txt` / `dict_unihan_tc.txt`
