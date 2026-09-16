@@ -4277,13 +4277,12 @@ begin
         Exit;
     end;
 
-    m_last_ranked_query_key := normalized_query;
-
     if Length(m_candidates) = 0 then
     begin
         if (previous_query = '') or
             (Copy(normalized_query, 1, Length(previous_query)) <> previous_query) then
         begin
+            m_last_ranked_query_key := '';
             m_last_ranked_top_path := '';
         end;
         Exit;
@@ -4300,11 +4299,14 @@ begin
         if (previous_query = '') or
             (Copy(normalized_query, 1, Length(previous_query)) <> previous_query) then
         begin
+            m_last_ranked_query_key := '';
             m_last_ranked_top_path := '';
         end;
         Exit;
     end;
 
+    // Keep the query and its path together when an unfinished tail has no path.
+    m_last_ranked_query_key := normalized_query;
     m_last_ranked_top_path := top_path;
     path_confidence_score := get_candidate_path_confidence_score(m_candidates[0]);
     if path_confidence_score >= 180 then
@@ -69192,7 +69194,7 @@ var
             Exit;
         end;
 
-        if input_syllable_count <= 5 then
+        if input_syllable_count <= 4 then
         begin
             record_chain_search_status_local(c_chain_search_status_short_query);
             Exit;
@@ -80048,6 +80050,62 @@ var
     begin
         Result := lookup_exact_full_pinyin_cached_local(pinyin_key,
             out_results);
+    end;
+
+    function cached_path_prefix_matches_syllables_local(
+        const path_parts: TArray<string>; const last_part: Integer;
+        const syllables: TncPinyinParseResult; const expected_units: Integer): Boolean;
+    var
+        part_idx: Integer;
+        unit_idx: Integer;
+        offset: Integer;
+        units: Integer;
+        part_text: string;
+        part_key: string;
+        syllable_key: string;
+        exact_results: TncCandidateList;
+        candidate: TncCandidate;
+        found: Boolean;
+    begin
+        Result := False;
+        offset := 0;
+        if (m_dictionary = nil) or (last_part < 0) or
+            (last_part > High(path_parts)) or (expected_units <= 0) then Exit;
+        for part_idx := 0 to last_part do
+        begin
+            part_text := Trim(path_parts[part_idx]);
+            units := get_candidate_text_unit_count(part_text);
+            if (units <= 0) or (offset + units > Length(syllables)) then Exit;
+            part_key := '';
+            for unit_idx := offset to offset + units - 1 do
+            begin
+                syllable_key := normalize_pinyin_text(syllables[unit_idx].text);
+                if not is_full_pinyin_key(syllable_key) then Exit;
+                if part_key <> '' then part_key := part_key + '''';
+                part_key := part_key + syllable_key;
+            end;
+
+            // A cached abbreviation or an earlier syllable split is not an
+            // exact edge. Preserve the current boundaries, including inside words.
+            if units = 1 then
+            begin
+                if not m_dictionary.single_char_matches_pinyin(part_key, part_text) then Exit;
+            end
+            else
+            begin
+                if not dictionary_exact_lookup_cached(part_key, exact_results) then Exit;
+                found := False;
+                for candidate in exact_results do
+                    if (candidate.comment = '') and (candidate.text = part_text) then
+                    begin
+                        found := True;
+                        Break;
+                    end;
+                if not found then Exit;
+            end;
+            Inc(offset, units);
+        end;
+        Result := offset = expected_units;
     end;
 
     function dictionary_fuzzy_lattice_lookup_cached(const pinyin_key: string;
@@ -113061,7 +113119,9 @@ var
                     path_units_local);
                 if (path_prefix_key_local = '') or
                     (Copy(normalize_pinyin_text(lookup_text), 1,
-                    Length(path_prefix_key_local)) <> path_prefix_key_local) then
+                    Length(path_prefix_key_local)) <> path_prefix_key_local) or
+                    (not cached_path_prefix_matches_syllables_local(path_parts_local,
+                    local_path_part_count - 1, syllables_local, path_units_local)) then
                 begin
                     Continue;
                 end;
@@ -114764,10 +114824,8 @@ var
             out_text := '';
             out_score := 0;
             if (local_suffix_key = '') or (local_expected_units <= 0) or
-                ((not dictionary_exact_lookup_cached(local_suffix_key,
-                local_results)) and
-                (not dictionary_lookup_cached(local_suffix_key,
-                local_results))) then
+                (not dictionary_exact_lookup_cached(local_suffix_key,
+                local_results)) then
             begin
                 Exit;
             end;
@@ -115151,7 +115209,10 @@ var
             prefix_syllable_count_local);
         if (path_prefix_query_local = '') or
             (Copy(normalized_query_local, 1, Length(path_prefix_query_local)) <>
-            path_prefix_query_local) then
+            path_prefix_query_local) or
+            (not cached_path_prefix_matches_syllables_local(path_parts_local,
+            active_path_part_high_local, syllables_local,
+            prefix_syllable_count_local)) then
         begin
             Exit;
         end;
@@ -125320,12 +125381,10 @@ var
             end;
         end;
         if (m_dictionary <> nil) and has_multi_syllable_input and
-            (delayed_long_decode_mode or (input_syllable_count >= 6) or
-            (has_raw_safe_trailing_initial_typing_state and
-            (input_syllable_count >= 5))) and
             is_full_pinyin_key(lookup_text) and
             (input_syllable_count >= 5) and (input_syllable_count <= 40) and
             ((not m_composition_built_incrementally) or
+            (input_syllable_count = 5) or
             (not should_defer_exact_chain_for_extendable_tail_local) or
             has_reliable_exact_tail_candidate_local(4)) and
             (not all_initial_compact_query) and
