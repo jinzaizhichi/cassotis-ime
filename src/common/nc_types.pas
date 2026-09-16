@@ -61,7 +61,8 @@ type
         okcs_transition,
         okcs_long_transition,
         okcs_long_neural,
-        okcs_document_copy
+        okcs_document_copy,
+        okcs_exact_tail_fallback
     );
 
     TncOneKeyCompletion = record

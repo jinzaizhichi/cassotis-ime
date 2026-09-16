@@ -622,6 +622,7 @@ type
         m_debug_capture_long_one_key_completion_pool: Boolean;
         m_one_key_completion_query_prefix: string;
         m_one_key_completion_score: Integer;
+        m_exact_tail_completion_checked: Boolean;
         m_long_neural_completion_request: TncLongNeuralCompletionRequest;
         m_has_long_neural_completion_request: Boolean;
         m_long_neural_completion_prefix_locked: Boolean;
@@ -1047,6 +1048,7 @@ type
             out completion: TncOneKeyCompletion;
             out completion_score: Integer): Boolean;
         procedure refresh_one_key_completion;
+        procedure refresh_exact_tail_completion;
         function accept_one_key_completion: Boolean;
         procedure apply_long_complete_candidate_pool(
             var candidates: TncCandidateList;
@@ -1312,7 +1314,8 @@ uses
     nc_one_key_completion_topk_model,
     nc_one_key_completion_ncgpt_model,
     nc_one_key_completion_ncgpt_sparse_audit_model,
-    nc_tab_repair_projection;
+    nc_tab_repair_projection,
+    nc_tab_exact_fallback;
 
 const
     c_suppress_nonlexicon_complete_long_candidates = True;
@@ -5903,6 +5906,7 @@ begin
     SetLength(m_debug_long_one_key_completion_pool, 0);
     m_one_key_completion_query_prefix := '';
     m_one_key_completion_score := Low(Integer);
+    m_exact_tail_completion_checked := False;
     m_long_neural_completion_request :=
         Default(TncLongNeuralCompletionRequest);
     m_has_long_neural_completion_request := False;
@@ -8876,6 +8880,36 @@ begin
     apply_long_completion;
 end;
 
+procedure TncEngine.refresh_exact_tail_completion;
+var completion: TncOneKeyCompletion;
+begin
+    if (m_one_key_completion.text <> '') and
+        (m_one_key_completion.source <> okcs_exact_tail_fallback) then Exit;
+    if (not m_allow_one_key_completion_lookup) or (m_dictionary = nil) or
+        (m_config.input_mode <> im_chinese) or (m_confirmed_text <> '') or
+        m_has_pending_commit or (m_page_index <> 0) or is_shuangpin_input or
+        is_fuzzy_pinyin_active or (not m_visible_candidates_cache_valid) or
+        (m_visible_candidates_cache_composition_text <> m_composition_text) or
+        (m_visible_candidates_cache_lookup_key <> m_last_lookup_key) or
+        (m_visible_candidates_cache_page_index <> 0) then
+    begin
+        if m_one_key_completion.source = okcs_exact_tail_fallback then
+            m_one_key_completion := Default(TncOneKeyCompletion);
+        Exit;
+    end;
+    if m_exact_tail_completion_checked then Exit;
+    m_exact_tail_completion_checked := True;
+    m_one_key_completion := Default(TncOneKeyCompletion);
+    // Read the settled visible prefix. Never run candidate ranking from Tab.
+    if nc_try_exact_tail_completion(m_dictionary, m_composition_text,
+        m_visible_candidates_cache, completion) then
+    begin
+        m_one_key_completion := completion;
+        m_one_key_completion_query_prefix := normalize_pinyin_text(m_composition_text);
+        m_one_key_completion_score := Low(Integer);
+    end;
+end;
+
 function TncEngine.get_one_key_completion_for_commit: TncOneKeyCompletion;
 var document_key: string;
 begin
@@ -8935,7 +8969,7 @@ begin
     end
     else if (m_dictionary <> nil) and
         (not (m_one_key_completion.source in
-        [okcs_long_transition, okcs_long_neural])) and
+        [okcs_long_transition, okcs_long_neural, okcs_exact_tail_fallback])) and
         (m_one_key_completion_query_prefix <> '') and
         (completion_pinyin <> '') then
     begin
@@ -8945,7 +8979,7 @@ begin
     end;
     if m_one_key_completion.source in
         [okcs_long_transition, okcs_long_neural,
-        okcs_document_copy] then
+        okcs_document_copy, okcs_exact_tail_fallback] then
     begin
         clear_one_key_completion_feedback_target;
     end
@@ -8960,10 +8994,8 @@ begin
             completion_text);
     end;
 
-    // The prefix is intentionally incomplete, so never persist it as the
-    // pronunciation of the completed lexicon word. Keep the real full pinyin
-    // for later context bookkeeping instead of associating the text with the
-    // typed prefix.
+    // Neither predicted suffixes nor exact-tail joins create user words.
+    // Keep the full spelling only for subsequent context bookkeeping.
     set_pending_commit(completion_text, '', False, '', True, '', False,
         False, '', True);
     if completion_pinyin <> '' then
@@ -141650,6 +141682,7 @@ begin
     m_visible_candidates_cache_page_index := m_page_index;
     m_visible_candidates_cache_page_size := page_size;
     m_visible_candidates_cache_valid := True;
+    m_exact_tail_completion_checked := False;
     if (Length(candidates) = 0) or (m_selected_index < 0) then
         m_selected_index := 0
     else if m_selected_index >= Length(candidates) then
@@ -192364,6 +192397,7 @@ begin
         refresh_validated_prefix_completion;
         m_repaired_completion_query_key := m_local_repair_query_key;
     end;
+    refresh_exact_tail_completion;
     Result := project_validated_prefix_completion(m_one_key_completion);
     if Result.text <> m_one_key_completion.text then
     begin
@@ -192385,7 +192419,7 @@ begin
     request := Default(TncLongNeuralCompletionRequest);
     Result := m_has_long_neural_completion_request and
         ((m_one_key_completion.text = '') or
-        (m_one_key_completion.source = okcs_long_transition)) and
+        (m_one_key_completion.source in [okcs_long_transition, okcs_exact_tail_fallback])) and
         (m_long_neural_completion_request.query_prefix <> '') and
         (m_long_neural_completion_request.query_syllables <> '') and
         (m_long_neural_completion_request.top1_text <> '') and
@@ -192403,7 +192437,9 @@ begin
     // Only overlap an already prepared fallback request. Experimental repaired
     // anchors must wait for visible repair; exact/static hints need no prefetch.
     Result := (TThread.ProcessorCount >= 8) and
-        (m_page_index = 0) and (m_one_key_completion.text = '') and
+        (m_page_index = 0) and
+        ((m_one_key_completion.text = '') or
+        (m_one_key_completion.source = okcs_exact_tail_fallback)) and
         (GetEnvironmentVariable('CASSOTIS_TAB_REPAIRED_PREFIX') <> '1') and
         (GetEnvironmentVariable('CASSOTIS_TAB_REPAIRED_PREFIX') <> 'carry') and
         get_long_neural_completion_request(request);
@@ -192512,7 +192548,7 @@ begin
     Result := False;
     if (m_dictionary = nil) or
         ((m_one_key_completion.text <> '') and
-        (m_one_key_completion.source <> okcs_long_transition)) or
+        (not (m_one_key_completion.source in [okcs_long_transition, okcs_exact_tail_fallback]))) or
         (not m_has_long_neural_completion_request) or
         (not same_request(request, m_long_neural_completion_request)) or
         (m_long_neural_completion_prefix_locked and
