@@ -176,7 +176,7 @@ type
             out shortcut_config: TncShortcutConfig): Boolean;
         function get_dictionary_variant(const session_id: string; out dictionary_variant: TncDictionaryVariant): Boolean;
         function set_state(const session_id: string; const input_mode: TncInputMode; const full_width_mode: Boolean;
-            const punctuation_full_width: Boolean): Boolean;
+            const punctuation_full_width: Boolean; const state_source: string = ''): Boolean;
         function set_dictionary_variant(const session_id: string; const dictionary_variant: TncDictionaryVariant): Boolean;
         function get_active(out active: Boolean): Boolean;
         function set_active(const session_id: string; const active: Boolean): Boolean;
@@ -1525,6 +1525,12 @@ begin
     end;
     m_lock.Acquire;
     try
+        if (m_config.punctuation_full_width <> next_config.punctuation_full_width) and
+            host_log_enabled_for(ll_debug) then
+            host_log_debug(Format(
+                'punctuation_change source=config_reload previous=%d current=%d mode=%d shortcut_disabled=%d',
+                [Ord(m_config.punctuation_full_width), Ord(next_config.punctuation_full_width),
+                Ord(next_config.input_mode), Ord(next_config.shortcuts.punctuation_toggle.disabled)]));
         m_config := next_config;
         for session in m_sessions.Values do
         begin
@@ -2894,7 +2900,7 @@ begin
 end;
 
 function TncEngineHost.set_state(const session_id: string; const input_mode: TncInputMode; const full_width_mode: Boolean;
-    const punctuation_full_width: Boolean): Boolean;
+    const punctuation_full_width: Boolean; const state_source: string): Boolean;
 var
     session: TncHostSession;
     iter_session: TncHostSession;
@@ -2940,6 +2946,13 @@ begin
                 (m_config.punctuation_full_width <> punctuation_full_width);
             if global_state_changed then
             begin
+                if (m_config.punctuation_full_width <> punctuation_full_width) and
+                    host_log_enabled_for(ll_debug) then
+                    host_log_debug(Format(
+                        'punctuation_change session=%s source=%s previous=%d current=%d mode=%d shortcut_disabled=%d',
+                        [session_id, state_source, Ord(m_config.punctuation_full_width),
+                        Ord(punctuation_full_width), Ord(input_mode),
+                        Ord(m_config.shortcuts.punctuation_toggle.disabled)]));
                 m_config.input_mode := input_mode;
                 m_config.full_width_mode := full_width_mode;
                 m_config.punctuation_full_width := punctuation_full_width;
@@ -4013,7 +4026,8 @@ begin
                     [session_id, Ord(input_mode), Ord(full_width_mode),
                     Ord(punctuation_full_width), state_source]));
             end;
-            if m_host.set_state(session_id, input_mode, full_width_mode, punctuation_full_width) then
+            if m_host.set_state(session_id, input_mode, full_width_mode,
+                punctuation_full_width, state_source) then
             begin
                 Result := 'OK';
             end

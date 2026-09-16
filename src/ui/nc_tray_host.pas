@@ -2422,7 +2422,7 @@ begin
     end;
 
     Result := m_ipc_client.set_state(m_session_id, m_engine_config.input_mode, m_engine_config.full_width_mode,
-        m_engine_config.punctuation_full_width);
+        m_engine_config.punctuation_full_width, 'tray_ui');
 end;
 
 function TncTrayHost.reload_host_config: Boolean;

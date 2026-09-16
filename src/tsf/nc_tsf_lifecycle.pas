@@ -117,6 +117,17 @@ function nc_tsf_resolve_punctuation_full_width(
     const next_input_mode: TncInputMode;
     const previous_punctuation_full_width: Boolean;
     const has_conversion: Boolean;
+    const conversion_value: DWORD;
+    const change_source: TncTsfCompartmentChangeSource = tccs_conversion;
+    const shortcut_enabled: Boolean = True): Boolean;
+procedure nc_tsf_resolve_conversion_preferences(
+    const previous_input_mode, next_input_mode: TncInputMode;
+    const change_source: TncTsfCompartmentChangeSource;
+    const has_conversion: Boolean; const conversion_value: DWORD;
+    const shortcuts: TncShortcutConfig;
+    var full_width, punctuation_full_width: Boolean);
+function nc_tsf_conversion_preferences_match(
+    const input_mode: TncInputMode; const full_width, punctuation_full_width: Boolean;
     const conversion_value: DWORD): Boolean;
 function nc_tsf_resolve_input_mode(
     const previous_input_mode: TncInputMode;
@@ -542,28 +553,59 @@ begin
 
 end;
 
+function can_read_conversion_preference(
+    const previous_input_mode, next_input_mode: TncInputMode;
+    const change_source: TncTsfCompartmentChangeSource;
+    const has_conversion: Boolean; const conversion_value: DWORD;
+    const shortcut_enabled: Boolean): Boolean;
+begin
+    // Open/close notifications carry a possibly stale conversion snapshot, not
+    // a punctuation/full-width choice. English/reset values are not choices either.
+    Result := shortcut_enabled and has_conversion and
+        (change_source = tccs_conversion) and
+        (previous_input_mode = im_chinese) and (next_input_mode = im_chinese) and
+        ((conversion_value and TF_CONVERSIONMODE_NATIVE) <> 0);
+end;
+
 function nc_tsf_resolve_punctuation_full_width(
     const previous_input_mode: TncInputMode;
     const next_input_mode: TncInputMode;
     const previous_punctuation_full_width: Boolean;
     const has_conversion: Boolean;
-    const conversion_value: DWORD): Boolean;
+    const conversion_value: DWORD;
+    const change_source: TncTsfCompartmentChangeSource;
+    const shortcut_enabled: Boolean): Boolean;
 begin
     Result := previous_punctuation_full_width;
-    if not has_conversion then
-    begin
-        Exit;
-    end;
-
-    // English mode intentionally clears TF_CONVERSIONMODE_SYMBOL. During an
-    // external English-to-Chinese transition, open/close and conversion can be
-    // reported separately, so the old English value must not erase the saved
-    // Chinese punctuation preference.
-    if (previous_input_mode <> im_english) and
-        (next_input_mode <> im_english) then
-    begin
+    if can_read_conversion_preference(previous_input_mode, next_input_mode,
+        change_source, has_conversion, conversion_value, shortcut_enabled) then
         Result := (conversion_value and TF_CONVERSIONMODE_SYMBOL) <> 0;
-    end;
+end;
+
+procedure nc_tsf_resolve_conversion_preferences(
+    const previous_input_mode, next_input_mode: TncInputMode;
+    const change_source: TncTsfCompartmentChangeSource;
+    const has_conversion: Boolean; const conversion_value: DWORD;
+    const shortcuts: TncShortcutConfig;
+    var full_width, punctuation_full_width: Boolean);
+begin
+    punctuation_full_width := nc_tsf_resolve_punctuation_full_width(
+        previous_input_mode, next_input_mode, punctuation_full_width,
+        has_conversion, conversion_value, change_source,
+        not shortcuts.punctuation_toggle.disabled);
+    if can_read_conversion_preference(previous_input_mode, next_input_mode,
+        change_source, has_conversion, conversion_value,
+        not shortcuts.full_width_toggle.disabled) then
+        full_width := (conversion_value and TF_CONVERSIONMODE_FULLSHAPE) <> 0;
+end;
+
+function nc_tsf_conversion_preferences_match(
+    const input_mode: TncInputMode; const full_width, punctuation_full_width: Boolean;
+    const conversion_value: DWORD): Boolean;
+begin
+    Result := (((conversion_value and TF_CONVERSIONMODE_FULLSHAPE) <> 0) = full_width) and
+        (((conversion_value and TF_CONVERSIONMODE_SYMBOL) <> 0) =
+        ((input_mode = im_chinese) and punctuation_full_width));
 end;
 
 end.

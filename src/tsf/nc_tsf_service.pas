@@ -1620,6 +1620,12 @@ var
     conversion_written: Boolean;
     open_status, conversion_status: HRESULT;
 begin
+    if (punctuation_full_width <> m_last_punctuation_full_width) and
+        (m_logger <> nil) and (m_logger.level <= ll_debug) then
+        m_logger.debug(Format(
+            'Engine punctuation observed session=%s previous=%d current=%d mode=%d pid=%d tid=%d',
+            [m_session_id, Ord(m_last_punctuation_full_width), Ord(punctuation_full_width),
+            Ord(input_mode), GetCurrentProcessId, GetCurrentThreadId]));
     if (m_compartment_deferred <> nil) and m_compartment_deferred.notifying then
     begin
         // TSF forbids SetValue during OnChange (E_UNEXPECTED). A process-local
@@ -1851,7 +1857,7 @@ begin
     if (path_length > 0) and (path_length < DWORD(Length(buffer))) then
         SetString(module_path, buffer, path_length);
     m_logger.info(Format(
-        'TSF identity code=host-startup-20260909 pid=%d tid=%d process=%s module=%s file_version=%s shortcut=%s disabled=%d',
+        'TSF identity code=host-startup-20260909 pid=%d tid=%d process=%s module=%s file_version=%s shortcut=%s disabled=%d preferences_policy=20260916',
         [GetCurrentProcessId, GetCurrentThreadId, ParamStr(0), module_path,
         nc_get_display_version_from_exe_file(module_path),
         nc_shortcut_to_text(m_shortcut_config.input_mode_toggle),
@@ -3243,6 +3249,7 @@ var
     got_state_from_host: Boolean;
     state_source: string;
 begin
+    if m_shortcut_config.full_width_toggle.disabled then Exit;
     got_state_from_host := False;
     input_mode := m_last_input_mode;
     full_width_mode := m_last_full_width_mode;
@@ -3290,6 +3297,7 @@ var
     got_state_from_host: Boolean;
     state_source: string;
 begin
+    if m_shortcut_config.punctuation_toggle.disabled then Exit;
     got_state_from_host := False;
     input_mode := m_last_input_mode;
     full_width_mode := m_last_full_width_mode;
@@ -4040,6 +4048,7 @@ var
     key_state: TncKeyState;
     ctrl_space_rejected: Boolean;
     guard_unconfigured_mode: Boolean;
+    restore_conversion_preferences: Boolean;
     open_read_status, conversion_read_status: HRESULT;
 begin
     if m_compartment_update_depth > 0 then
@@ -4155,7 +4164,11 @@ begin
         nc_tsf_external_transition_should_settle(external_transition,
             m_external_input_mode_target, proposed_input_mode);
     terminal_compatibility_target := False;
-    host_state_available := False;
+    host_input_mode := previous_input_mode;
+    host_full_width := previous_full_width;
+    host_punctuation_full_width := previous_punctuation_full_width;
+    host_state_available := m_ipc_client.get_state(m_session_id,
+        host_input_mode, host_full_width, host_punctuation_full_width);
     host_state_matches_proposed := False;
     if guard_unconfigured_mode or
         ((not external_transition) and
@@ -4165,12 +4178,6 @@ begin
             current_target_is_terminal_compatibility_host;
         if terminal_compatibility_target or guard_unconfigured_mode then
         begin
-            host_input_mode := previous_input_mode;
-            host_full_width := previous_full_width;
-            host_punctuation_full_width := previous_punctuation_full_width;
-            host_state_available := m_ipc_client.get_state(m_session_id,
-                host_input_mode, host_full_width,
-                host_punctuation_full_width);
             host_state_matches_proposed := host_state_available and
                 (host_input_mode = proposed_input_mode);
         end;
@@ -4194,13 +4201,9 @@ begin
         // state and restore both compartments without forwarding that
         // transition to the host.
         next_input_mode := previous_input_mode;
-        next_full_width := previous_full_width;
-        next_punctuation_full_width := previous_punctuation_full_width;
         if guard_unconfigured_mode and host_state_available then
         begin
             next_input_mode := host_input_mode;
-            next_full_width := host_full_width;
-            next_punctuation_full_width := host_punctuation_full_width;
         end;
     end
     else if guard_unconfigured_mode then
@@ -4211,14 +4214,10 @@ begin
         if host_state_available then
         begin
             next_input_mode := host_input_mode;
-            next_full_width := host_full_width;
-            next_punctuation_full_width := host_punctuation_full_width;
         end
         else
         begin
             next_input_mode := previous_input_mode;
-            next_full_width := previous_full_width;
-            next_punctuation_full_width := previous_punctuation_full_width;
         end;
     end
     else if external_transition then
@@ -4227,23 +4226,28 @@ begin
         // notifications must not undo it or overwrite the saved Chinese
         // punctuation preference with the temporary English conversion bits.
         next_input_mode := m_external_input_mode_target;
-        next_full_width := previous_full_width;
-        next_punctuation_full_width := previous_punctuation_full_width;
     end
     else
     begin
         next_input_mode := proposed_input_mode;
-        next_full_width := previous_full_width;
-        next_punctuation_full_width := nc_tsf_resolve_punctuation_full_width(
-            previous_input_mode, next_input_mode,
-            previous_punctuation_full_width, has_conversion,
-            conversion_value);
-        if has_conversion then
-        begin
-            next_full_width :=
-                (conversion_value and TF_CONVERSIONMODE_FULLSHAPE) <> 0;
-        end;
     end;
+
+    // Other documents and the status UI share the host's preferences. Never
+    // publish this DLL instance's stale punctuation while changing only mode.
+    next_full_width := previous_full_width;
+    next_punctuation_full_width := previous_punctuation_full_width;
+    if host_state_available then
+    begin
+        next_full_width := host_full_width;
+        next_punctuation_full_width := host_punctuation_full_width;
+    end;
+    if not (rejected_transition or guard_unconfigured_mode or external_transition) then
+        nc_tsf_resolve_conversion_preferences(previous_input_mode, next_input_mode,
+            change_source, has_conversion, conversion_value, m_shortcut_config,
+            next_full_width, next_punctuation_full_width);
+    restore_conversion_preferences := (not external_transition) and has_conversion and
+        (not nc_tsf_conversion_preferences_match(next_input_mode, next_full_width,
+            next_punctuation_full_width, conversion_value));
 
     state_changed := (next_input_mode <> previous_input_mode) or
         (next_full_width <> previous_full_width) or
@@ -4271,6 +4275,13 @@ begin
         m_last_input_mode := next_input_mode;
         m_last_full_width_mode := next_full_width;
         m_last_punctuation_full_width := next_punctuation_full_width;
+        if restore_conversion_preferences and
+            (not (rejected_transition or guard_unconfigured_mode)) then
+        begin
+            m_compartment_state_inited := False;
+            apply_engine_state_to_compartments(next_input_mode, next_full_width,
+                next_punctuation_full_width);
+        end;
         if not (rejected_transition or guard_unconfigured_mode) then
         begin
             // Trace-assisted shortcuts are normalized on the next ordinary key.
@@ -4300,7 +4311,8 @@ begin
         m_logger.debug(Format(
             'Compartment change source=%d open=%d/%d conversion=%d/0x%s pending=%d settled=%d rejected=%d ' +
             'terminal=%d host=%d/%d target=%d state=%d/%d/%d changed=%d host_synced=%d compartment_synced=%d ' +
-            'deferred=%d disabled=%d shortcut=%s ctrl=%d ctrl_guard=%d pid=%d tid=%d open_read_hr=0x%s conversion_read_hr=0x%s',
+            'deferred=%d disabled=%d shortcut=%s ctrl=%d ctrl_guard=%d pid=%d tid=%d open_read_hr=0x%s conversion_read_hr=0x%s ' +
+            'previous=%d/%d/%d host_preferences=%d/%d punctuation_disabled=%d full_width_disabled=%d preferences_restore=%d',
             [Ord(change_source), Ord(has_openclose), openclose_value,
             Ord(has_conversion), IntToHex(conversion_value, 8),
             Ord(external_transition), Ord(external_transition_settled),
@@ -4316,7 +4328,11 @@ begin
             nc_shortcut_to_text(m_shortcut_config.input_mode_toggle),
             Ord(key_state.ctrl_down), Ord(ctrl_space_rejected),
             GetCurrentProcessId, GetCurrentThreadId,
-            IntToHex(Cardinal(open_read_status), 8), IntToHex(Cardinal(conversion_read_status), 8)]));
+            IntToHex(Cardinal(open_read_status), 8), IntToHex(Cardinal(conversion_read_status), 8),
+            Ord(previous_input_mode), Ord(previous_full_width), Ord(previous_punctuation_full_width),
+            Ord(host_full_width), Ord(host_punctuation_full_width),
+            Ord(m_shortcut_config.punctuation_toggle.disabled),
+            Ord(m_shortcut_config.full_width_toggle.disabled), Ord(restore_conversion_preferences)]));
     end;
 
     Result := S_OK;

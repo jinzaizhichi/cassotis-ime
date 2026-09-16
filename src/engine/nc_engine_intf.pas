@@ -988,6 +988,10 @@ type
         procedure apply_short_exact_pair_tail_handoff;
         function get_cached_query_latest_choice_text(
             const query_key: string): string;
+        function get_base_exact_choice_weight_bonus(const query_key: string;
+            const candidate_text: string): Integer;
+        function normalize_learned_prefix_exact_scores(const query_key: string;
+            var candidates: TncCandidateList): Boolean;
         procedure clear_session_learning_after_user_removal;
         function build_candidate_identity_key(const candidate_text: string; const comment_text: string): string;
         procedure clear_segment_path_tracking;
@@ -2353,7 +2357,7 @@ begin
                 provider_ok := m_dictionary.get_char_lm_short_context_scores(
                     left_context, texts, scores);
             clsm_span:
-                provider_ok := m_dictionary.get_char_lm_cached_span_scores(
+                provider_ok := nc_get_char_lm_span_scores(m_dictionary,
                     texts, scores);
             clsm_reverse:
                 provider_ok := m_dictionary.get_char_reverse_lm_suffix_scores(
@@ -2421,7 +2425,7 @@ begin
             provider_ok := m_dictionary.get_char_lm_short_context_scores(
                 left_context, missing_texts, missing_scores);
         clsm_span:
-            provider_ok := m_dictionary.get_char_lm_cached_span_scores(
+            provider_ok := nc_get_char_lm_span_scores(m_dictionary,
                 missing_texts, missing_scores);
         clsm_reverse:
             provider_ok := m_dictionary.get_char_reverse_lm_suffix_scores(
@@ -3366,6 +3370,66 @@ begin
     begin
         m_lookup_query_latest_text_cache.AddOrSetValue(cache_key, Result);
     end;
+end;
+
+function TncEngine.get_base_exact_choice_weight_bonus(const query_key: string;
+    const candidate_text: string): Integer;
+const
+    c_min_repeated_choice_evidence = 320;
+begin
+    Result := 0;
+    if (m_dictionary = nil) or (candidate_text = '') or
+        (not is_full_pinyin_key(query_key)) then Exit;
+    Result := m_dictionary.get_query_choice_bonus(query_key, candidate_text);
+    if Result < c_min_repeated_choice_evidence then Result := 0;
+end;
+
+function TncEngine.normalize_learned_prefix_exact_scores(const query_key: string;
+    var candidates: TncCandidateList): Boolean;
+var
+    idx: Integer;
+    learned: Boolean;
+    candidate: TncCandidate;
+begin
+    Result := False;
+    if (m_dictionary = nil) or (Length(candidates) = 0) or
+        (not is_full_pinyin_key(query_key)) then Exit;
+    learned := False;
+    for candidate in candidates do
+        if (candidate.source = cs_rule) and candidate.has_dict_weight and
+            (candidate.comment = '') and
+            (m_dictionary.get_query_choice_bonus(query_key, candidate.text) > 0) then
+        begin
+            learned := True;
+            Break;
+        end;
+    if not learned then Exit;
+
+    // SQLite's retrieval/latest-choice bonuses are not durable word weights.
+    // Use the same bounded, exact-key learning as a standalone short query.
+    // Copy before sorting: other paths still own the original lookup cache.
+    candidates := Copy(candidates);
+    for idx := 0 to High(candidates) do
+        if (candidates[idx].source = cs_rule) and
+            candidates[idx].has_dict_weight and (candidates[idx].comment = '') then
+            candidates[idx].score := candidates[idx].dict_weight +
+                get_base_exact_choice_weight_bonus(query_key, candidates[idx].text);
+    TArray.Sort<TncCandidate>(candidates, TComparer<TncCandidate>.Construct(
+        function(const left, right: TncCandidate): Integer
+        begin
+            if (left.source = cs_user) <> (right.source = cs_user) then
+            begin
+                if left.source = cs_user then Exit(-1);
+                Exit(1);
+            end;
+            if left.score <> right.score then
+            begin
+                if left.score > right.score then Exit(-1);
+                Exit(1);
+            end;
+            Result := CompareStr(left.text, right.text);
+        end));
+    Result := True;
 end;
 
 procedure TncEngine.clear_session_learning_after_user_removal;
@@ -31091,6 +31155,30 @@ var
         candidate_text_local: string;
         candidate_units_local: Integer;
         candidate_weight_local: Integer;
+
+        function is_normalized_learned_exact_prefix_local(
+            const candidate_value: TncCandidate): Boolean;
+        var
+            full_key, tail_key, head_key: string;
+            exact_results: TncCandidateList;
+            exact_candidate: TncCandidate;
+        begin
+            Result := False;
+            if (candidate_value.source <> cs_rule) or
+                (not candidate_value.has_dict_weight) then Exit;
+            full_key := normalize_pinyin_text(lookup_text);
+            tail_key := normalize_pinyin_text(candidate_value.comment);
+            if (tail_key = '') or (Length(tail_key) >= Length(full_key)) or
+                (Copy(full_key, Length(full_key) - Length(tail_key) + 1,
+                MaxInt) <> tail_key) then Exit;
+            head_key := Copy(full_key, 1, Length(full_key) - Length(tail_key));
+            if (not lookup_exact_full_pinyin_cached_local(head_key, exact_results)) or
+                (not normalize_learned_prefix_exact_scores(head_key, exact_results)) then Exit;
+            for exact_candidate in exact_results do
+                if (exact_candidate.source = cs_rule) and
+                    (exact_candidate.comment = '') and
+                    (exact_candidate.text = candidate_value.text) then Exit(True);
+        end;
     begin
         if Length(candidates) = 0 then
         begin
@@ -31118,7 +31206,11 @@ var
                         candidates[in_idx_local].dict_weight;
                 end;
                 if (candidates[in_idx_local].source <> cs_user) and
-                    (candidate_weight_local < c_min_phrase_prefix_weight) then
+                    (candidate_weight_local < c_min_phrase_prefix_weight) and
+                    // This cutoff historically used retrieval bonuses. A raw
+                    // learned-prefix weight must not erase an admitted exact.
+                    (not is_normalized_learned_exact_prefix_local(
+                    candidates[in_idx_local])) then
                 begin
                     Continue;
                 end;
@@ -88672,6 +88764,7 @@ var
         cached_candidates: TncCandidateList;
         seen: TDictionary<string, Byte>;
         longer_prefix_candidates: TncCandidateList;
+        normalized_learning: Boolean;
 
         function explicit_prefix_lookup_entry_local(
             const text_value: string): Boolean;
@@ -88798,6 +88891,8 @@ var
                         Continue;
                     end;
                 end;
+                normalized_learning := normalize_learned_prefix_exact_scores(
+                    prefix_key, head_results);
                 prefix_lookup_results := head_results;
 
                 if prefix_count = 1 then
@@ -88902,8 +88997,13 @@ var
                     end;
                     Dec(candidate.score, (Length(syllables_local) - prefix_count) *
                         c_prefix_remaining_penalty);
-                    candidate.dict_weight := base_score;
-                    candidate.has_dict_weight := True;
+                    // Keep legacy retrieval features for unlearned groups;
+                    // learned groups carry only the raw weight, not recency.
+                    if (not normalized_learning) or (not candidate.has_dict_weight) then
+                    begin
+                        candidate.dict_weight := base_score;
+                        candidate.has_dict_weight := True;
+                    end;
 
                     SetLength(out_candidates, Length(out_candidates) + 1);
                     out_candidates[High(out_candidates)] := candidate;
@@ -90452,6 +90552,7 @@ var
                     end;
                 if (not tail_is_exact) or
                     (not dictionary_exact_lookup_cached(head_key, heads)) then Continue;
+                normalize_learned_prefix_exact_scores(head_key, heads);
                 for idx := 0 to Min(High(heads), c_four_syllable_prefix_phrase_limit - 1) do
                 begin
                     if accepted_total >= c_prefix_total_limit then Break;
@@ -90568,6 +90669,7 @@ var
                 begin
                     Continue;
                 end;
+                normalize_learned_prefix_exact_scores(prefix_key, head_results);
                 prefix_lookup_results := head_results;
 
                 if prefix_count = 1 then
@@ -90682,6 +90784,7 @@ var
         cached_candidates: TncCandidateList;
         seen: TDictionary<string, Byte>;
         protected_syllables: TncPinyinParseResult;
+        normalized_learning: Boolean;
 
         function tail_is_single_initial_extension_local(
             const value: string): Boolean;
@@ -90765,6 +90868,8 @@ var
                     Continue;
                 end;
 
+                normalized_learning := normalize_learned_prefix_exact_scores(
+                    prefix_key, head_results);
                 for result_idx := 0 to High(head_results) do
                 begin
                     if (accepted_total >= c_prefix_total_limit) or
@@ -90801,8 +90906,11 @@ var
                     candidate.score := candidate_score + c_prefix_base_bonus +
                         candidate_units * c_prefix_unit_bonus -
                         Length(tail_comment) * c_tail_penalty;
-                    candidate.has_dict_weight := True;
-                    candidate.dict_weight := candidate_score;
+                    if (not normalized_learning) or (not candidate.has_dict_weight) then
+                    begin
+                        candidate.has_dict_weight := True;
+                        candidate.dict_weight := candidate_score;
+                    end;
 
                     SetLength(out_candidates, Length(out_candidates) + 1);
                     out_candidates[High(out_candidates)] := candidate;
@@ -161156,26 +161264,9 @@ var
 
         function short_base_exact_dynamic_weight_local(
             const text_value: string): Integer;
-        const
-            c_min_repeated_choice_evidence = 320;
         begin
-            Result := 0;
-            if (text_value = '') or (m_dictionary = nil) or
-                (not is_full_pinyin_key(normalized_pinyin)) then
-            begin
-                Exit;
-            end;
-
-            { The persisted score belongs to this exact pinyin/text pair, so it
-              remains valid even when the engine has left context. Session-only
-              recency, language models and scores learned for another candidate
-              remain excluded. }
-            Result := m_dictionary.get_query_choice_bonus(normalized_pinyin,
+            Result := get_base_exact_choice_weight_bonus(normalized_pinyin,
                 text_value);
-            if Result < c_min_repeated_choice_evidence then
-            begin
-                Result := 0;
-            end;
         end;
 
         function short_exact_effective_weight_local(
@@ -182762,6 +182853,8 @@ var
 
         function partial_prefix_weight_local(
             const candidate_value: TncCandidate): Integer;
+        var
+            prefix_key: string;
         begin
             if candidate_value.has_dict_weight then
             begin
@@ -182770,6 +182863,14 @@ var
             else
             begin
                 Result := candidate_value.score;
+            end;
+            if candidate_value.has_dict_weight and
+                (candidate_value.source = cs_rule) then
+            begin
+                prefix_key := build_display_query_key(0,
+                    get_candidate_text_unit_count(candidate_value.text));
+                Inc(Result, get_base_exact_choice_weight_bonus(prefix_key,
+                    candidate_value.text));
             end;
         end;
 
@@ -187508,6 +187609,8 @@ var
                         Continue;
                     end;
 
+                    normalize_learned_prefix_exact_scores(
+                        direct_prefix_key_local, direct_exact_results_local);
                     direct_found_for_length_local := False;
                     for direct_exact_idx_local := 0 to
                         Min(c_probe_limit - 1,
@@ -187645,6 +187748,8 @@ var
                     Continue;
                 end;
 
+                normalize_learned_prefix_exact_scores(prefix_key_local,
+                    exact_results_local);
                 base_exact_idx_local := exact_text_index_local(
                     Trim(Result[base_idx_local].text));
                 if base_exact_idx_local < 0 then
