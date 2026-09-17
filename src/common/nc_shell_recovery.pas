@@ -15,6 +15,7 @@ type
         function DesktopState: TncDesktopState;
         function OriginalExited: Boolean;
         function Finished: Boolean;
+        function StopAbandonedExplorer: DWORD;
         function StartExplorer: DWORD;
         procedure Pause(const milliseconds: DWORD);
     end;
@@ -26,7 +27,7 @@ type
         m_log_path: string;
     public
         destructor Destroy; override;
-        function Arm: DWORD;
+        function Arm(const expected_shell: TncShellIdentity): DWORD;
         function Verify: DWORD;
         procedure Finish;
         property LogPath: string read m_log_path;
@@ -34,6 +35,10 @@ type
 
 function nc_desktop_state(const caller: TncShellIdentity;
     out shell: TncShellIdentity): TncDesktopState;
+function nc_abandoned_shell_stop_allowed(const original, current, caller: TncShellIdentity;
+    const windows_dir: string; const desktop: TncDesktopState;
+    const handoff_finished, has_visible_windows: Boolean): Boolean;
+function nc_shell_watcher_status(const watcher: THandle): string;
 function nc_monitor_shell_recovery(const monitor: IncShellRecoveryMonitor;
     out detail: string): DWORD;
 function nc_run_shell_recovery(const parent_pid, shell_pid: DWORD;
@@ -56,8 +61,15 @@ type
         function DesktopState: TncDesktopState;
         function OriginalExited: Boolean;
         function Finished: Boolean;
+        function StopAbandonedExplorer: DWORD;
         function StartExplorer: DWORD;
         procedure Pause(const milliseconds: DWORD);
+    end;
+
+    PncVisibleWindowQuery = ^TncVisibleWindowQuery;
+    TncVisibleWindowQuery = record
+        pid: DWORD;
+        found: Boolean;
     end;
 
 function nc_create_process_with_token(token: THandle; logon_flags: DWORD;
@@ -129,42 +141,67 @@ end;
 function nc_monitor_shell_recovery(const monitor: IncShellRecoveryMonitor;
     out detail: string): DWORD;
 const
-    c_lifetime_ms = 45000;
+    c_handoff_timeout_ms = 120000;
+    c_recovery_timeout_ms = 30000;
     c_missing_grace_ms = 2000;
+    c_abandoned_grace_ms = 5000;
     c_retry_ms = 8000;
 var
-    started, missing_since, last_launch, now_ms: UInt64;
-    missing_seen: Boolean;
-    attempts: Integer;
-    last_error: DWORD;
+    started, recovery_started, missing_since, last_launch, now_ms: UInt64;
+    missing_seen, recovery_seen, finished, original_exited: Boolean;
+    attempts, stop_attempts: Integer;
+    last_error, stop_error: DWORD;
     state: TncDesktopState;
 begin
     started := monitor.NowMs;
+    recovery_started := 0;
+    recovery_seen := False;
     missing_since := 0;
     last_launch := 0;
     missing_seen := False;
     attempts := 0;
+    stop_attempts := 0;
     last_error := ERROR_SUCCESS;
+    stop_error := ERROR_SUCCESS;
     repeat
         now_ms := monitor.NowMs;
+        finished := monitor.Finished;
+        original_exited := monitor.OriginalExited;
+        // RM shutdown/restart may itself take longer than the recovery budget.
+        if not recovery_seen and (finished or original_exited) then
+        begin
+            recovery_seen := True;
+            recovery_started := now_ms;
+        end;
         state := monitor.DesktopState;
         if state = ds_ready then
         begin
             missing_seen := False;
-            if monitor.Finished then
+            if finished then
             begin
-                detail := Format('Desktop and taskbar ready; fallback attempts=%d', [attempts]);
+                detail := Format('Desktop and taskbar ready; fallback attempts=%d stop_attempts=%d',
+                    [attempts, stop_attempts]);
                 Exit(ERROR_SUCCESS);
             end;
         end
-        else if (state = ds_missing) and monitor.OriginalExited then
+        else if state = ds_missing then
         begin
             if not missing_seen then
             begin
                 missing_seen := True;
                 missing_since := now_ms;
             end;
-            if (now_ms - missing_since >= c_missing_grace_ms) and (attempts < 2) and
+            // Only recover an abandoned original after RM has returned (or its
+            // caller exited). Never race an in-progress graceful shutdown.
+            if not original_exited and finished and (stop_attempts = 0) and
+                (now_ms - missing_since >= c_abandoned_grace_ms) then
+            begin
+                stop_error := monitor.StopAbandonedExplorer;
+                Inc(stop_attempts);
+                original_exited := monitor.OriginalExited;
+            end;
+            if original_exited and (now_ms - missing_since >= c_missing_grace_ms) and
+                (attempts < 2) and
                 ((attempts = 0) or (now_ms - last_launch >= c_retry_ms)) then
             begin
                 last_error := monitor.StartExplorer;
@@ -174,12 +211,16 @@ begin
         end
         else
             missing_seen := False;
-        if now_ms - started >= c_lifetime_ms then
+        now_ms := monitor.NowMs;
+        if (recovery_seen and (now_ms - recovery_started >= c_recovery_timeout_ms)) or
+            (not recovery_seen and (now_ms - started >= c_handoff_timeout_ms)) then
             Break;
         monitor.Pause(200);
     until False;
-    detail := Format('Recovery deadline; desktop=%d attempts=%d launch_error=%d',
-        [Ord(state), attempts, last_error]);
+    detail := Format('Recovery deadline; desktop=%d attempts=%d launch_error=%d ' +
+        'stop_attempts=%d stop_error=%d original_exited=%d handoff_finished=%d',
+        [Ord(state), attempts, last_error, stop_attempts, stop_error,
+         Ord(monitor.OriginalExited), Ord(monitor.Finished)]);
     if state = ds_ready then
         Result := ERROR_SUCCESS
     else
@@ -209,6 +250,82 @@ begin
         (WaitForSingleObject(done, 0) = WAIT_OBJECT_0);
 end;
 
+function nc_abandoned_shell_stop_allowed(const original, current, caller: TncShellIdentity;
+    const windows_dir: string; const desktop: TncDesktopState;
+    const handoff_finished, has_visible_windows: Boolean): Boolean;
+begin
+    Result := handoff_finished and (desktop = ds_missing) and not has_visible_windows and
+        nc_same_shell_instance(original, current) and
+        (nc_shell_kind(current.image_path, windows_dir) = sk_explorer) and
+        (current.pid <> 0) and (current.pid <> caller.pid) and
+        ((current.created.dwLowDateTime <> 0) or (current.created.dwHighDateTime <> 0)) and
+        (current.session_id <> 0) and (current.session_id = caller.session_id) and
+        (current.owner_sid <> '') and (current.owner_sid = caller.owner_sid) and
+        not current.elevated;
+end;
+
+function find_visible_process_window(window: HWND; parameter: LPARAM): BOOL; stdcall;
+var
+    query: PncVisibleWindowQuery;
+    pid: DWORD;
+begin
+    query := PncVisibleWindowQuery(parameter);
+    pid := 0;
+    GetWindowThreadProcessId(window, @pid);
+    if (pid = query.pid) and IsWindowVisible(window) then
+        query.found := True;
+    Result := not query.found;
+end;
+
+function TncNativeRecoveryMonitor.StopAbandonedExplorer: DWORD;
+var
+    current: TncShellIdentity;
+    query: TncVisibleWindowQuery;
+    windows_dir: array[0..MAX_PATH] of Char;
+    count: UINT;
+begin
+    Result := ERROR_NOT_READY;
+    try
+        if OriginalExited then
+            Exit(ERROR_SUCCESS);
+        if not Finished or not nc_read_shell_identity(shell, current) then
+            Exit;
+        count := GetWindowsDirectory(@windows_dir[0], Length(windows_dir));
+        if (count = 0) or (count >= UINT(Length(windows_dir))) then
+            Exit;
+        query := Default(TncVisibleWindowQuery);
+        query.pid := current.pid;
+        // Do not kill Explorer folders or file-operation dialogs left open.
+        if not EnumWindows(@find_visible_process_window, LPARAM(@query)) and not query.found then
+            Exit;
+        if not nc_abandoned_shell_stop_allowed(original_shell, current, caller,
+            string(windows_dir), DesktopState, Finished, query.found) then
+        begin
+            trace(log_path, Format('Abandoned stop withheld; same_instance=%d visible_windows=%d ' +
+                'desktop=%d handoff_finished=%d', [Ord(nc_same_shell_instance(original_shell, current)),
+                Ord(query.found), Ord(DesktopState), Ord(Finished)]));
+            Exit;
+        end;
+        if OriginalExited then
+            Exit(ERROR_SUCCESS);
+        // This retained handle identifies the verified original, not a new
+        // Explorer that might have reused its PID or already restored the shell.
+        if not TerminateProcess(shell, 0) then
+        begin
+            Result := GetLastError;
+            if OriginalExited then
+                Result := ERROR_SUCCESS;
+            Exit;
+        end;
+        if WaitForSingleObject(shell, 2000) <> WAIT_OBJECT_0 then
+            Exit(ERROR_TIMEOUT);
+        Result := ERROR_SUCCESS;
+    finally
+        trace(log_path, Format('Abandoned original Explorer stop=%d pid=%d exited=%d',
+            [Result, original_shell.pid, Ord(OriginalExited)]));
+    end;
+end;
+
 function TncNativeRecoveryMonitor.StartExplorer: DWORD;
 var
     startup: TStartupInfo;
@@ -216,6 +333,9 @@ var
     command, directory: string;
     launched: BOOL;
 begin
+    // Windows may have restored the desktop since the monitor's last check.
+    if (DesktopState <> ds_missing) or not OriginalExited then
+        Exit(ERROR_NOT_READY);
     FillChar(startup, SizeOf(startup), 0);
     startup.cb := SizeOf(startup);
     startup.lpDesktop := 'winsta0\default';
@@ -301,7 +421,8 @@ begin
         if not nc_read_shell_identity(GetCurrentProcess, caller) then
             Exit(ERROR_ACCESS_DENIED);
         parent := OpenProcess($1000 or SYNCHRONIZE, False, parent_pid);
-        shell := OpenProcess($1000 or SYNCHRONIZE, False, shell_pid);
+        // Obtain recovery rights before allowing the original desktop to close.
+        shell := OpenProcess($1000 or SYNCHRONIZE or PROCESS_TERMINATE, False, shell_pid);
         if (parent = 0) or (shell = 0) then
             Exit(GetLastError);
         if not nc_read_shell_identity(parent, parent_identity) or
@@ -354,7 +475,7 @@ begin
     inherited;
 end;
 
-function TncExplorerRecovery.Arm: DWORD;
+function TncExplorerRecovery.Arm(const expected_shell: TncShellIdentity): DWORD;
 var
     shell: TncShellIdentity;
     id: TGUID;
@@ -364,8 +485,10 @@ var
     handles: array[0..1] of THandle;
     wait_result: DWORD;
 begin
-    if not nc_read_shell_identity(GetCurrentProcess, m_caller) or
-        (nc_desktop_state(m_caller, shell) <> ds_ready) then
+    if (expected_shell.pid = 0) or
+        not nc_read_shell_identity(GetCurrentProcess, m_caller) or
+        (nc_desktop_state(m_caller, shell) <> ds_ready) or
+        not nc_same_shell_instance(expected_shell, shell) then
         Exit(ERROR_NOT_READY);
     CreateGUID(id);
     ready_name := 'Local\CassotisIme.ShellRecovery.' + GUIDToString(id) + '.ready';
@@ -406,6 +529,14 @@ var
     shell: TncShellIdentity;
     started: UInt64;
 begin
+    // Both RM calls have returned. The watcher may now recover a verified
+    // original that lost its desktop windows without finishing process exit.
+    if (m_done = 0) or not SetEvent(m_done) then
+    begin
+        trace(m_log_path, 'Cannot notify recovery watcher that shell handoff completed');
+        Exit(ERROR_NOT_READY);
+    end;
+    trace(m_log_path, 'Shell handoff completed; verifying desktop recovery');
     started := GetTickCount64;
     repeat
         if nc_desktop_state(m_caller, shell) = ds_ready then
@@ -414,9 +545,27 @@ begin
             Exit(ERROR_SUCCESS);
         end;
         Sleep(200);
-    until GetTickCount64 - started >= 15000;
-    trace(m_log_path, 'Desktop verification timed out; recovery watcher remains active');
+    until GetTickCount64 - started >= 30000;
+    trace(m_log_path, 'Desktop verification timed out; recovery watcher ' +
+        nc_shell_watcher_status(m_watcher));
     Result := ERROR_TIMEOUT;
+end;
+
+function nc_shell_watcher_status(const watcher: THandle): string;
+var
+    wait_result, exit_code: DWORD;
+begin
+    if watcher = 0 then
+        Exit('not started');
+    wait_result := WaitForSingleObject(watcher, 0);
+    if wait_result = WAIT_TIMEOUT then
+        Exit('running');
+    if wait_result = WAIT_OBJECT_0 then
+    begin
+        if GetExitCodeProcess(watcher, exit_code) then
+            Exit(Format('exited, code=%d', [exit_code]));
+    end;
+    Result := Format('state unavailable, error=%d', [GetLastError]);
 end;
 
 procedure TncExplorerRecovery.Finish;

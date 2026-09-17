@@ -289,7 +289,7 @@ end;
 function TncNativeShellBackend.ArmExplorerRecovery: DWORD;
 begin
     m_recovery := TncExplorerRecovery.Create;
-    Result := m_recovery.Arm;
+    Result := m_recovery.Arm(m_identity);
 end;
 
 function TncNativeShellBackend.RestartExplorer: DWORD;
