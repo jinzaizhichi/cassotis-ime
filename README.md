@@ -142,6 +142,7 @@ Corpus: 16,300 eligible Chinese sentences from the developer's own novel [**Eleg
 
 | Version | Top1 | Top2 | Mean (ms) | P50 (ms) | P95 (ms) | Max (ms) |
 |---|---:|---:|---:|---:|---:|---:|
+| `v1.27.0` | 11978/16300 (73.48%) | 12955/16300 (79.48%) | 63.08 | 62 | 109 | 468 |
 | `v1.26.0` | 11974/16300 (73.46%) | 12947/16300 (79.43%) | 62.83 | 62 | 109 | 453 |
 | `v1.25.0` | 11698/16300 (71.77%) | 12830/16300 (78.71%) | 57.49 | 47 | 94 | 438 |
 | `v1.24.0`<br/>`v1.23.0` | 11679/16300 (71.65%) | 12813/16300 (78.61%) | 57.09 | 47 | 94 | 438 |
@@ -188,7 +189,7 @@ See [BENCHMARK.md](BENCHMARK.md) for the shared corpus source, short-word case c
 
 | Version | Top1 | Top2 | Contested Top1 | Contested Top2 | Mean (ms) | P50 (ms) | P95 (ms) | Max (ms) |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|
-| `v1.26.0` | 61860/65000 (95.17%) | 63549/65000 (97.77%) | 9596/11728 (81.82%) | 10775/11728 (91.87%) | 4.474 | 3.908 | 9.310 | 35.645 |
+| `v1.27.0`<br/>`v1.26.0` | 61860/65000 (95.17%) | 63549/65000 (97.77%) | 9596/11728 (81.82%) | 10775/11728 (91.87%) | 4.474 | 3.908 | 9.310 | 35.645 |
 | `v1.25.0` | 61859/65000 (95.17%) | 63549/65000 (97.77%) | 9596/11728 (81.82%) | 10775/11728 (91.87%) | 4.705 | 4.103 | 9.817 | 40.027 |
 | `v1.24.0`<br/>`v1.23.0`<br/>`v1.22.0`<br/>`v1.21.1`<br/>`v1.20.0`<br/>`v1.19.0`<br/>`v1.18.0` | 61827/65000 (95.12%) | 63517/65000 (97.72%) | 9596/11728 (81.82%) | 10775/11728 (91.87%) | 4.584 | 3.985 | 9.653 | 39.36 |
 | `v1.17.0`<br>`v1.16.0`<br>`v1.15.0` | 61827/65000 (95.12%) | 63516/65000 (97.72%) | 9596/11728 (81.82%) | 10775/11728 (91.87%) | 3.817 | 3.239 | 8.376 | 39.881 |
@@ -216,7 +217,7 @@ Public results retain four columns only: `Completion Hit`, `Avg Keys Saved`, `St
 
 | Version | Completion Hit | Avg Keys Saved | Stability | P95 (ms) |
 | --- | --- | --- | --- | --- |
-| `v1.26.0`<br/>`v1.25.0`<br/>`v1.24.0`<br/>`v1.23.0`<br/>`v1.22.0`<br/>`v1.21.1`<br/>`v1.20.0`<br/>`v1.19.0`<br/>`v1.18.0` | 9419/12831 (73.41%) | 2.549 | 1691/1749 (96.68%) | 2.026 |
+| `v1.27.0`<br/>`v1.26.0`<br/>`v1.25.0`<br/>`v1.24.0`<br/>`v1.23.0`<br/>`v1.22.0`<br/>`v1.21.1`<br/>`v1.20.0`<br/>`v1.19.0`<br/>`v1.18.0` | 9419/12831 (73.41%) | 2.549 | 1691/1749 (96.68%) | 2.026 |
 | `v1.17.0` | 9273/12831 (72.27%) | 2.554 | 1652/1718 (96.16%) | 1.880 |
 | `v1.16.0` | 8752/12831 (68.21%) | 2.570 | 1649/1676 (98.39%) | 1.509 |
 | `v1.15.0` | 7265/12831 (56.62%) | 2.542 | 1278/1323 (96.60%) | 0.777 |
@@ -226,8 +227,9 @@ This benchmark leaves the final four complete Pinyin syllables untyped and evalu
 
 ### Current local-continuation protocol
 
-| Version | Local Completion Hit | Prompt Coverage | Total Keys Saved | P95 (ms) |
+| Version | Local Completion Hit | Predictive Prompt Coverage | Total Keys Saved | P95 (ms) |
 | --- | --- | --- | --- | --- |
+| `v1.27.0` | 425/16300 (2.61%) | 6769/16300 (41.53%) | 987 | 80.099 |
 | `v1.26.0` | 410/16300 (2.52%) | 6488/16300 (39.80%) | 967 | 80.437 |
 | `v1.25.0` | 409/16300 (2.51%) | 6489/16300 (39.81%) | 959 | 74.936 |
 | `v1.24.0`<br/>`v1.23.0`<br/>`v1.22.0` | 407/16300 (2.50%) | 6474/16300 (39.72%) | 953 | 77.103 |
@@ -235,7 +237,7 @@ This benchmark leaves the final four complete Pinyin syllables untyped and evalu
 | `v1.19.0` | 202/16300 (1.24%) | 3834/16300 (23.52%) | 571 | 92.453 |
 | `v1.18.0` | 143/16300 (0.88%) | 3957/16300 (24.28%) | 478 | 109.060 |
 
-`Prompt Coverage` counts opportunities where any completion was displayed. `Total Keys Saved` sums the net keys saved by correct local-continuation hits after charging one key for accepting each completion. Per-hit averages and incremental stability remain available in detailed diagnostic reports rather than the public comparison table.
+`Predictive Prompt Coverage` counts opportunities where a predictive completion was displayed; exact-word joins that only convert already typed Pinyin are excluded. `Total Keys Saved` sums the net keys saved by correct local-continuation hits after charging one key for accepting each completion. Per-hit averages and incremental stability remain available in detailed diagnostic reports rather than the public comparison table.
 
 ### Historical whole-sentence protocol
 

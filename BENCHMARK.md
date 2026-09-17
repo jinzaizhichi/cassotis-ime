@@ -128,7 +128,7 @@ This benchmark measures whether one-key completion can extend a partially decode
 The public report uses four metrics suited to direct cross-version comparison under the current protocol:
 
 - `Local Completion Hit`: correct local continuations divided by all 16,300 opportunities.
-- `Prompt Coverage`: opportunities where any completion was displayed, divided by all opportunities.
+- `Predictive Prompt Coverage`: opportunities where a predictive completion was displayed, divided by all opportunities. Exact-word joins that only convert already typed Pinyin are excluded from prediction coverage and prediction misses.
 - `Total Keys Saved`: net keys saved across all correct local-continuation hits after charging one key for each acceptance.
 - `P95`: 95% of visible completion queries finish within this many milliseconds.
 
