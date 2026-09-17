@@ -84,6 +84,7 @@ type
         m_last_caret_line_height: Integer;
         m_last_ipc_error: DWORD;
         m_pending_caret_update: Boolean;
+        m_pending_canvas_caret: Boolean;
         m_session_dirty: Boolean;
         // Host caret coordinates are also stored in physical screen coordinates.
         m_last_sent_caret_point: TPoint;
@@ -150,6 +151,7 @@ type
         procedure mark_session_dirty;
         procedure reset_session_if_needed(const force: Boolean = False);
         procedure invalidate_sent_caret;
+        procedure refresh_pending_canvas_caret;
         procedure start_active_state_worker;
         procedure stop_active_state_worker;
         procedure queue_active_state_update(const active: Boolean);
@@ -278,7 +280,8 @@ type
 implementation
 
 uses
-    nc_version_info, nc_profile_icon, nc_tsf_config_actions;
+    nc_version_info, nc_profile_icon, nc_tsf_config_actions,
+    nc_imm_caret_query;
 
 procedure signal_tray_profile_event(const active: Boolean); forward;
 procedure log_tsf_boundary_exception(const operation: string); forward;
@@ -933,6 +936,7 @@ begin
     m_last_ipc_error := 0;
     m_pending_caret_update := False;
     m_session_dirty := False;
+    m_pending_canvas_caret := False;
     m_last_sent_caret_point := Point(0, 0);
     m_last_sent_has_caret := False;
     m_last_sent_caret_valid := False;
@@ -1146,11 +1150,38 @@ end;
 
 procedure TncTextService.invalidate_sent_caret;
 begin
+    m_pending_canvas_caret := False;
     m_last_sent_caret_point := Point(0, 0);
     m_last_sent_has_caret := False;
     m_last_sent_caret_valid := False;
     m_last_sent_caret_line_height := 0;
     m_last_sent_caret_tick := 0;
+end;
+
+procedure TncTextService.refresh_pending_canvas_caret;
+var
+    point: TPoint;
+    line_height: Integer;
+    terminal_like: Boolean;
+    source: TncCaretAnchorSource;
+    score: Integer;
+begin
+    if not m_pending_canvas_caret then
+        Exit;
+    m_pending_canvas_caret := False;
+    if (m_composition = nil) or (m_ipc_client = nil) or (m_session_id = '') then
+        Exit;
+    // A key-up/trace callback runs after the application has handled the
+    // composition update. Retry once without eating keys or pumping messages.
+    if get_candidate_point(point, line_height, terminal_like, source, score) and
+        (source in [casTsf, casGui, casCaretPos, casImm]) then
+    begin
+        push_caret_to_host(point, True, line_height, terminal_like, source, score);
+        m_pending_caret_update := False;
+        if (m_logger <> nil) and (m_logger.level <= ll_debug) then
+            m_logger.debug(Format('Canvas caret refreshed on key-up source=%s point=(%d,%d)',
+                [anchor_source_name(source), point.X, point.Y]));
+    end;
 end;
 
 procedure TncTextService.reset_session_if_needed(const force: Boolean);
@@ -2397,6 +2428,10 @@ begin
                 end
                 else if display_text <> '' then
                 begin
+                    if not had_existing_composition then
+                    begin
+                        invalidate_sent_caret;
+                    end;
                     composition_start_tick := GetTickCount64;
                     if update_composition(context, display_text) then
                     begin
@@ -2407,14 +2442,14 @@ begin
                         begin
                             candidate_point_elapsed_ms := Int64(GetTickCount64 - candidate_point_start_tick);
                             caret_push_start_tick := GetTickCount64;
-                            push_caret_to_host(point, m_has_caret_point, placement_line_height,
+                            push_caret_to_host(point, True, placement_line_height,
                                 terminal_like_target, chosen_source, chosen_score, not had_existing_composition);
                             caret_push_elapsed_ms := Int64(GetTickCount64 - caret_push_start_tick);
                             m_pending_caret_update := False;
                             if (m_logger <> nil) and (m_logger.level <= ll_debug) then
                             begin
-                                m_logger.debug(Format('Caret point set x=%d y=%d has=%d',
-                                    [point.X, point.Y, Ord(m_has_caret_point)]));
+                                m_logger.debug(Format('Caret point set x=%d y=%d has=1',
+                                    [point.X, point.Y]));
                             end;
                         end
                         else
@@ -2561,6 +2596,7 @@ begin
         Exit;
     end;
 
+    refresh_pending_canvas_caret;
     Result := S_OK;
 end;
 
@@ -3715,6 +3751,7 @@ begin
             m_chord_shortcut_tick := 0;
             m_chord_shortcut_source := tses_key_sink;
         end;
+        refresh_pending_canvas_caret;
     except
         log_tsf_boundary_exception('KeyTraceEventSink.OnKeyTraceUp');
     end;
@@ -3728,6 +3765,7 @@ begin
         m_composition_context := nil;
         m_has_caret_point := False;
         m_pending_caret_update := False;
+        m_pending_canvas_caret := False;
         mark_session_dirty;
         reset_session_if_needed(False);
     except
@@ -3751,16 +3789,12 @@ var
 begin
     Result := S_OK;
     try
-        if m_pending_caret_update and m_has_caret_point and (m_ipc_client <> nil) and (m_session_id <> '') then
+        if m_pending_caret_update and (m_ipc_client <> nil) and (m_session_id <> '') then
         begin
             if not get_candidate_point(point, placement_line_height, terminal_like_target, chosen_source,
                 chosen_score) then
             begin
-                point := m_last_caret_point;
-                placement_line_height := m_last_caret_line_height;
-                terminal_like_target := False;
-                chosen_source := casLastSent;
-                chosen_score := -160;
+                Exit;
             end;
             push_caret_to_host(point, True, placement_line_height, terminal_like_target, chosen_source, chosen_score);
             m_pending_caret_update := False;
@@ -4001,7 +4035,7 @@ begin
     end;
     if get_candidate_point(point, placement_line_height, terminal_like_target, chosen_source, chosen_score) then
     begin
-        push_caret_to_host(point, m_has_caret_point, placement_line_height, terminal_like_target, chosen_source,
+        push_caret_to_host(point, True, placement_line_height, terminal_like_target, chosen_source,
             chosen_score);
     end;
 end;
@@ -4706,6 +4740,7 @@ var
     virtual_bottom: Integer;
     gui_info: TncGuiThreadInfo;
     gui_thread_id: DWORD;
+    gui_caret_hwnd: Winapi.Windows.HWND;
     foreground_rect: TRect;
     has_foreground_rect: Boolean;
     context_rect: TRect;
@@ -4729,6 +4764,10 @@ var
     gui_caret_pair: Boolean;
     gui_far_from_tsf: Boolean;
     comless_target: Boolean;
+    photoshop_canvas_target: Boolean;
+    probe_imm: Boolean;
+    suspicion_rect: TRect;
+    has_suspicion_rect: Boolean;
     imm_line_height: Integer;
     imm_anchor_hwnd: Winapi.Windows.HWND;
     imm_anchor_kind: string;
@@ -4952,14 +4991,8 @@ var
         var
             screen_point: TPoint;
         begin
-            // A zero point is the default IMM position and reproduces the
-            // upper-left placement bug rather than describing a real caret.
-            if (local_point.X = 0) and (local_point.Y = 0) then
-            begin
-                Exit;
-            end;
-            if comless_target and anchor_looks_like_window_bottom_right(
-                local_point, client_rect, has_client_rect) then
+            if imm_anchor_is_placeholder(local_point, client_rect,
+                has_client_rect, comless_target) then
             begin
                 Exit;
             end;
@@ -5014,12 +5047,24 @@ var
         input_context := ImmGetContext(source_hwnd);
         if input_context = 0 then
         begin
+            if caret_debug_logging then
+            begin
+                m_logger.debug(Format('IMM probe hwnd=%d context=none', [source_hwnd]));
+            end;
             Exit;
         end;
         try
             FillChar(composition_form, SizeOf(composition_form), 0);
             if ImmGetCompositionWindow(input_context, @composition_form) then
             begin
+                if caret_debug_logging then
+                begin
+                    m_logger.debug(Format('IMM composition hwnd=%d style=%d point=(%d,%d) area=(%d,%d,%d,%d)',
+                        [source_hwnd, composition_form.dwStyle,
+                        composition_form.ptCurrentPos.X, composition_form.ptCurrentPos.Y,
+                        composition_form.rcArea.Left, composition_form.rcArea.Top,
+                        composition_form.rcArea.Right, composition_form.rcArea.Bottom]));
+                end;
                 case composition_form.dwStyle of
                     CFS_FORCE_POSITION:
                         consider_local_anchor(composition_form.ptCurrentPos,
@@ -5048,18 +5093,23 @@ var
                 begin
                     Continue;
                 end;
+                if caret_debug_logging then
+                begin
+                    m_logger.debug(Format('IMM candidate hwnd=%d index=%d style=%d point=(%d,%d) area=(%d,%d,%d,%d)',
+                        [source_hwnd, candidate_index, candidate_form.dwStyle,
+                        candidate_form.ptCurrentPos.X, candidate_form.ptCurrentPos.Y,
+                        candidate_form.rcArea.Left, candidate_form.rcArea.Top,
+                        candidate_form.rcArea.Right, candidate_form.rcArea.Bottom]));
+                end;
                 case candidate_form.dwStyle of
                     CFS_EXCLUDE:
                         begin
                             consider_local_anchor(candidate_form.ptCurrentPos,
                                 rect_line_height(candidate_form.rcArea),
                                 460, 'candidate-exclude');
-                            if (((candidate_form.ptCurrentPos.X = 0) and
-                                (candidate_form.ptCurrentPos.Y = 0)) or
-                                (comless_target and
-                                anchor_looks_like_window_bottom_right(
+                            if imm_anchor_is_placeholder(
                                 candidate_form.ptCurrentPos, client_rect,
-                                has_client_rect))) and
+                                has_client_rect, comless_target) and
                                 rect_has_area(candidate_form.rcArea) then
                             begin
                                 consider_local_anchor(System.Types.Point(
@@ -5092,14 +5142,80 @@ var
         end;
     end;
 
+    function try_get_canvas_character_point(out candidate: TPoint;
+        out candidate_line_height: Integer): Boolean;
+    var
+        position: TncImeCharPosition;
+        query_result: TncImeCharPositionResult;
+        caret_rect: TRect;
+        document_serial: UInt64;
+    begin
+        Result := False;
+        candidate := System.Types.Point(0, 0);
+        candidate_line_height := 0;
+        // Photoshop's canvas may expose neither a TSF text rectangle nor a
+        // Win32 caret, but implements IMR_QUERYCHARPOSITION for its text tool.
+        // Keep this compatibility fallback out of standard edits and games.
+        if not photoshop_canvas_target or (m_composition = nil) then
+        begin
+            Exit;
+        end;
+        document_serial := m_document_context_serial;
+        query_result := query_ime_char_position(hwnd, position,
+            icpp_photoshop_canvas);
+        if caret_debug_logging then
+        begin
+            m_logger.debug(Format(
+                'IMM char-position hwnd=%d result=%s point=(%d,%d) line=%d document=(%d,%d,%d,%d)',
+                [hwnd, ime_char_position_result_name(query_result),
+                position.point.X, position.point.Y, position.line_height,
+                position.document_rect.Left, position.document_rect.Top,
+                position.document_rect.Right, position.document_rect.Bottom]));
+        end;
+        if (m_composition = nil) or
+            (document_serial <> m_document_context_serial) or
+            (GetFocus <> hwnd) or (GetForegroundWindow <> foreground_hwnd) then
+        begin
+            Exit;
+        end;
+        if not (query_result in [icpr_success, icpr_success_compat]) then
+        begin
+            m_pending_canvas_caret := query_result in [icpr_unsupported, icpr_invalid];
+            Exit;
+        end;
+        if not ime_char_position_rect(position, caret_rect,
+            icpp_photoshop_canvas) then
+            Exit;
+        // This API already returns screen coordinates, unlike CANDIDATEFORM.
+        // Normalize DPI once; do not apply ClientToScreen a second time.
+        try_normalize_screen_rect_for_hwnd(hwnd, caret_rect);
+        candidate := System.Types.Point(caret_rect.Left, caret_rect.Bottom);
+        candidate_line_height := caret_rect.Bottom - caret_rect.Top;
+        Result := point_in_virtual_screen(candidate) and
+            point_in_foreground(candidate);
+    end;
+
     function try_get_gui_caret_point(const thread_id: DWORD; out candidate: TPoint): Boolean;
     var
         caret_hwnd: Winapi.Windows.HWND;
     begin
         candidate := System.Types.Point(0, 0);
+        gui_caret_hwnd := 0;
         FillChar(gui_info, SizeOf(gui_info), 0);
         gui_info.cbSize := SizeOf(gui_info);
         if not nc_get_gui_thread_info(thread_id, gui_info) then
+        begin
+            Result := False;
+            Exit;
+        end;
+        if caret_debug_logging then
+        begin
+            m_logger.debug(Format('GUI caret raw thread=%d hwnd=%d focus=%d rect=(%d,%d,%d,%d)',
+                [thread_id, gui_info.hwndCaret, gui_info.hwndFocus,
+                gui_info.rcCaret.Left, gui_info.rcCaret.Top,
+                gui_info.rcCaret.Right, gui_info.rcCaret.Bottom]));
+        end;
+        if not gui_caret_rect_is_usable(gui_info.rcCaret) then
         begin
             Result := False;
             Exit;
@@ -5116,6 +5232,7 @@ var
             Result := False;
             Exit;
         end;
+        gui_caret_hwnd := caret_hwnd;
 
         candidate := System.Types.Point(gui_info.rcCaret.Left, gui_info.rcCaret.Bottom);
         // GUITHREADINFO.rcCaret is client-relative to hwndCaret/hwndFocus.
@@ -5149,6 +5266,7 @@ var
     end;
 begin
     point := System.Types.Point(0, 0);
+    m_pending_canvas_caret := False;
     current_tick := GetTickCount64;
     caret_debug_logging := (m_logger <> nil) and (m_logger.level <= ll_debug) and
         ((m_last_caret_debug_tick = 0) or
@@ -5172,6 +5290,7 @@ begin
 
     gui_point_valid := False;
     gui_thread_id := 0;
+    gui_caret_hwnd := 0;
     context_hwnd := 0;
     has_context_rect := False;
     context_rect := System.Types.Rect(0, 0, 0, 0);
@@ -5215,6 +5334,9 @@ begin
 
     context_class_name := get_window_class_name(context_hwnd);
     foreground_class_name := get_window_class_name(foreground_hwnd);
+    photoshop_canvas_target := not comless_target and (hwnd <> 0) and
+        (hwnd = context_hwnd) and SameText(context_class_name, 'PSViewC') and
+        SameText(foreground_class_name, 'Photoshop');
     terminal_like_context := is_terminal_like_class(context_class_name);
     terminal_like_foreground := is_terminal_like_class(foreground_class_name);
     terminal_like_target := terminal_like_context or terminal_like_foreground;
@@ -5282,28 +5404,15 @@ begin
         end;
     end;
     caret_point_valid := False;
-    if GetCaretPos(caret_point) then
+    // GetCaretPos can succeed with a stale point even when no caret exists.
+    // It belongs to the calling thread's caret owner, not necessarily GetFocus.
+    if (gui_caret_hwnd <> 0) and
+        (GetWindowThreadProcessId(gui_caret_hwnd, nil) = GetCurrentThreadId) and
+        GetCaretPos(caret_point) then
     begin
-        if hwnd <> 0 then
+        if not try_client_point_to_screen_physical(gui_caret_hwnd, caret_point) then
         begin
-            if not try_client_point_to_screen_physical(hwnd, caret_point) then
-            begin
-                try_normalize_anchor_point(hwnd, caret_point);
-            end;
-        end
-        else if context_hwnd <> 0 then
-        begin
-            if not try_client_point_to_screen_physical(context_hwnd, caret_point) then
-            begin
-                try_normalize_anchor_point(context_hwnd, caret_point);
-            end;
-        end
-        else if foreground_hwnd <> 0 then
-        begin
-            if not try_client_point_to_screen_physical(foreground_hwnd, caret_point) then
-            begin
-                try_normalize_anchor_point(foreground_hwnd, caret_point);
-            end;
+            try_normalize_anchor_point(gui_caret_hwnd, caret_point);
         end;
         if terminal_like_target then
         begin
@@ -5319,7 +5428,8 @@ begin
     end;
 
     tsf_point_valid := tsf_point_valid and point_in_foreground(tsf_point);
-    last_sent_point_valid := m_last_sent_caret_valid and point_in_virtual_screen(last_sent_point) and
+    last_sent_point_valid := m_last_sent_caret_valid and m_last_sent_has_caret and
+        (m_composition <> nil) and point_in_virtual_screen(last_sent_point) and
         point_in_foreground(last_sent_point);
     if focus_outside_context and (not terminal_like_target) then
     begin
@@ -5346,10 +5456,23 @@ begin
     imm_line_height := 0;
     imm_anchor_hwnd := 0;
     imm_anchor_kind := '';
-    // IMM probing is a compatibility fallback for COM-less legacy clients.
-    // Letting it compete in normal TSF applications can promote stale IMM
-    // coordinates over a valid TSF text extent.
-    if comless_target then
+    suspicion_rect := foreground_rect;
+    has_suspicion_rect := has_foreground_rect;
+    if has_context_rect then
+    begin
+        suspicion_rect := context_rect;
+        has_suspicion_rect := True;
+    end;
+    gui_suspicious := gui_point_valid and is_origin_anchor_suspicious(
+        gui_point, suspicion_rect, has_suspicion_rect, cursor_point,
+        cursor_point_valid, terminal_like_target, m_composition <> nil);
+    caret_suspicious := caret_point_valid and is_origin_anchor_suspicious(
+        caret_point, suspicion_rect, has_suspicion_rect, cursor_point,
+        cursor_point_valid, terminal_like_target, m_composition <> nil);
+    probe_imm := should_probe_imm_anchor(comless_target, tsf_point_valid,
+        gui_point_valid and not gui_suspicious,
+        caret_point_valid and not caret_suspicious);
+    if probe_imm then
     begin
         if try_get_imm_anchor_point(hwnd, imm_point, imm_line_height,
             imm_anchor_kind) then
@@ -5370,6 +5493,13 @@ begin
         begin
             imm_point_valid := True;
             imm_anchor_hwnd := foreground_hwnd;
+        end;
+        if not imm_point_valid and
+            try_get_canvas_character_point(imm_point, imm_line_height) then
+        begin
+            imm_point_valid := True;
+            imm_anchor_hwnd := hwnd;
+            imm_anchor_kind := 'query-character';
         end;
     end;
     if imm_point_valid and caret_debug_logging then
@@ -5401,6 +5531,11 @@ begin
     anchor_context.cursor_point := cursor_point;
     anchor_context.last_stable_valid := last_sent_point_valid;
     anchor_context.last_stable_point := last_sent_point;
+    // Never track a mouse elsewhere on screen. Once sent, this fallback is
+    // retained as last_sent during composition until a live caret is available.
+    anchor_context.allow_cursor_fallback := probe_imm and not imm_point_valid and
+        not comless_target and not photoshop_canvas_target and has_context_rect and
+        PtInRect(context_rect, cursor_point);
     tsf_suspicious := tsf_point_valid and is_origin_anchor_suspicious(tsf_point, foreground_rect, has_foreground_rect,
         cursor_point, cursor_point_valid, terminal_like_target, anchor_context.has_composition);
     if tsf_suspicious and should_relax_terminal_tsf_suspicion(tsf_point, tsf_point_valid, gui_point, gui_point_valid,
@@ -5474,7 +5609,7 @@ begin
         end;
         if caret_debug_logging then
         begin
-            m_logger.debug(Format('CaretChoose term=%d source=%s score=%d point=(%d,%d) line=%d',
+            m_logger.debug(Format('CaretChoose term=%d source=%s score=%d point=(%d,%d) line=%d policy=20260917',
                 [Ord(terminal_like_target), anchor_source_name(chosen_source), chosen_score,
                 point.X, point.Y, placement_line_height]));
         end;

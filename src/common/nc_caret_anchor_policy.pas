@@ -27,6 +27,8 @@ type
         cursor_point: TPoint;
         last_stable_valid: Boolean;
         last_stable_point: TPoint;
+        // Opt in only after live caret sources and the IMM fallback fail.
+        allow_cursor_fallback: Boolean;
     end;
 
 function anchor_source_name(const source: TncCaretAnchorSource): string;
@@ -38,6 +40,13 @@ function anchor_looks_like_window_bottom_right(const candidate: TPoint; const ba
 function normalize_caret_text_extent(const candidate: TRect;
     const view_rect: TRect; const has_view_rect: Boolean;
     const fallback_line_height: Integer): TRect;
+function gui_caret_rect_is_usable(const bounds: TRect): Boolean;
+function should_probe_imm_anchor(const comless_target: Boolean;
+    const has_tsf_anchor: Boolean; const has_gui_anchor: Boolean;
+    const has_caret_anchor: Boolean): Boolean;
+function imm_anchor_is_placeholder(const candidate: TPoint;
+    const client_rect: TRect; const has_client_rect: Boolean;
+    const comless_target: Boolean): Boolean;
 function should_use_comless_legacy_placement(const comless_target: Boolean;
     const source: TncCaretAnchorSource): Boolean;
 function is_origin_anchor_suspicious(const candidate: TPoint; const base_rect: TRect; const has_base_rect: Boolean;
@@ -205,6 +214,41 @@ begin
     normalized_line_height := EnsureRange(normalized_line_height,
         c_min_line_height, c_max_line_height);
     Result.Bottom := Result.Top + normalized_line_height;
+end;
+
+function gui_caret_rect_is_usable(const bounds: TRect): Boolean;
+begin
+    // Zero-width insertion carets are valid; an empty/default rectangle is not.
+    Result := (bounds.Bottom > bounds.Top) and (bounds.Right >= bounds.Left);
+end;
+
+function should_probe_imm_anchor(const comless_target: Boolean;
+    const has_tsf_anchor: Boolean; const has_gui_anchor: Boolean;
+    const has_caret_anchor: Boolean): Boolean;
+begin
+    // Ordinary TSF applications must never let a stale IMM position override
+    // a live caret. Custom-drawn editors can still need IMM without COM-less.
+    Result := comless_target or
+        not (has_tsf_anchor or has_gui_anchor or has_caret_anchor);
+end;
+
+function imm_anchor_is_placeholder(const candidate: TPoint;
+    const client_rect: TRect; const has_client_rect: Boolean;
+    const comless_target: Boolean): Boolean;
+begin
+    Result := (candidate.X = 0) and (candidate.Y = 0);
+    if Result then
+        Exit;
+    if comless_target then
+    begin
+        Result := anchor_looks_like_window_bottom_right(candidate,
+            client_rect, has_client_rect);
+        Exit;
+    end;
+    // Preserve real carets near an edit control's edge; the wider corner
+    // exclusion is a legacy-game workaround, not a general TSF rule.
+    Result := has_client_rect and points_are_close(candidate,
+        System.Types.Point(client_rect.Right, client_rect.Bottom), 1);
 end;
 
 function should_use_comless_legacy_placement(const comless_target: Boolean;
@@ -525,7 +569,8 @@ var
         begin
             Exit;
         end;
-        if (observation.source = casCursor) and context.has_composition and (not context.terminal_like_target) then
+        if (observation.source = casCursor) and context.has_composition and
+            (not context.terminal_like_target) and (not context.allow_cursor_fallback) then
         begin
             Exit;
         end;
