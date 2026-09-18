@@ -107,6 +107,15 @@ if ($hasJointRepair) {
     )
 }
 
+$hasStyleRepair = ($repairManifest.enabled -eq $true) -and ($repairManifest.style_phrase_recovery -eq $true)
+if ($hasStyleRepair) {
+    $runtimePayloadFiles += @(
+        'out\local_repair\style_head.onnx',
+        'out\local_repair\style_phrases.bin',
+        'out\local_repair\style_manifest.json'
+    )
+}
+
 $requiredFiles = @(
     'cassotis_ime_yanquan.ico',
     'version.props'
@@ -140,7 +149,7 @@ require-path (Join-Path $runtimeDataSourceDir 'dict_sc.db')
 require-path (Join-Path $runtimeDataSourceDir 'dict_tc.db')
 
 Write-Host "[installer] runtime_build_id=$runtimeBuildId"
-& $iscc ("/DAppVersion=$Version") ("/DRuntimeBuildId=$runtimeBuildId") ("/DSourceRoot=$resolvedSourceRoot") ("/DRuntimeDataSourceDir=$runtimeDataSourceDir") ("/DHasJointRepair=$([int]$hasJointRepair)") $resolvedScriptPath
+& $iscc ("/DAppVersion=$Version") ("/DRuntimeBuildId=$runtimeBuildId") ("/DSourceRoot=$resolvedSourceRoot") ("/DRuntimeDataSourceDir=$runtimeDataSourceDir") ("/DHasJointRepair=$([int]$hasJointRepair)") ("/DHasStyleRepair=$([int]$hasStyleRepair)") $resolvedScriptPath
 if ($LASTEXITCODE -ne 0) {
     throw "ISCC failed with exit code $LASTEXITCODE"
 }

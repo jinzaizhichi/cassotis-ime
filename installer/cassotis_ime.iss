@@ -17,6 +17,9 @@
 #ifndef HasJointRepair
   #define HasJointRepair 0
 #endif
+#ifndef HasStyleRepair
+  #define HasStyleRepair 0
+#endif
 #define RuntimeRoot "{localappdata}\CassotisIme"
 #define InstallRuntimeDir "{app}\runtime\" + AppVersion + "_" + RuntimeBuildId
 
@@ -79,6 +82,11 @@ Source: "{#RuntimeDir}\local_repair\query_int8.onnx"; DestDir: "{#InstallRuntime
 Source: "{#RuntimeDir}\local_repair\vocab.json"; DestDir: "{#InstallRuntimeDir}\local_repair"; Flags: ignoreversion onlyifdoesntexist
 Source: "{#RuntimeDir}\local_repair\readings.json"; DestDir: "{#InstallRuntimeDir}\local_repair"; Flags: ignoreversion onlyifdoesntexist
 Source: "{#RuntimeDir}\local_repair\runtime_manifest.json"; DestDir: "{#InstallRuntimeDir}\local_repair"; Flags: ignoreversion onlyifdoesntexist
+#if HasStyleRepair
+Source: "{#RuntimeDir}\local_repair\style_head.onnx"; DestDir: "{#InstallRuntimeDir}\local_repair"; Flags: ignoreversion onlyifdoesntexist
+Source: "{#RuntimeDir}\local_repair\style_phrases.bin"; DestDir: "{#InstallRuntimeDir}\local_repair"; Flags: ignoreversion onlyifdoesntexist
+Source: "{#RuntimeDir}\local_repair\style_manifest.json"; DestDir: "{#InstallRuntimeDir}\local_repair"; Flags: ignoreversion onlyifdoesntexist
+#endif
 #if HasJointRepair
 Source: "{#RuntimeDir}\local_repair\joint_query_int8.onnx"; DestDir: "{#InstallRuntimeDir}\local_repair"; Flags: ignoreversion onlyifdoesntexist
 Source: "{#RuntimeDir}\local_repair\joint_head_int8.onnx"; DestDir: "{#InstallRuntimeDir}\local_repair"; Flags: ignoreversion onlyifdoesntexist

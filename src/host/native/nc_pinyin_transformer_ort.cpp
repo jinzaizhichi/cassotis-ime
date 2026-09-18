@@ -12,7 +12,9 @@
 #include <fstream>
 #include <limits>
 #include <memory>
+#include <map>
 #include <mutex>
+#include <set>
 #include <xmmintrin.h>
 #include <string>
 #include <string_view>

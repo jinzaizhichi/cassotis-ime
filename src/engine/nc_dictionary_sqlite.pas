@@ -382,6 +382,8 @@ type
             out scores: TArray<Integer>): Boolean; override;
         function get_char_lm_attested_scores(const ngrams: TArray<string>;
             out scores: TArray<Integer>): Boolean; override;
+        function get_char_lm_parameters(const ngrams: TArray<string>;
+            out scores, backoffs: TArray<Integer>): Boolean; override;
         function get_char_reverse_lm_suffix_scores(const texts: TArray<string>;
             out scores: TArray<Integer>): Boolean; override;
         function get_char_lm_cached_span_scores(const texts: TArray<string>;
@@ -16853,6 +16855,34 @@ function TncSqliteDictionary.get_char_lm_text_scores(const texts: TArray<string>
     out scores: TArray<Integer>): Boolean;
 begin
     Result := get_char_lm_text_scores_internal(texts, scores, True, '', True);
+end;
+
+function TncSqliteDictionary.get_char_lm_parameters(const ngrams: TArray<string>;
+    out scores, backoffs: TArray<Integer>): Boolean;
+var
+    entries: TDictionary<string, TncCharLmCacheEntry>;
+    entry: TncCharLmCacheEntry;
+    idx: Integer;
+begin
+    Result := False;
+    SetLength(scores, Length(ngrams));
+    SetLength(backoffs, Length(ngrams));
+    for idx := 0 to High(scores) do scores[idx] := Low(Integer);
+    if (Length(ngrams) = 0) or (Length(ngrams) > 4096) or
+        not ensure_char_lm_available then Exit;
+    entries := TDictionary<string, TncCharLmCacheEntry>.Create;
+    try
+        if not load_char_lm_entries(ngrams, entries) then Exit;
+        for idx := 0 to High(ngrams) do
+            if entries.TryGetValue(ngrams[idx], entry) and entry.found then
+            begin
+                scores[idx] := entry.score;
+                backoffs[idx] := entry.backoff;
+            end;
+        Result := True;
+    finally
+        entries.Free;
+    end;
 end;
 
 function TncSqliteDictionary.get_char_lm_attested_scores(

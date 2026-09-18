@@ -1072,6 +1072,11 @@ function build_and_copy_pinyin_transformer_runtime
         }
     }
     # Publish the enabling manifest only after its graphs have been copied.
+    if (($null -ne $repair_manifest) -and ($repair_manifest.enabled -eq $true) -and
+        ($repair_manifest.style_phrase_recovery -eq $true))
+    {
+        $repair_files += @('style_head.onnx', 'style_phrases.bin', 'style_manifest.json')
+    }
     $repair_files += 'runtime_manifest.json'
     $required_sources = @(
         $native_build,

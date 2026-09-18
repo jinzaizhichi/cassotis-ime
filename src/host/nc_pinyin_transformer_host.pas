@@ -50,7 +50,8 @@ type
     end;
 
     TncPinyinTransformerHostReranker = class(TInterfacedObject,
-        IncLongNeuralReranker, IncLongLocalRepair, IncLongLocalRepairPolicy, IncLongJointRepair)
+        IncLongNeuralReranker, IncLongLocalRepair, IncLongLocalRepairPolicy, IncLongJointRepair,
+        IncLongStyleRepair)
     private type
         TncPtCreate = function(const model_path: PWideChar;
             const intra_threads: Integer; const error_text: PWideChar;
@@ -176,6 +177,10 @@ type
         function ready: Boolean;
         function allows_no_context_refinement: Boolean;
         function joint_ready: Boolean;
+        function try_style_repair(const dictionary: TncDictionaryProvider;
+            const query, first, second, first_path, second_path: string;
+            const document_key, preceding_text: string;
+            out selected: TncValidatedRepairPath): Boolean;
         function try_finalize(const dictionary: TncDictionaryProvider;
             const query_text, draft, path, current, second, aligned_pinyin: string;
             const document_key, preceding_text: string;
@@ -2138,6 +2143,16 @@ begin
     Result := (m_local_repair <> nil) and m_local_repair.try_finalize(dictionary,
         query_text, draft, path, current, second, aligned_pinyin,
         document_key, preceding_text, selected);
+end;
+
+function TncPinyinTransformerHostReranker.try_style_repair(
+    const dictionary: TncDictionaryProvider;
+    const query, first, second, first_path, second_path: string;
+    const document_key, preceding_text: string;
+    out selected: TncValidatedRepairPath): Boolean;
+begin
+    Result := (m_local_repair <> nil) and m_local_repair.try_style_repair(dictionary,
+        query, first, second, first_path, second_path, document_key, preceding_text, selected);
 end;
 
 function TncPinyinTransformerHostReranker.last_error: string;
