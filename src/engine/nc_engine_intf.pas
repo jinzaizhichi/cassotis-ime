@@ -190930,6 +190930,8 @@ var
                     // The accent color denotes an explicit short transition
                     // compound, not a sentence that happened to use LM data.
                     normalized_candidate_local.display_kind := cdk_default;
+                    if normalized_candidate_local.comment <> '' then
+                        normalized_candidate_local.display_kind := cdk_sentence_prefix;
                 end
                 else if highlight_compound_local then
                 begin
@@ -191351,6 +191353,178 @@ var
                 seen_candidates_local.Free;
             end;
         end;
+        procedure add_decreasing_sentence_prefixes_local;
+        var
+            pool, prefixes, exact_items, short_prefixes: TncCandidateList;
+            sources: TArray<Integer>;
+            words, tails, resolved_words: TArray<string>;
+            path, prefix_path, key: string;
+            idx, consumed, units, head_count, prefix_idx: Integer;
+            function append_exact_words(const span: string): Boolean;
+            var remaining, take, word_offset, probe: Integer; part: string;
+            begin
+                Result := False;
+                word_offset := 0;
+                remaining := Length(span);
+                if remaining <> get_candidate_text_unit_count(span) then Exit;
+                while remaining > 0 do
+                begin
+                    // Some final paths retain a whole decoded prefix as one
+                    // segment. Resolve only its word boundaries, not its text
+                    // or score. The walk is bounded and reuses exact lookups.
+                    take := 0;
+                    for probe := Min(4, remaining) downto 1 do
+                    begin
+                        part := Copy(span, word_offset + 1, probe);
+                        if display_exact_key_has_text(
+                            build_display_query_key(consumed, probe), part) then
+                        begin
+                            take := probe;
+                            Break;
+                        end;
+                    end;
+                    if take = 0 then Exit;
+                    SetLength(resolved_words, Length(resolved_words) + 1);
+                    resolved_words[High(resolved_words)] := part;
+                    Inc(consumed, take);
+                    Inc(word_offset, take);
+                    Dec(remaining, take);
+                end;
+                Result := True;
+            end;
+            procedure restore_exact_word_prefixes;
+            var count, word_units, item_idx, insertion: Integer;
+                item: TncCandidate;
+                prefix_key, tail: string;
+                function already_visible(const value: TncCandidate): Boolean;
+                var pool_idx: Integer;
+                begin
+                    for pool_idx := 0 to High(pool) do
+                        if (pool[pool_idx].text = value.text) and
+                            (pool[pool_idx].comment = value.comment) then Exit(True);
+                    Result := False;
+                end;
+            begin
+                short_prefixes := nil;
+                for word_units := Min(6, expected_units - 1) downto 2 do
+                begin
+                    prefix_key := build_display_query_key(0, word_units);
+                    if not lookup_display_exact_cached(prefix_key, exact_items) then Continue;
+                    tail := build_display_query_key(word_units, expected_units - word_units);
+                    for item_idx := 0 to High(exact_items) do
+                    begin
+                        item := exact_items[item_idx];
+                        if (item.comment <> '') or
+                            (get_candidate_text_unit_count(item.text) <> word_units) then Continue;
+                        item.comment := tail;
+                        item.display_kind := cdk_default;
+                        count := Length(short_prefixes);
+                        SetLength(short_prefixes, count + 1);
+                        short_prefixes[count] := item;
+                    end;
+                end;
+                // Keep existing prefix ordering; fill missing exact words before
+                // the single-character tier, with the same page/source mapping.
+                insertion := head_count + Length(prefixes);
+                while (insertion < Length(pool)) and
+                    (get_candidate_text_unit_count(pool[insertion].text) > 1) do Inc(insertion);
+                // Insert only missing entries so an existing user/context order
+                // and its source metadata cannot be displaced by this fallback.
+                count := 0;
+                for item_idx := 0 to High(short_prefixes) do
+                begin
+                    item := short_prefixes[item_idx];
+                    if already_visible(item) then Continue;
+                    short_prefixes[count] := item;
+                    Inc(count);
+                end;
+                SetLength(short_prefixes, count);
+                nc_insert_sentence_prefixes(pool, sources, short_prefixes, insertion);
+            end;
+        begin
+            if (m_page_index <> 0) or short_exact_query_mode or
+                (expected_units < c_long_sentence_full_path_min_syllables) or
+                (expected_units > 64) or
+                (Length(Result) = 0) or (m_dictionary = nil) or
+                is_fuzzy_pinyin_active or
+                not long_visible_candidate_pool_cache_is_current(visible_page_size) then Exit;
+            pool := Copy(m_long_visible_candidate_pool_cache);
+            sources := Copy(m_long_visible_candidate_pool_source_indices_cache);
+            if Length(pool) = 0 then Exit;
+            head_count := 0;
+            while (head_count < Length(pool)) and (head_count < 2) and
+                (pool[head_count].comment = '') do Inc(head_count);
+            // Do not displace either ranked complete result. With no complete
+            // path, retain the existing best partial as the anchor instead.
+            if head_count = 0 then head_count := 1;
+            path := get_segment_path_for_candidate(pool[0], sources[0]);
+            if (path = '') or
+                (StringReplace(path, c_segment_path_separator, '', [rfReplaceAll]) <>
+                pool[0].text) then Exit;
+            words := path.Split([c_segment_path_separator], TStringSplitOptions.ExcludeEmpty);
+            consumed := 0;
+            resolved_words := nil;
+            for idx := 0 to High(words) do
+            begin
+                units := get_candidate_text_unit_count(words[idx]);
+                if (units <= 0) or (consumed + units > Length(syllables)) then Exit;
+                key := build_display_query_key(consumed, units);
+                // Validate the path against this query's syllable alignment.
+                // Use the existing display cache; never start another search.
+                if display_exact_key_has_text(key, words[idx]) then
+                begin
+                    SetLength(resolved_words, Length(resolved_words) + 1);
+                    resolved_words[High(resolved_words)] := words[idx];
+                    Inc(consumed, units);
+                end
+                else if not append_exact_words(words[idx]) then
+                begin
+                    // An uncertain tail must not erase already verified earlier
+                    // boundaries. Keep it opaque and never offer a cut inside it.
+                    if (consumed < 4) or
+                        (Length(pool[0].text) <> get_candidate_text_unit_count(pool[0].text)) then Exit;
+                    SetLength(resolved_words, Length(resolved_words) + 1);
+                    resolved_words[High(resolved_words)] := Copy(pool[0].text, consumed + 1, MaxInt);
+                    Break;
+                end;
+            end;
+            words := resolved_words;
+            SetLength(tails, Length(words));
+            consumed := 0;
+            for idx := 0 to High(words) do
+            begin
+                Inc(consumed, get_candidate_text_unit_count(words[idx]));
+                tails[idx] := build_display_query_key(consumed, expected_units - consumed);
+            end;
+            prefixes := nc_sentence_prefix_candidates(pool[0], words, tails, 4 - head_count);
+            if Length(prefixes) = 0 then Exit;
+            prefix_path := '';
+            consumed := 0;
+            for idx := 0 to High(words) do
+            begin
+                if prefix_path <> '' then prefix_path := prefix_path + c_segment_path_separator;
+                prefix_path := prefix_path + words[idx];
+                Inc(consumed, Length(words[idx]));
+                for prefix_idx := 0 to High(prefixes) do
+                    if Length(prefixes[prefix_idx].text) = consumed then
+                        remember_segment_path_for_candidate(prefixes[prefix_idx].text,
+                            prefixes[prefix_idx].comment, prefix_path);
+            end;
+            // Replace the old arbitrary second partial, if any, with real
+            // decreasing word-boundary stops. All ordinary prefixes stay intact.
+            if (head_count = 1) and (Length(pool) > 1) and
+                (pool[1].display_kind = cdk_sentence_prefix) then
+            begin
+                Delete(pool, 1, 1);
+                Delete(sources, 1, 1);
+            end;
+            nc_insert_sentence_prefixes(pool, sources, prefixes, head_count);
+            restore_exact_word_prefixes;
+            m_long_visible_candidate_pool_cache := pool;
+            m_long_visible_candidate_pool_source_indices_cache := sources;
+            nc_copy_candidate_page(pool, sources, 0, visible_page_size,
+                Result, visible_source_indices);
+        end;
     begin
         capture_supported_transition_top_local;
         capture_short_exact_ranked_order_local;
@@ -191564,6 +191738,7 @@ var
                 build_visible_long_sentence_candidate_pool_local;
             end;
             apply_visible_local_repair(Result, visible_source_indices, expected_units);
+            add_decreasing_sentence_prefixes_local;
             if (Length(Result) > 0) and
                 (Trim(Result[0].comment) = '') and
                 (get_candidate_text_unit_count(Trim(Result[0].text)) =
