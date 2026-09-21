@@ -66,7 +66,7 @@ Double Pinyin follows these rules:
 | `candidate_font_name` | Candidate font | Installed font family | `Microsoft YaHei UI` | Can also be selected in Settings. |
 | `candidate_font_size` | Candidate font size | `7` through `18` | `12` | Settings uses predefined levels; INI values are clamped to the valid range. |
 | `candidate_page_size` | Candidates per page | `3` through `9` | `9` | Changes page size without reducing the total candidate pool. |
-| `candidate_expand_on_paging` | Expand candidate rows when paging | `true` / `false` | `false` | Press Up/Down or page forward to expand up to four pages. Up/Down and page keys move between rows while keeping the selected number, or selecting the last item if the target row is shorter. Up on the first row expands without wrapping to the last page. Left/Right still move by one item. Number keys select from the active row only; the Tab area is unchanged. |
+| `candidate_expand_on_paging` | Expand candidate rows when paging | `true` / `false` | `false` | Press Up/Down or page forward to expand up to three pages. Up/Down and page keys move between rows while keeping the selected number, or selecting the last item if the target row is shorter. Up on the first row expands without wrapping to the last page. Left/Right still move by one item. Only the active row shows numbers; other rows reserve the same space so words do not shift when switching rows. Number keys select from the active row only; the Tab area is unchanged. |
 | `candidate_color_scheme` | Candidate window theme | `clear-white` / `moon-white` / `celadon` / `clear-blue` / `pine-ink` / `indigo-night` | `clear-white` | Corresponds to the six built-in light and dark themes. |
 
 ---

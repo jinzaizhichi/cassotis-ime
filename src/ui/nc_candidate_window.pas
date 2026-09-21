@@ -40,11 +40,14 @@ type
         m_candidate_is_user: TArray<Boolean>;
         m_candidate_show_weight: TArray<Boolean>;
         m_candidate_widths: TArray<Integer>;
+        m_candidate_number_widths: TArray<Integer>;
         m_candidate_offsets: TArray<Integer>;
         m_candidate_rows: TArray<Integer>;
         m_candidate_pages: TArray<Integer>;
         m_candidate_slots: TArray<Integer>;
         m_row_count: Integer;
+        m_active_page_index: Integer;
+        m_horizontal_placement: TncCandidateHorizontalPlacement;
         m_generation: UInt64;
         m_remove_button_rects: TArray<TRect>;
         m_selected_index: Integer;
@@ -111,7 +114,7 @@ type
         function get_target_dpi(const anchor: TPoint): Integer;
         function get_work_area(const anchor: TPoint; out work_area: TRect): Boolean;
         function get_shell_search_overlay_rect(out overlay_rect: TRect): Boolean;
-        function format_candidate_line(const index: Integer; const candidate: TncCandidate): string;
+        function format_candidate_text(const candidate: TncCandidate): string;
         function candidate_has_pinyin_tail(const candidate: TncCandidate): Boolean;
         function candidate_can_remove(const candidate: TncCandidate): Boolean;
         function get_candidate_text_color(const source: TncCandidateSource;
@@ -774,6 +777,7 @@ begin
         begin
             Continue;
         end;
+        if m_candidate_pages[i] <> m_active_page_index then Continue;
         if (i >= Length(m_candidate_offsets)) or (i >= Length(m_candidate_widths)) then
         begin
             Continue;
@@ -1223,7 +1227,7 @@ begin
     end;
 end;
 
-function TncCandidateWindow.format_candidate_line(const index: Integer; const candidate: TncCandidate): string;
+function TncCandidateWindow.format_candidate_text(const candidate: TncCandidate): string;
 var
     suffix: string;
     comment_text: string;
@@ -1252,8 +1256,7 @@ begin
         suffix := suffix + '  ' + comment_text;
     end;
 
-    if index < 0 then Result := suffix
-    else Result := IntToStr(index + 1) + '. ' + suffix;
+    Result := suffix;
 end;
 
 function TncCandidateWindow.candidate_has_pinyin_tail(const candidate: TncCandidate): Boolean;
@@ -1480,11 +1483,14 @@ begin
 
     row_width := 0;
     SetLength(m_candidate_widths, item_count);
+    SetLength(m_candidate_number_widths, item_count);
     SetLength(m_candidate_offsets, item_count);
     for i := 0 to item_count - 1 do
     begin
         assign_list_font_for_text(m_candidate_lines[i], m_list_font.Color);
-        main_text_width := Canvas.TextWidth(m_candidate_lines[i]);
+        // Reserve numbering on every row so changing the active page cannot shift text.
+        m_candidate_number_widths[i] := Canvas.TextWidth(IntToStr(m_candidate_slots[i] + 1) + '. ');
+        main_text_width := m_candidate_number_widths[i] + Canvas.TextWidth(m_candidate_lines[i]);
         weight_text_width := 0;
         if m_show_weight_row and (i < Length(m_candidate_show_weight)) and m_candidate_show_weight[i] then
         begin
@@ -1678,6 +1684,7 @@ var
     text_right: Integer;
     user_candidate: Boolean;
     text_rect: TRect;
+    number_rect: TRect;
     weight_text_rect: TRect;
     corner_radius: Integer;
     edge_padding: Integer;
@@ -1964,6 +1971,12 @@ begin
                 candidate_display_kind));
         end;
         text_rect := Rect(x, main_text_top, text_right, main_text_top + main_text_height);
+        number_rect := text_rect;
+        number_rect.Right := number_rect.Left + m_candidate_number_widths[i];
+        if m_candidate_pages[i] = m_active_page_index then
+            draw_canvas_text(Canvas, IntToStr(m_candidate_slots[i] + 1) + '. ', number_rect,
+                DT_LEFT or DT_VCENTER or DT_SINGLELINE or DT_NOPREFIX);
+        text_rect.Left := number_rect.Right;
         draw_canvas_text(Canvas, m_candidate_lines[i], text_rect,
             DT_LEFT or DT_VCENTER or DT_SINGLELINE or DT_NOPREFIX);
 
@@ -2006,10 +2019,13 @@ const
 var
     i: Integer;
     count: Integer;
-    row, slot, offset, label_index, active_slot: Integer;
+    row, slot, offset, active_slot: Integer;
     displayed: TncCandidateList;
 begin
     m_generation := generation;
+    if (m_preedit_label.Caption <> preedit_text) or (Length(pages) <= 1) then
+        m_horizontal_placement := Default(TncCandidateHorizontalPlacement);
+    m_active_page_index := page_index;
     m_debug_mode := debug_mode;
     m_one_key_completion_text := Trim(one_key_completion.text);
     m_one_key_completion_source := one_key_completion.source;
@@ -2089,8 +2105,7 @@ begin
                 m_candidate_sources[i] := displayed[i].source;
                 m_candidate_display_kinds[i] := displayed[i].display_kind;
             end;
-            m_candidate_is_user[i] := (m_candidate_pages[i] = page_index) and
-                candidate_can_remove(displayed[i]);
+            m_candidate_is_user[i] := candidate_can_remove(displayed[i]);
             m_candidate_show_weight[i] := m_debug_mode and displayed[i].has_dict_weight;
             if m_candidate_show_weight[i] then
             begin
@@ -2100,9 +2115,7 @@ begin
             begin
                 m_candidate_weight_lines.Add('');
             end;
-            label_index := -1;
-            if m_candidate_pages[i] = page_index then label_index := m_candidate_slots[i];
-            m_candidate_lines.Add(format_candidate_line(label_index, displayed[i]));
+            m_candidate_lines.Add(format_candidate_text(displayed[i]));
         end;
     finally
         m_candidate_weight_lines.EndUpdate;
@@ -2198,6 +2211,8 @@ var
     gap: Integer;
     overlay_rect: TRect;
     candidate_rect: TRect;
+    target_window: HWND;
+    target_rect: TRect;
 begin
     HandleNeeded;
     anchor := Point(x, y);
@@ -2209,7 +2224,6 @@ begin
         Invalidate;
     end;
 
-    target_x := x;
     if not get_work_area(anchor, work_area) then
     begin
         work_area := Rect(0, 0, GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN));
@@ -2219,14 +2233,16 @@ begin
     target_y := nc_calculate_candidate_top(y, Height, gap, clearance,
         work_area, prefer_above);
 
-    if target_x + Width > work_area.Right then
+    target_window := GetForegroundWindow;
+    target_rect := Rect(0, 0, 0, 0);
+    if (target_window = 0) or (target_window = Handle) or
+        IsIconic(target_window) or (not GetWindowRect(target_window, target_rect)) then
     begin
-        target_x := work_area.Right - Width;
+        target_window := 0;
+        target_rect := Rect(0, 0, 0, 0);
     end;
-    if target_x < work_area.Left then
-    begin
-        target_x := work_area.Left;
-    end;
+    target_x := m_horizontal_placement.update(m_row_count > 1, anchor,
+        Width, m_current_dpi, work_area, NativeUInt(target_window), target_rect);
 
     if get_shell_search_overlay_rect(overlay_rect) then
     begin
@@ -2254,6 +2270,8 @@ begin
         end;
     end;
 
+    m_horizontal_placement.left := target_x;
+
     // Position, size and show atomically. SWP_NOCOPYBITS is important when a
     // hidden 96-DPI surface is first presented on a high-DPI monitor: copying
     // the old client bits can leave stale text at the previous window bounds.
@@ -2265,6 +2283,7 @@ end;
 
 procedure TncCandidateWindow.hide_window;
 begin
+    m_horizontal_placement := Default(TncCandidateHorizontalPlacement);
     if HandleAllocated then
     begin
         ShowWindow(Handle, SW_HIDE);
