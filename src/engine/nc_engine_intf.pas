@@ -16,6 +16,7 @@ uses
     nc_shortcut,
     nc_dictionary_intf,
     nc_local_repair_guard,
+    nc_short_particle_evidence,
 {$IFDEF CASSOTIS_TAB_HANDOFF_DIAGNOSTICS}
     nc_tab_repair_handoff,
 {$ENDIF}
@@ -9235,6 +9236,7 @@ var
     has_long_direct_preferred_candidate: Boolean;
     direct_chain_candidate: TncCandidate;
     direct_chain_encoded_path: string;
+    five_partition_alternative: TncCandidate;
     top_complete_chain_candidates: TncCandidateList;
     top_complete_chain_encoded_paths: TArray<string>;
     top_complete_chain_applied: Boolean;
@@ -16828,6 +16830,57 @@ var
         top_partial_head_units_local: Integer;
         phase_start_tick_local: UInt64;
         fast_stable_prefix_partial_exit_local: Boolean;
+        attested_particle_text_local: string;
+
+        procedure recover_attested_particle_phrase_local;
+        var
+            parsed: TncPinyinParseResult;
+            keys: TArray<string>;
+            tail_key, tail_text, head_key, context, text, path: string;
+            candidate: TncCandidate;
+            additions: TncCandidateList;
+            idx, score, evidence: Integer;
+        begin
+            if (input_syllable_count <> 4) or is_fuzzy_pinyin_active or
+                (m_config.pinyin_input_scheme <> pis_full_pinyin) or
+                has_explicit_apostrophe_input or
+                (not is_full_pinyin_key(lookup_text)) or
+                (not try_get_short_particle_tail_query_parts(lookup_text,
+                    tail_key, tail_text, head_key)) then Exit;
+            parsed := get_effective_compact_pinyin_syllables(lookup_text);
+            if Length(parsed) <> 4 then Exit;
+            SetLength(keys, 4);
+            for idx := 0 to 3 do keys[idx] := parsed[idx].text;
+            context := Trim(m_segment_left_context);
+            if context = '' then context := Trim(m_external_left_context);
+            if context = '' then context := Trim(m_left_context);
+            if not nc_recover_attested_particle_phrase(m_dictionary, keys,
+                tail_text, context_model_tail(context), m_candidates, text, path,
+                evidence) then Exit;
+            attested_particle_text_local := text;
+            // Carry the accepted boundary evidence through the same lookup and
+            // display gate as word transitions; colour alone is not evidence.
+            m_lookup_display_feature_cache.AddOrSetValue(
+                'S43E' + #1 + lookup_text + #1 + text, evidence);
+            m_lookup_query_latest_text_cache.AddOrSetValue(
+                'S43P' + #1 + lookup_text + #1 + text, path);
+            m_lookup_query_latest_text_cache.AddOrSetValue(
+                'S43W' + #1 + lookup_text, text);
+            score := 0;
+            for candidate in m_candidates do score := Max(score, candidate.score);
+            candidate := Default(TncCandidate);
+            candidate.text := text;
+            candidate.source := cs_rule;
+            candidate.display_kind := cdk_lm_compound;
+            candidate.score := Min(Int64(High(Integer)) - 128, score) + 128;
+            additions := TncCandidateList.Create(candidate);
+            m_candidates := merge_candidate_lists(additions, m_candidates, 0);
+            remember_segment_path_for_candidate(text, '', path, candidate.score);
+            remember_segment_path_query_prefix(path, lookup_text);
+            if m_config.debug_mode then
+                m_last_full_path_debug_info := m_last_full_path_debug_info +
+                    ' particlechar=' + text;
+        end;
 
         function skip_expensive_short_prefix_rerank_local: Boolean;
         begin
@@ -18928,6 +18981,8 @@ var
             tail_text_local: string;
             head_key_local: string;
             candidate_text_local: string;
+            attested_idx_local: Integer;
+            attested_candidate_local: TncCandidate;
         begin
             best_partial_score_local := Low(Integer);
             for candidate_idx_local := 0 to High(m_candidates) do
@@ -19004,6 +19059,21 @@ var
                 stable_order_prefix_partials_by_matched_units_local(
                     m_candidates);
             end;
+            // A whole-phrase comparison must not be undone by the older
+            // head-plus-particle heuristic. All other candidates stay intact.
+            if attested_particle_text_local <> '' then
+                for attested_idx_local := 0 to High(m_candidates) do
+                    if (m_candidates[attested_idx_local].comment = '') and
+                        (m_candidates[attested_idx_local].text =
+                        attested_particle_text_local) then
+                    begin
+                        attested_candidate_local := m_candidates[attested_idx_local];
+                        for candidate_idx_local := attested_idx_local downto 1 do
+                            m_candidates[candidate_idx_local] :=
+                                m_candidates[candidate_idx_local - 1];
+                        m_candidates[0] := attested_candidate_local;
+                        Break;
+                    end;
             refresh_candidate_segment_paths;
             note_ranked_top_candidate;
             if m_config.debug_mode then
@@ -19027,6 +19097,7 @@ var
             m_selected_index := 0;
         end;
     begin
+        attested_particle_text_local := '';
         m_last_lookup_prefix_partial_fast :=
             (Pos('shortprefixraw=1', debug_extra) > 0) or
             (Pos('short2prefixraw=1', debug_extra) > 0) or
@@ -19051,6 +19122,7 @@ var
             filter_interior_predictive_prefix_candidates_local(m_candidates);
         end;
         ensure_short_particle_tail_from_prefix_partial_visible_local(m_candidates);
+        recover_attested_particle_phrase_local;
         if (input_syllable_count in [3, 4]) and
             ((Length(short_particle_tail_candidates) > 0) or
             has_complete_short_particle_tail_candidate_visible_local) then
@@ -81605,7 +81677,8 @@ var
 
     function try_build_five_syllable_strong_exact_partition_candidate_local(
         out out_candidate: TncCandidate;
-        out out_encoded_path: string): Boolean;
+        out out_encoded_path: string;
+        out out_alternative: TncCandidate): Boolean;
     const
         c_segment_probe_limit = 8;
         c_min_pair_lm_weight = 420;
@@ -81704,6 +81777,129 @@ var
                 end;
                 Exit(Min(c_pair_bonus_cap, lm_weight_local * 3));
             end;
+        end;
+
+        procedure compare_complete_pair_paths_local;
+        const
+            c_min_pair_weight = 390;
+            c_min_component_weight = 80;
+            c_pool_limit = 8;
+            c_min_char_margin = 256;
+        var
+            evidence: TncPairPathEvidenceList;
+            parts, texts, paths: TArray<string>;
+            weights, scores, context_scores: TArray<Integer>;
+            exact_values: TncCandidateList;
+            context, key, text, path: string;
+            head_units, tail_units, idx, part_idx, found_idx, pool_idx,
+                candidate_idx, insert_idx, best_idx, second_score: Integer;
+            valid: Boolean;
+
+            function exact_component(const key_value, text_value: string): Boolean;
+            var values: TncCandidateList; value: TncCandidate;
+            begin
+                Result := False;
+                if not dictionary_exact_lookup_cached(key_value, values) then Exit;
+                for value in values do
+                    if (value.text = text_value) and (Trim(value.comment) = '') and
+                        (value.source <> cs_user) and
+                        (segment_weight_local(value) >= c_min_component_weight) and
+                        m_dictionary.is_base_entry(key_value, text_value) then
+                        Exit(True);
+            end;
+        begin
+            if is_fuzzy_pinyin_active or has_explicit_apostrophe_input or
+                (m_config.pinyin_input_scheme <> pis_full_pinyin) then Exit;
+            // This shortcut used to return after only 2+2+1 / 1+2+2 / 2+1+2.
+            // Compare attested 2+3 / 3+2 paths before discarding those boundaries.
+            if dictionary_exact_lookup_cached(lookup_text, exact_values) then
+                for candidate_idx := 0 to High(exact_values) do
+                    if (Trim(exact_values[candidate_idx].comment) = '') and
+                        (get_candidate_text_unit_count(exact_values[candidate_idx].text) = 5) then Exit;
+            if not m_dictionary.get_exact_pair_path_evidence(lookup_text,
+                evidence) then Exit;
+            texts := TArray<string>.Create(out_candidate.text);
+            paths := TArray<string>.Create(out_encoded_path);
+            weights := TArray<Integer>.Create(MaxInt);
+            for idx := 0 to High(evidence) do
+            begin
+                if evidence[idx].lm_transition_weight < c_min_pair_weight then Continue;
+                path := Trim(evidence[idx].encoded_path);
+                parts := path.Split([c_segment_path_separator]);
+                if Length(parts) <> 2 then Continue;
+                head_units := get_candidate_text_unit_count(parts[0]);
+                tail_units := get_candidate_text_unit_count(parts[1]);
+                if not (((head_units = 2) and (tail_units = 3)) or
+                    ((head_units = 3) and (tail_units = 2))) then Continue;
+                valid := True;
+                for part_idx := 0 to 1 do
+                begin
+                    if part_idx = 0 then key := build_key_local(0, head_units)
+                    else key := build_key_local(head_units, tail_units);
+                    if not exact_component(key, parts[part_idx]) then
+                    begin
+                        valid := False;
+                        Break;
+                    end;
+                end;
+                if not valid then Continue;
+                text := parts[0] + parts[1];
+                found_idx := -1;
+                for pool_idx := 0 to High(texts) do
+                    if texts[pool_idx] = text then found_idx := pool_idx;
+                if found_idx >= 0 then Continue;
+                insert_idx := Length(texts);
+                while (insert_idx > 1) and
+                    (weights[insert_idx - 1] < evidence[idx].lm_transition_weight) do Dec(insert_idx);
+                if insert_idx >= c_pool_limit then Continue;
+                SetLength(texts, Min(c_pool_limit, Length(texts) + 1));
+                SetLength(paths, Length(texts));
+                SetLength(weights, Length(texts));
+                for pool_idx := High(texts) downto insert_idx + 1 do
+                begin
+                    texts[pool_idx] := texts[pool_idx - 1];
+                    paths[pool_idx] := paths[pool_idx - 1];
+                    weights[pool_idx] := weights[pool_idx - 1];
+                end;
+                texts[insert_idx] := text;
+                paths[insert_idx] := path;
+                weights[insert_idx] := evidence[idx].lm_transition_weight;
+            end;
+            if (Length(texts) < 2) or
+                (not m_dictionary.get_char_lm_continuation_scores('', texts, scores)) or
+                (Length(scores) <> Length(texts)) then Exit;
+            best_idx := 0;
+            for idx := 1 to High(scores) do
+                if scores[idx] > scores[best_idx] then best_idx := idx;
+            if best_idx = 0 then Exit;
+            second_score := Low(Integer);
+            for idx := 0 to High(scores) do
+                if idx <> best_idx then second_score := Max(second_score, scores[idx]);
+            if Int64(scores[best_idx]) - second_score < c_min_char_margin then Exit;
+            context := Trim(m_segment_left_context);
+            if context = '' then context := Trim(m_external_left_context);
+            if context = '' then context := Trim(m_left_context);
+            context := context_model_tail(context);
+            if context <> '' then
+            begin
+                if (not m_dictionary.get_char_lm_continuation_scores(context,
+                    texts, context_scores)) or (Length(context_scores) <> Length(texts)) then Exit;
+                for idx := 0 to High(context_scores) do
+                    if (idx <> best_idx) and
+                        (context_scores[best_idx] <= context_scores[idx]) then Exit;
+            end;
+            out_alternative := out_candidate;
+            remember_segment_path_for_candidate(out_alternative.text, '',
+                out_encoded_path, out_alternative.score);
+            out_candidate.text := texts[best_idx];
+            out_candidate.score := Min(Int64(MaxInt) - 128, out_candidate.score) + 128;
+            out_candidate.dict_weight := out_candidate.score;
+            out_encoded_path := paths[best_idx];
+            m_lookup_query_latest_text_cache.AddOrSetValue(
+                'S5PW' + #1 + lookup_text, out_candidate.text);
+            if m_config.debug_mode then
+                m_last_full_path_debug_info := m_last_full_path_debug_info +
+                    ' strongexact5pair=' + out_candidate.text;
         end;
 
         procedure consider_partition_local(const first_units_local,
@@ -81809,6 +82005,7 @@ var
         Result := False;
         FillChar(out_candidate, SizeOf(out_candidate), 0);
         out_encoded_path := '';
+        out_alternative := Default(TncCandidate);
         if (m_dictionary = nil) or (input_syllable_count <> 5) or
             all_initial_compact_query or has_internal_dangling_initial or
             (not is_full_pinyin_key(lookup_text)) or
@@ -81829,6 +82026,7 @@ var
             (Trim(out_candidate.text) <> '');
         if Result then
         begin
+            compare_complete_pair_paths_local;
             remember_segment_path_for_candidate(out_candidate.text, '',
                 out_encoded_path, out_candidate.score);
         end;
@@ -124881,10 +125079,16 @@ var
             Exit;
         end;
         if try_build_five_syllable_strong_exact_partition_candidate_local(
-            direct_chain_candidate, direct_chain_encoded_path) then
+            direct_chain_candidate, direct_chain_encoded_path,
+            five_partition_alternative) then
         begin
             SetLength(m_candidates, 1);
             m_candidates[0] := direct_chain_candidate;
+            if five_partition_alternative.text <> '' then
+            begin
+                SetLength(m_candidates, 2);
+                m_candidates[1] := five_partition_alternative;
+            end;
             if build_exact_leading_prefix_partial_candidates(lookup_text,
                 exact_head_partial_candidates) then
             begin
@@ -186616,6 +186820,7 @@ var
             superseding_idx_local: Integer;
             tmp_candidate_local: TncCandidate;
             tmp_source_idx_local: Integer;
+            attested_particle_winner_local: string;
 
             function current_top_supersedes_forced_partial_local(
                 const current_top_candidate: TncCandidate;
@@ -186738,6 +186943,17 @@ var
 
             { A forced incremental prefix must not displace a full exact or a
               longer exact phrase prefix that explains more input syllables. }
+            attested_particle_winner_local := '';
+            if (expected_units = 4) and
+                (m_lookup_query_latest_text_cache <> nil) then
+                m_lookup_query_latest_text_cache.TryGetValue(
+                    'S43W' + #1 + normalized_pinyin,
+                    attested_particle_winner_local);
+            if (expected_units = 5) and
+                (m_lookup_query_latest_text_cache <> nil) then
+                m_lookup_query_latest_text_cache.TryGetValue(
+                    'S5PW' + #1 + normalized_pinyin,
+                    attested_particle_winner_local);
             superseding_idx_local := -1;
             for candidate_idx_local := 0 to High(Result) do
             begin
@@ -186750,11 +186966,22 @@ var
                     begin
                         superseding_idx_local := candidate_idx_local;
                     end;
+                    // More input can overturn a prefix prediction. Respect
+                    // the full-phrase decision instead of freezing that prefix.
+                    if (attested_particle_winner_local <> '') and
+                        (Result[candidate_idx_local].comment = '') and
+                        (Result[candidate_idx_local].text =
+                        attested_particle_winner_local) then
+                    begin
+                        superseding_idx_local := candidate_idx_local;
+                        Break;
+                    end;
                     // A complete candidate that directly extends the
                     // preserved LM prefix is the authoritative repair. Only
                     // fall back to an unrelated backed path when no such
                     // extension exists.
-                    if (Trim(Result[candidate_idx_local].comment) = '') and
+                    if (attested_particle_winner_local = '') and
+                        (Trim(Result[candidate_idx_local].comment) = '') and
                         (Copy(Trim(Result[candidate_idx_local].text), 1,
                         Length(Trim(m_forced_visible_top_candidate.text))) =
                         Trim(m_forced_visible_top_candidate.text)) then
