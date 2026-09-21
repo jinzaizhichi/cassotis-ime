@@ -66,6 +66,7 @@
 | `candidate_font_name` | 候选字体 | 已安装字体名称 | `Microsoft YaHei UI` | 也可在设置界面选择。 |
 | `candidate_font_size` | 候选字号 | `7` 至 `18` | `12` | 设置界面使用预设档位；INI 中的值会限制到有效范围。 |
 | `candidate_page_size` | 每页候选数 | `3` 至 `9` | `9` | 只改变每页显示数量，不改变候选池总数。 |
+| `candidate_expand_on_paging` | 翻页时展开多行候选 | `true` / `false` | `false` | 按上下箭头或向后翻页即可展开，最多同时显示四页；上下箭头和翻页键切换行并保留选中编号，目标行不足时选中最后一项，左右箭头仍逐项移动。第一页按上箭头也会展开，但不循环到末页。数字选词只作用于当前行，Tab 区保持不变。 |
 | `candidate_color_scheme` | 候选窗配色 | `clear-white` / `moon-white` / `celadon` / `clear-blue` / `pine-ink` / `indigo-night` | `clear-white` | 对应六套内置浅色及深色主题。 |
 
 ---
@@ -134,6 +135,7 @@ fuzzy_rules=
 candidate_font_name=Microsoft YaHei UI
 candidate_font_size=12
 candidate_page_size=9
+candidate_expand_on_paging=false
 candidate_color_scheme=clear-white
 
 [dictionary]

@@ -891,6 +891,7 @@ begin
     Result.candidate_font_name := c_default_candidate_font_name;
     Result.candidate_font_size := c_default_candidate_font_size;
     Result.candidate_page_size := c_default_candidate_page_size;
+    Result.candidate_expand_on_paging := False;
     Result.candidate_page_key_scheme := cpks_minus_plus;
     Result.one_key_completion_key := ock_tab;
     Result.candidate_color_scheme := c_default_candidate_color_scheme;
@@ -1153,6 +1154,8 @@ begin
         Result.candidate_page_size := clamp_candidate_page_size(
             safe_ini_read_integer(ini, 'appearance', 'candidate_page_size',
             c_default_candidate_page_size));
+        Result.candidate_expand_on_paging := safe_ini_read_bool(ini,
+            'appearance', 'candidate_expand_on_paging', False);
         Result.candidate_color_scheme := parse_candidate_color_scheme_text(safe_ini_read_string(ini, 'appearance',
             'candidate_color_scheme', candidate_color_scheme_to_text(c_default_candidate_color_scheme)),
             c_default_candidate_color_scheme);
@@ -1317,6 +1320,8 @@ begin
             clamp_candidate_font_size(config.candidate_font_size));
         ini.WriteInteger('appearance', 'candidate_page_size',
             clamp_candidate_page_size(config.candidate_page_size));
+        ini.WriteBool('appearance', 'candidate_expand_on_paging',
+            config.candidate_expand_on_paging);
         ini.WriteString('appearance', 'candidate_color_scheme',
             candidate_color_scheme_to_text(config.candidate_color_scheme));
         ini.WriteString('dictionary', 'variant', variant_to_text(config.dictionary_variant));

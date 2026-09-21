@@ -182,6 +182,7 @@ type
         m_candidate_font_size_labels:
             array[0..c_candidate_font_size_level_count - 1] of TLabel;
         m_combo_candidate_page_size: TComboBox;
+        m_chk_candidate_expand_on_paging: TncModernCheckBox;
         m_combo_candidate_color_scheme: TComboBox;
         m_candidate_preview: TPaintBox;
         m_candidate_preview_window: TncCandidateWindow;
@@ -383,6 +384,7 @@ resourcestring
     SLabelCandidateFont = '候选字体';
     SLabelCandidateSize = '大小';
     SLabelCandidatePageSize = '每页候选';
+    SCheckCandidateExpandOnPaging = '翻页时展开多行候选';
     SCandidatePageSizeItem = '%d 项';
     SLabelCandidateColorScheme = '配色';
     SLabelCandidatePreview = '预览';
@@ -1384,6 +1386,7 @@ begin
     Result.candidate_font_name := c_default_candidate_font_name;
     Result.candidate_font_size := c_default_candidate_font_size;
     Result.candidate_page_size := c_default_candidate_page_size;
+    Result.candidate_expand_on_paging := False;
     Result.candidate_page_key_scheme := cpks_minus_plus;
     Result.one_key_completion_key := ock_tab;
     Result.candidate_color_scheme := c_default_candidate_color_scheme;
@@ -2167,6 +2170,11 @@ begin
     m_combo_candidate_page_size.Style := csDropDownList;
     populate_candidate_page_size_combo;
     m_combo_candidate_page_size.OnChange := mark_dirty;
+    m_chk_candidate_expand_on_paging := create_check_box(Self,
+        appearance_group, top, SCheckCandidateExpandOnPaging, mark_dirty);
+    m_chk_candidate_expand_on_paging.Left := scale_ui(c_control_left + 148);
+    m_chk_candidate_expand_on_paging.Width := scale_ui(230);
+    m_chk_candidate_expand_on_paging.Name := 'CandidateExpandOnPaging';
 
     Inc(top, scale_ui(c_row_height + c_general_row_gap));
     create_label(Self, appearance_group, SLabelCandidateColorScheme, top);
@@ -2936,6 +2944,8 @@ begin
         end;
         set_candidate_font_size_slider(default_engine_config.candidate_font_size);
         set_candidate_page_size_combo(default_engine_config.candidate_page_size);
+        m_chk_candidate_expand_on_paging.Checked :=
+            default_engine_config.candidate_expand_on_paging;
         set_candidate_color_scheme_combo(default_engine_config.candidate_color_scheme);
     end
     else if m_page_control.ActivePage = m_tab_fuzzy_pinyin then
@@ -3540,6 +3550,8 @@ begin
     end;
     set_candidate_font_size_slider(m_engine_config.candidate_font_size);
     set_candidate_page_size_combo(m_engine_config.candidate_page_size);
+    m_chk_candidate_expand_on_paging.Checked :=
+        m_engine_config.candidate_expand_on_paging;
     set_candidate_color_scheme_combo(m_engine_config.candidate_color_scheme);
     load_shortcut_controls(m_engine_config.shortcuts);
     set_one_key_completion_key_combo(
@@ -3687,6 +3699,8 @@ begin
     next_config.candidate_font_name := get_selected_candidate_font_name;
     next_config.candidate_font_size := get_candidate_font_size_from_slider;
     next_config.candidate_page_size := get_selected_candidate_page_size;
+    next_config.candidate_expand_on_paging :=
+        m_chk_candidate_expand_on_paging.Checked;
     next_config.one_key_completion_key :=
         get_selected_one_key_completion_key;
     next_config.candidate_page_key_scheme :=

@@ -15,6 +15,7 @@ uses
     nc_shortcut,
     nc_engine_intf,
     nc_candidate_window,
+    nc_candidate_paging,
     nc_config,
     nc_ipc_common,
     nc_caret_anchor_policy,
@@ -38,6 +39,8 @@ type
         m_terminal_like_target: Boolean;
         m_comless_target: Boolean;
         m_candidates: TncCandidateList;
+        m_candidate_pages: TncCandidatePages;
+        m_candidate_viewport: TncCandidateViewport;
         m_one_key_completion: TncOneKeyCompletion;
         m_page_index: Integer;
         m_page_count: Integer;
@@ -60,6 +63,9 @@ type
         m_last_candidate_debug_mode: Boolean;
         procedure ensure_candidate_window;
         procedure handle_remove_user_candidate(const candidate_index: Integer);
+        function handle_prepare_candidate(const page_index, candidate_index: Integer;
+            const generation: UInt64): Boolean;
+        procedure refresh_candidate_pages(const input_changed: Boolean);
     public
         constructor create(const owner: TncEngineHost; const session_id: string; const instance_id: UInt64;
             const config: TncEngineConfig;
@@ -82,6 +88,8 @@ type
             const preedit_text: string;
             const one_key_completion: TncOneKeyCompletion);
         procedure clear_candidates;
+        function prepare_candidate_selection(const page_index, candidate_index: Integer;
+            const generation: UInt64): Boolean;
         function apply_long_neural_completion(
             const task: TncLocalCompletionTask;
             const completion_result: TncLongNeuralCompletionResult;
@@ -783,6 +791,7 @@ begin
     begin
         m_candidate_window := TncCandidateWindow.create;
         m_candidate_window.on_remove_user_candidate := handle_remove_user_candidate;
+        m_candidate_window.on_prepare_candidate := handle_prepare_candidate;
     end;
     if m_engine <> nil then
     begin
@@ -799,11 +808,86 @@ begin
     end;
 end;
 
+procedure TncHostSession.refresh_candidate_pages(const input_changed: Boolean);
+var row, page: Integer;
+begin
+    m_candidate_viewport.update(m_engine.config.candidate_expand_on_paging,
+        input_changed, m_page_index, m_page_count, m_engine.candidate_paging_expanded);
+    m_candidate_pages := nil;
+    m_engine.set_candidate_paging_expanded(False);
+    if not m_candidate_viewport.expanded then Exit;
+    SetLength(m_candidate_pages, m_candidate_viewport.row_count);
+    for row := 0 to High(m_candidate_pages) do
+    begin
+        page := m_candidate_viewport.first_page + row;
+        m_candidate_pages[row].page_index := page;
+        if page = m_page_index then
+            m_candidate_pages[row].candidates := Copy(m_candidates)
+        else
+            m_candidate_pages[row].candidates := m_engine.get_candidate_page_snapshot(page);
+        // Never display guessed/raw candidates when a final page is unavailable.
+        if Length(m_candidate_pages[row].candidates) = 0 then
+        begin
+            m_candidate_pages := nil;
+            Exit;
+        end;
+    end;
+    m_engine.set_candidate_paging_expanded(Length(m_candidate_pages) > 1);
+end;
+
+function TncHostSession.prepare_candidate_selection(const page_index,
+    candidate_index: Integer; const generation: UInt64): Boolean;
+var row: Integer; expected, current: TncCandidateList;
+begin
+    Result := False;
+    if (generation <> m_candidate_generation) or m_release_requested then Exit;
+    expected := nil;
+    if page_index = m_page_index then expected := m_candidates
+    else
+        for row := 0 to High(m_candidate_pages) do
+            if m_candidate_pages[row].page_index = page_index then
+                expected := m_candidate_pages[row].candidates;
+    if (candidate_index < 0) or (candidate_index >= Length(expected)) then Exit;
+    current := m_engine.get_candidate_page_snapshot(page_index);
+    if not candidates_equal(expected, current) then Exit;
+    if not m_engine.activate_candidate_page(page_index, candidate_index) then Exit;
+    m_candidates := Copy(current);
+    m_page_index := page_index;
+    m_selected_index := candidate_index;
+    m_candidate_dirty := True;
+    Inc(m_candidate_generation);
+    refresh_candidate_pages(False);
+    Result := True;
+end;
+
+function TncHostSession.handle_prepare_candidate(const page_index,
+    candidate_index: Integer; const generation: UInt64): Boolean;
+begin
+    Result := False;
+    if m_owner = nil then Exit;
+    m_owner.m_lock.Acquire;
+    try
+        Result := prepare_candidate_selection(page_index, candidate_index, generation);
+    finally
+        m_owner.m_lock.Release;
+    end;
+end;
+
 procedure TncHostSession.update_config(const config: TncEngineConfig);
+var paging_changed: Boolean;
 begin
     if m_engine <> nil then
     begin
+        paging_changed := (m_engine.config.candidate_expand_on_paging <>
+            config.candidate_expand_on_paging) or
+            (m_engine.config.candidate_page_size <> config.candidate_page_size);
         m_engine.update_config(config);
+        if paging_changed then
+        begin
+            m_candidate_viewport := Default(TncCandidateViewport);
+            m_candidate_pages := nil;
+            Inc(m_candidate_generation);
+        end;
     end;
     if m_candidate_window <> nil then
     begin
@@ -880,7 +964,11 @@ procedure TncHostSession.store_candidates(const candidates: TncCandidateList; co
     const one_key_completion: TncOneKeyCompletion);
 var
     changed: Boolean;
+    input_changed: Boolean;
+    previous_visible_rows: Integer;
 begin
+    previous_visible_rows := Length(m_candidate_pages);
+    input_changed := m_preedit_text <> preedit_text;
     changed := (m_page_index <> page_index) or
         (m_page_count <> page_count) or
         (m_selected_index <> selected_index) or
@@ -895,6 +983,9 @@ begin
     m_page_count := page_count;
     m_selected_index := selected_index;
     m_preedit_text := preedit_text;
+    refresh_candidate_pages(input_changed);
+    // Expanding at the first row does not change the page or selected item.
+    changed := changed or (previous_visible_rows <> Length(m_candidate_pages));
     if changed then
     begin
         Inc(m_candidate_generation);
@@ -911,6 +1002,9 @@ end;
 procedure TncHostSession.clear_candidates;
 begin
     SetLength(m_candidates, 0);
+    m_candidate_pages := nil;
+    m_candidate_viewport := Default(TncCandidateViewport);
+    if m_engine <> nil then m_engine.set_candidate_paging_expanded(False);
     m_one_key_completion := Default(TncOneKeyCompletion);
     m_page_index := 0;
     m_page_count := 0;
@@ -970,7 +1064,8 @@ begin
         m_candidate_window.update_candidates(m_candidates, m_page_index, m_page_count, m_selected_index,
             m_preedit_text, m_one_key_completion,
             m_engine.config.one_key_completion_key,
-            m_engine.config.debug_mode, m_engine.config.pinyin_input_scheme);
+            m_engine.config.debug_mode, m_engine.config.pinyin_input_scheme,
+            m_candidate_pages, m_candidate_generation);
         m_last_candidate_debug_mode := m_engine.config.debug_mode;
     end;
     if candidate_generation = m_candidate_generation then
@@ -1020,7 +1115,8 @@ begin
         m_candidate_window.update_candidates(m_candidates, m_page_index, m_page_count, m_selected_index,
             m_preedit_text, m_one_key_completion,
             m_engine.config.one_key_completion_key,
-            m_engine.config.debug_mode, m_engine.config.pinyin_input_scheme);
+            m_engine.config.debug_mode, m_engine.config.pinyin_input_scheme,
+            m_candidate_pages, m_candidate_generation);
         m_last_candidate_debug_mode := m_engine.config.debug_mode;
     end;
 

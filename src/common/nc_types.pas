@@ -219,6 +219,7 @@ type
         candidate_font_name: string;
         candidate_font_size: Integer;
         candidate_page_size: Integer;
+        candidate_expand_on_paging: Boolean;
         candidate_page_key_scheme: TncCandidatePageKeyScheme;
         one_key_completion_key: TncOneKeyCompletionKey;
         candidate_color_scheme: Integer;

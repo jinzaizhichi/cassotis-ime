@@ -3043,7 +3043,6 @@ function TncSqliteDictionary.lookup_fuzzy_full_pinyin_bounded(
     const max_syllables: Integer;
     const max_candidates_per_variant: Integer): Boolean;
 const
-    c_fuzzy_penalty_per_cost = 480;
     c_fuzzy_result_cache_limit = 4096;
 var
     query_key: string;
@@ -3179,7 +3178,7 @@ begin
                 end;
 
                 candidate.score := candidate.score -
-                    variant.cost * c_fuzzy_penalty_per_cost +
+                    variant.cost * c_fuzzy_lookup_penalty_per_cost +
                     get_fuzzy_choice_bonus(query_key, candidate.text);
                 candidate.source := cs_rule;
                 candidate.fuzzy_cost := variant.cost;
@@ -3390,6 +3389,7 @@ begin
                     Continue;
                 end;
                 seen.Add(seen_key, True);
+                item := Default(TncCandidate);
                 item.text := candidate_text;
                 item.comment := candidate_comment;
                 item.dict_weight := m_base_connection.column_int(stmt, 3);
@@ -3431,6 +3431,7 @@ begin
                             Continue;
                         end;
                         seen.Add(seen_key, True);
+                        item := Default(TncCandidate);
                         item.text := candidate_text;
                         item.comment := '';
                         item.dict_weight := m_user_connection.column_int(stmt, 2);
@@ -7371,6 +7372,7 @@ var
                     Continue;
                 end;
 
+                item := Default(TncCandidate);
                 item.text := candidate_text;
                 item.comment := '';
                 item.score := c_literal_candidate_score;
@@ -11321,6 +11323,7 @@ var
             Exit;
         end;
 
+        item := Default(TncCandidate);
         item.text := key;
         item.comment := candidate_comment;
         item.score := effective_score;
@@ -12518,6 +12521,7 @@ var
         effective_has_dict_weight := (effective_source = cs_rule) and has_dict_weight;
         effective_dict_weight := dict_weight;
 
+        item := Default(TncCandidate);
         item.text := text;
         item.comment := comment;
         item.score := score_with_bonus;

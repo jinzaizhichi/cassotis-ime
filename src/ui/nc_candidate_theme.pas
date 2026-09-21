@@ -17,6 +17,8 @@ type
         lm_compound_text_color: TColor;
         selected_background_color: TColor;
         selected_border_color: TColor;
+        active_row_background_color: TColor;
+        active_row_indicator_color: TColor;
         selected_text_color: TColor;
         selected_user_text_color: TColor;
         selected_lm_compound_text_color: TColor;
@@ -60,6 +62,21 @@ begin
     begin
         Result := c_default_candidate_color_scheme;
     end;
+end;
+
+function blend_theme_colors(const background, foreground: TColor;
+    const foreground_percent: Integer): TColor;
+var back, front: COLORREF;
+begin
+    back := ColorToRGB(background);
+    front := ColorToRGB(foreground);
+    Result := TColor(RGB(
+        (GetRValue(back) * (100 - foreground_percent) +
+            GetRValue(front) * foreground_percent + 50) div 100,
+        (GetGValue(back) * (100 - foreground_percent) +
+            GetGValue(front) * foreground_percent + 50) div 100,
+        (GetBValue(back) * (100 - foreground_percent) +
+            GetBValue(front) * foreground_percent + 50) div 100));
 end;
 
 function nc_candidate_color_theme(const value: Integer): TncCandidateColorTheme;
@@ -168,6 +185,11 @@ begin
             Result.selected_weight_text_color := TColor(RGB(76, 86, 98));
         end;
     end;
+    // Keep the row quieter than the selected item in both light and dark themes.
+    Result.active_row_background_color := blend_theme_colors(
+        Result.background_color, Result.selected_background_color, 40);
+    Result.active_row_indicator_color := blend_theme_colors(
+        Result.selected_border_color, Result.text_color, 25);
 end;
 
 end.

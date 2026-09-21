@@ -23,6 +23,7 @@ uses
     nc_dictionary_sqlite,
     nc_document_context_model,
     nc_pinyin_parser,
+    nc_fuzzy_pinyin,
     nc_shuangpin_decoder,
     nc_config;
 
@@ -662,6 +663,7 @@ type
         m_cached_dictionary_traditional: TncDictionaryProvider;
         m_defer_optional_dictionary_models: Boolean;
         m_candidate_navigation_started: Boolean;
+        m_candidate_paging_expanded: Boolean;
         m_dictionary_path: string;
         m_dictionary_write_time: TDateTime;
         m_user_dictionary_path: string;
@@ -896,6 +898,7 @@ type
             const page_size: Integer): Integer;
         function get_page_count_internal(const page_size: Integer): Integer;
         procedure normalize_page_and_selection;
+        function move_candidate_page(const direction: Integer): Boolean;
         procedure apply_visible_local_repair(var candidates: TncCandidateList;
             var source_indices: TArray<Integer>; const expected_units: Integer);
         procedure apply_visible_style_repair(var candidates: TncCandidateList;
@@ -1209,6 +1212,10 @@ type
         procedure debug_set_composition_text(const text: string);
         function process_key(const key_code: Word; const key_state: TncKeyState): Boolean;
         function get_candidates: TncCandidateList;
+        function get_candidate_page_snapshot(const page_index: Integer): TncCandidateList;
+        function activate_candidate_page(const page_index, selected_index: Integer): Boolean;
+        procedure set_candidate_paging_expanded(const expanded: Boolean);
+        property candidate_paging_expanded: Boolean read m_candidate_paging_expanded;
         function get_one_key_completion: TncOneKeyCompletion;
         function get_long_neural_completion_request(
             out request: TncLongNeuralCompletionRequest): Boolean;
@@ -4442,6 +4449,7 @@ begin
     m_composition_built_incrementally := False;
     m_runtime_chain_text := '';
     m_candidate_navigation_started := False;
+    m_candidate_paging_expanded := False;
     m_runtime_common_pattern_text := '';
     m_runtime_redup_text := '';
     SetLength(m_runtime_long_chain_candidates, 0);
@@ -5127,13 +5135,17 @@ begin
     begin
         reset;
     end;
-    if previous_page_size <> get_candidate_page_size then
+    if (previous_page_size <> get_candidate_page_size) or
+        (previous_config.candidate_expand_on_paging <>
+        m_config.candidate_expand_on_paging) then
     begin
         m_page_index := 0;
         m_selected_index := 0;
+        m_candidate_paging_expanded := False;
         SetLength(m_visible_candidates_cache, 0);
         SetLength(m_visible_candidate_source_indices_cache, 0);
         m_visible_candidates_cache_valid := False;
+        m_long_visible_candidate_pool_cache_valid := False;
     end;
     if m_dictionary <> nil then
     begin
@@ -123548,6 +123560,7 @@ var
         m_page_index := 0;
         m_selected_index := 0;
         m_candidate_navigation_started := False;
+        m_candidate_paging_expanded := False;
         confirmed_prefix_boundary_partial_preferred := False;
         m_last_lookup_key := '';
         m_last_lookup_normalized_from := '';
@@ -158948,6 +158961,12 @@ begin
                 if (m_composition_text <> '') and (not key_state.shift_down) and (not key_state.ctrl_down) and
                     (not key_state.alt_down) then
                 begin
+                    if (key_code = VK_UP) and m_config.candidate_expand_on_paging then
+                    begin
+                        set_candidate_paging_expanded(True);
+                        prev_page;
+                        Exit(True);
+                    end;
                     page_size := get_candidate_page_size;
                     if page_size <= 0 then
                     begin
@@ -158983,6 +159002,12 @@ begin
                 if (m_composition_text <> '') and (not key_state.shift_down) and (not key_state.ctrl_down) and
                     (not key_state.alt_down) then
                 begin
+                    if (key_code = VK_DOWN) and m_config.candidate_expand_on_paging then
+                    begin
+                        set_candidate_paging_expanded(True);
+                        next_page;
+                        Exit(True);
+                    end;
                     page_size := get_candidate_page_size;
                     if page_size <= 0 then
                     begin
@@ -164739,6 +164764,91 @@ var
             Result := True;
         end;
 
+        procedure mix_single_syllable_fuzzy_exacts_local;
+        var
+            raw_items, fuzzy_items, tail_items: TList<TShortExactRankItem>;
+            rank_item: TShortExactRankItem;
+            item_idx, raw_idx, fuzzy_idx: Integer;
+        begin
+            if (expected_units <> 1) or (not is_fuzzy_pinyin_active) or
+                (not has_fuzzy_exact_lookup) then Exit;
+
+            raw_items := TList<TShortExactRankItem>.Create;
+            fuzzy_items := TList<TShortExactRankItem>.Create;
+            tail_items := TList<TShortExactRankItem>.Create;
+            try
+                for item_idx := 0 to list.Count - 1 do
+                begin
+                    rank_item := list[item_idx];
+                    if rank_item.actual_full_exact and
+                        (rank_item.candidate.fuzzy_cost = 0) then
+                        raw_items.Add(rank_item)
+                    else if (rank_item.candidate.fuzzy_cost > 0) and
+                        (Trim(rank_item.candidate.comment) = '') and
+                        (get_candidate_text_unit_count(rank_item.candidate.text) = 1) then
+                    begin
+                        { Rescale only the display penalty; keep the independent
+                          fuzzy-choice bonus and the lattice score unchanged. }
+                        rank_item.rank_score := rank_item.candidate.score +
+                            rank_item.candidate.fuzzy_cost *
+                            (c_fuzzy_lookup_penalty_per_cost -
+                            c_fuzzy_single_display_penalty_per_cost);
+                        fuzzy_items.Add(rank_item);
+                    end
+                    else
+                        tail_items.Add(rank_item);
+                end;
+                if fuzzy_items.Count = 0 then Exit;
+
+                fuzzy_items.Sort(TComparer<TShortExactRankItem>.Construct(
+                    function(const left, right: TShortExactRankItem): Integer
+                    begin
+                        Result := CompareValue(right.rank_score, left.rank_score);
+                        if Result = 0 then
+                            Result := left.original_index - right.original_index;
+                    end));
+
+                list.Clear;
+                raw_idx := 0;
+                { User exacts and the leading raw base exact remain protected.
+                  Merge the rest without changing their relative order. }
+                while (raw_idx < raw_items.Count) and
+                    raw_items[raw_idx].user_full_exact do
+                begin
+                    list.Add(raw_items[raw_idx]);
+                    Inc(raw_idx);
+                end;
+                if raw_idx < raw_items.Count then
+                begin
+                    list.Add(raw_items[raw_idx]);
+                    Inc(raw_idx);
+                end;
+                fuzzy_idx := 0;
+                while (raw_idx < raw_items.Count) or
+                    (fuzzy_idx < fuzzy_items.Count) do
+                begin
+                    if (raw_idx < raw_items.Count) and
+                        ((fuzzy_idx >= fuzzy_items.Count) or
+                        (raw_items[raw_idx].rank_score >=
+                        fuzzy_items[fuzzy_idx].rank_score)) then
+                    begin
+                        list.Add(raw_items[raw_idx]);
+                        Inc(raw_idx);
+                    end
+                    else
+                    begin
+                        list.Add(fuzzy_items[fuzzy_idx]);
+                        Inc(fuzzy_idx);
+                    end;
+                end;
+                list.AddRange(tail_items);
+            finally
+                tail_items.Free;
+                fuzzy_items.Free;
+                raw_items.Free;
+            end;
+        end;
+
         procedure ensure_prefix_visible_on_first_page_local;
         var
             visible_limit_local: Integer;
@@ -165142,6 +165252,7 @@ var
                 sort_short_exact_rank_items_local;
             end;
             note_short_exact_phase_local('contextpair');
+            mix_single_syllable_fuzzy_exacts_local;
             ensure_prefix_visible_on_first_page_local;
             note_short_exact_phase_local('visible');
             if short_exact_predictive_prefix_only_mode then
@@ -192008,6 +192119,75 @@ var
             nc_copy_candidate_page(pool, sources, 0, visible_page_size,
                 Result, visible_source_indices);
         end;
+        function prepare_paging_candidate(const source_index: Integer;
+            const beyond_first_page: Boolean; out value: TncCandidate): Boolean;
+        var protected_exact, explicit_prefix: Boolean;
+        begin
+            value := m_candidates[source_index];
+            if (m_dictionary <> nil) and (user_entry_query <> '') and
+                (Trim(value.comment) = '') and
+                m_dictionary.is_user_entry(user_entry_query, Trim(value.text)) then
+            begin
+                value.source := cs_user;
+                value.has_dict_weight := False;
+                value.dict_weight := 0;
+            end;
+            normalize_display_candidate(value);
+            protected_exact := is_protected_full_query_exact_local(value);
+            if (not protected_exact) and beyond_first_page and
+                candidate_is_visible_repeated_initial_reduplicated_local(value) then
+                Exit(False);
+            explicit_prefix := display_candidate_is_explicit_apostrophe_prefix_partial(value);
+            Result := protected_exact or explicit_prefix or
+                not (display_candidate_should_drop_short_invalid_partial(value) or
+                display_candidate_should_drop_short_nonlexicon_complete(value, source_index) or
+                candidate_is_repeated_particle_tail_complete_local(value) or
+                candidate_is_non_strict_one_plus_two_complete(value, source_index));
+        end;
+
+        procedure freeze_remaining_pages;
+        var idx, count: Integer; value: TncCandidate; key: string;
+            pool: TncCandidateList; sources: TArray<Integer>;
+        begin
+            if not m_config.candidate_expand_on_paging or (m_page_index <> 0) or
+                long_visible_candidate_pool_cache_is_current(visible_page_size) then Exit;
+            // Most queries already have a final pool. Freeze the same filtered
+            // tail for single syllables/long exacts without another search.
+            count := Length(Result);
+            SetLength(pool, count + Length(m_candidates));
+            SetLength(sources, Length(pool));
+            emitted_visible_texts.Clear;
+            for idx := 0 to count - 1 do
+            begin
+                pool[idx] := Result[idx];
+                sources[idx] := visible_source_indices[idx];
+                emitted_visible_texts.AddOrSetValue(
+                    nc_visible_candidate_key(pool[idx], pool[idx].comment), True);
+            end;
+            for idx := 0 to High(m_candidates) do
+            begin
+                if not prepare_paging_candidate(idx, True, value) then Continue;
+                if Trim(value.text) = '' then Continue;
+                if (Trim(value.comment) <> '') and
+                    complete_visible_texts.ContainsKey(LowerCase(Trim(value.text))) then Continue;
+                key := nc_visible_candidate_key(value, value.comment);
+                if emitted_visible_texts.ContainsKey(key) then Continue;
+                emitted_visible_texts.Add(key, True);
+                pool[count] := value;
+                sources[count] := idx;
+                Inc(count);
+            end;
+            // A sparse first page must not change when navigating back to it.
+            if (Length(Result) < visible_page_size) and (count > Length(Result)) then Exit;
+            SetLength(pool, count);
+            SetLength(sources, count);
+            m_long_visible_candidate_pool_cache := pool;
+            m_long_visible_candidate_pool_source_indices_cache := sources;
+            m_long_visible_candidate_pool_cache_key :=
+                get_long_visible_candidate_pool_cache_key(visible_page_size);
+            m_long_visible_candidate_pool_source_signature := get_candidate_state_signature;
+            m_long_visible_candidate_pool_cache_valid := True;
+        end;
     begin
         capture_supported_transition_top_local;
         capture_short_exact_ranked_order_local;
@@ -192089,61 +192269,12 @@ var
             while (source_idx <= High(m_candidates)) and
                 (page_idx < visible_page_size) do
             begin
-                candidate := m_candidates[source_idx];
+                if not prepare_paging_candidate(source_idx, m_page_index <> 0, candidate) then
+                begin
+                    Inc(source_idx);
+                    Continue;
+                end;
                 Inc(source_idx);
-                if (m_dictionary <> nil) and (user_entry_query <> '') and
-                    (Trim(candidate.comment) = '') and
-                    m_dictionary.is_user_entry(user_entry_query,
-                    Trim(candidate.text)) then
-                begin
-                    candidate.source := cs_user;
-                    candidate.has_dict_weight := False;
-                    candidate.dict_weight := 0;
-                end;
-                normalize_display_candidate(candidate);
-
-                keep_protected_full_exact :=
-                    is_protected_full_query_exact_local(candidate);
-
-                if (not keep_protected_full_exact) and
-                    (m_page_index <> 0) and
-                    candidate_is_visible_repeated_initial_reduplicated_local(candidate) then
-                begin
-                    Continue;
-                end;
-
-                keep_explicit_prefix_partial :=
-                    display_candidate_is_explicit_apostrophe_prefix_partial(candidate);
-
-                if (not keep_protected_full_exact) and
-                    (not keep_explicit_prefix_partial) and
-                    display_candidate_should_drop_short_invalid_partial(candidate) then
-                begin
-                    Continue;
-                end;
-
-                if (not keep_protected_full_exact) and
-                    (not keep_explicit_prefix_partial) and
-                    display_candidate_should_drop_short_nonlexicon_complete(
-                    candidate, source_idx - 1) then
-                begin
-                    Continue;
-                end;
-
-                if (not keep_protected_full_exact) and
-                    (not keep_explicit_prefix_partial) and
-                    candidate_is_repeated_particle_tail_complete_local(candidate) then
-                begin
-                    Continue;
-                end;
-
-                if (not keep_protected_full_exact) and
-                    (not keep_explicit_prefix_partial) and
-                    candidate_is_non_strict_one_plus_two_complete(candidate,
-                    source_idx - 1) then
-                begin
-                    Continue;
-                end;
 
                 candidate_key := LowerCase(Trim(candidate.text));
                 if (candidate_key <> '') and (Trim(candidate.comment) <> '') and
@@ -192250,6 +192381,7 @@ var
                     end;
                 end;
             end;
+            freeze_remaining_pages;
             cache_visible_candidate_page(Result, visible_source_indices, visible_page_size);
         finally
             emitted_visible_texts.Free;
@@ -193376,6 +193508,44 @@ begin
     Result := True;
 end;
 
+function TncEngine.get_candidate_page_snapshot(const page_index: Integer): TncCandidateList;
+var sources: TArray<Integer>; page_size: Integer;
+begin
+    Result := nil;
+    page_size := get_candidate_page_size;
+    if (page_index = m_page_index) and visible_candidates_cache_is_current(page_size) then
+        Exit(Copy(m_visible_candidates_cache));
+    if long_visible_candidate_pool_cache_is_current(page_size) then
+        nc_copy_candidate_page(m_long_visible_candidate_pool_cache,
+            m_long_visible_candidate_pool_source_indices_cache, page_index,
+            page_size, Result, sources);
+end;
+
+function TncEngine.activate_candidate_page(const page_index, selected_index: Integer): Boolean;
+var page: TncCandidateList; sources: TArray<Integer>; page_size: Integer;
+begin
+    Result := False;
+    page_size := get_candidate_page_size;
+    if (page_index = m_page_index) and visible_candidates_cache_is_current(page_size) then
+        page := Copy(m_visible_candidates_cache)
+    else
+    begin
+        if not long_visible_candidate_pool_cache_is_current(page_size) then Exit;
+        nc_copy_candidate_page(m_long_visible_candidate_pool_cache,
+            m_long_visible_candidate_pool_source_indices_cache, page_index,
+            page_size, page, sources);
+    end;
+    if (selected_index < 0) or (selected_index >= Length(page)) then Exit;
+    if page_index <> m_page_index then
+    begin
+        m_page_index := page_index;
+        cache_visible_candidate_page(page, sources, page_size);
+    end;
+    m_selected_index := selected_index;
+    m_candidate_navigation_started := True;
+    Result := True;
+end;
+
 function TncEngine.get_page_count_internal(const page_size: Integer): Integer;
 var
     total_count: Integer;
@@ -193407,43 +193577,44 @@ begin
     Result := get_page_count_internal(get_candidate_page_size);
 end;
 
-function TncEngine.next_page: Boolean;
-var
-    page_count: Integer;
+procedure TncEngine.set_candidate_paging_expanded(const expanded: Boolean);
 begin
-    page_count := get_page_count;
-    if page_count = 0 then
-    begin
-        Result := False;
-        Exit;
-    end;
+    // Arrows can request expansion even at the first row. The host confirms
+    // that adjacent final pages can actually be displayed when publishing.
+    m_candidate_paging_expanded := expanded and m_config.candidate_expand_on_paging and
+        (get_page_count > 1);
+    if m_candidate_paging_expanded then m_candidate_navigation_started := True;
+end;
 
-    if m_page_index < page_count - 1 then
-    begin
-        m_candidate_navigation_started := True;
-        Inc(m_page_index);
-        m_selected_index := 0;
-        Result := True;
-    end
+function TncEngine.move_candidate_page(const direction: Integer): Boolean;
+var
+    target_page: Integer;
+    preserve_selection: Boolean;
+begin
+    Result := False;
+    target_page := m_page_index + direction;
+    if (target_page < 0) or (target_page >= get_page_count) then Exit;
+    // Preserve the slot on the first page-down that opens the multirow view, too.
+    preserve_selection := m_config.candidate_expand_on_paging and
+        (m_candidate_paging_expanded or
+        long_visible_candidate_pool_cache_is_current(get_candidate_page_size));
+    m_candidate_navigation_started := True;
+    m_page_index := target_page;
+    if preserve_selection then
+        normalize_page_and_selection
     else
-    begin
-        Result := False;
-    end;
+        m_selected_index := 0;
+    Result := True;
+end;
+
+function TncEngine.next_page: Boolean;
+begin
+    Result := move_candidate_page(1);
 end;
 
 function TncEngine.prev_page: Boolean;
 begin
-    if m_page_index > 0 then
-    begin
-        m_candidate_navigation_started := True;
-        Dec(m_page_index);
-        m_selected_index := 0;
-        Result := True;
-    end
-    else
-    begin
-        Result := False;
-    end;
+    Result := move_candidate_page(-1);
 end;
 
 function TncEngine.get_composition_text: string;

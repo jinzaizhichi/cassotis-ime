@@ -23,10 +23,13 @@ uses
     nc_dpi_scale,
     nc_version_info,
     nc_candidate_theme,
+    nc_candidate_paging,
     nc_pinyin_input_diagnostics;
 
 type
     TncCandidateRemoveEvent = procedure(const candidate_index: Integer) of object;
+    TncCandidatePrepareEvent = function(const page_index, candidate_index: Integer;
+        const generation: UInt64): Boolean of object;
 
     TncCandidateWindow = class(TForm)
     private
@@ -38,6 +41,11 @@ type
         m_candidate_show_weight: TArray<Boolean>;
         m_candidate_widths: TArray<Integer>;
         m_candidate_offsets: TArray<Integer>;
+        m_candidate_rows: TArray<Integer>;
+        m_candidate_pages: TArray<Integer>;
+        m_candidate_slots: TArray<Integer>;
+        m_row_count: Integer;
+        m_generation: UInt64;
         m_remove_button_rects: TArray<TRect>;
         m_selected_index: Integer;
         m_list_font: TFont;
@@ -91,6 +99,7 @@ type
         m_weight_gap: Integer;
         m_swallow_next_button_up: Boolean;
         m_on_remove_user_candidate: TncCandidateRemoveEvent;
+        m_on_prepare_candidate: TncCandidatePrepareEvent;
         procedure configure_form;
         procedure configure_page_label;
         procedure configure_preedit_label;
@@ -140,12 +149,17 @@ type
             const one_key_completion: TncOneKeyCompletion;
             const one_key_completion_key: TncOneKeyCompletionKey;
             const debug_mode: Boolean;
-            const pinyin_scheme: TncPinyinInputScheme = pis_full_pinyin);
+            const pinyin_scheme: TncPinyinInputScheme = pis_full_pinyin;
+            const pages: TncCandidatePages = nil; const generation: UInt64 = 0);
         procedure show_at(const x: Integer; const y: Integer;
             const prefer_above: Boolean = False; const clearance: Integer = 0);
         procedure hide_window;
+        property candidate_area: TRect read m_list_rect;
+        property completion_area: TRect read m_one_key_completion_rect;
         property on_remove_user_candidate: TncCandidateRemoveEvent read m_on_remove_user_candidate
             write m_on_remove_user_candidate;
+        property on_prepare_candidate: TncCandidatePrepareEvent read m_on_prepare_candidate
+            write m_on_prepare_candidate;
     end;
 
 function nc_calculate_candidate_top(const anchor_y: Integer;
@@ -703,7 +717,8 @@ begin
         begin
             Continue;
         end;
-        if (point.X >= item_left) and (point.X < item_right) then
+        if (point.X >= item_left) and (point.X < item_right) and
+            ((point.Y - m_list_rect.Top) div m_list_item_height = m_candidate_rows[i]) then
         begin
             Result := i;
             Exit;
@@ -767,7 +782,8 @@ begin
         item_left := m_list_rect.Left + edge_padding + m_candidate_offsets[i];
         item_right := item_left + m_candidate_widths[i];
         button_left := item_right - m_list_padding - m_remove_button_size;
-        button_top := m_list_rect.Top + ((m_list_item_height - m_remove_button_size) div 2);
+        button_top := m_list_rect.Top + m_candidate_rows[i] * m_list_item_height +
+            ((m_list_item_height - m_remove_button_size) div 2);
         m_remove_button_rects[i] := Rect(button_left, button_top, button_left + m_remove_button_size,
             button_top + m_remove_button_size);
     end;
@@ -853,7 +869,7 @@ begin
     begin
         if Assigned(m_on_remove_user_candidate) then
         begin
-            m_on_remove_user_candidate(remove_index);
+            m_on_remove_user_candidate(m_candidate_slots[remove_index]);
         end;
         m_swallow_next_button_up := True;
         Message.Result := 0;
@@ -881,7 +897,7 @@ begin
     begin
         if Assigned(m_on_remove_user_candidate) then
         begin
-            m_on_remove_user_candidate(remove_index);
+            m_on_remove_user_candidate(m_candidate_slots[remove_index]);
         end;
         Message.Result := 0;
         Exit;
@@ -890,9 +906,16 @@ begin
     click_index := hit_test_candidate_index(Point(Message.XPos, Message.YPos));
     if click_index >= 0 then
     begin
+        if Assigned(m_on_prepare_candidate) and
+            not m_on_prepare_candidate(m_candidate_pages[click_index],
+                m_candidate_slots[click_index], m_generation) then
+        begin
+            Message.Result := 0;
+            Exit;
+        end;
         m_selected_index := click_index;
         Invalidate;
-        send_candidate_digit_key(click_index);
+        send_candidate_digit_key(m_candidate_slots[click_index]);
     end;
 
     Message.Result := 0;
@@ -1229,7 +1252,8 @@ begin
         suffix := suffix + '  ' + comment_text;
     end;
 
-    Result := IntToStr(index + 1) + '. ' + suffix;
+    if index < 0 then Result := suffix
+    else Result := IntToStr(index + 1) + '. ' + suffix;
 end;
 
 function TncCandidateWindow.candidate_has_pinyin_tail(const candidate: TncCandidate): Boolean;
@@ -1474,7 +1498,7 @@ begin
             Inc(text_width, m_remove_button_gap + m_remove_button_size + m_list_padding);
         end;
         m_candidate_widths[i] := text_width;
-        if i = 0 then
+        if (i = 0) or (m_candidate_rows[i] <> m_candidate_rows[i - 1]) then
         begin
             m_candidate_offsets[i] := 0;
         end
@@ -1482,10 +1506,12 @@ begin
         begin
             m_candidate_offsets[i] := m_candidate_offsets[i - 1] + m_candidate_widths[i - 1] + m_item_gap;
         end;
+        row_width := Max(row_width, m_candidate_offsets[i] + m_candidate_widths[i]);
     end;
     if item_count > 0 then
     begin
-        row_width := m_candidate_offsets[item_count - 1] + m_candidate_widths[item_count - 1];
+        row_width := Max(row_width,
+            m_candidate_offsets[item_count - 1] + m_candidate_widths[item_count - 1]);
     end;
     if (item_count > 0) and
         (row_width < nc_scale_for_dpi(120, m_current_dpi)) then
@@ -1582,7 +1608,7 @@ begin
 
     if item_count > 0 then
     begin
-        list_height := m_list_item_height;
+        list_height := m_list_item_height * m_row_count;
     end
     else
     begin
@@ -1655,6 +1681,11 @@ var
     weight_text_rect: TRect;
     corner_radius: Integer;
     edge_padding: Integer;
+    active_row: Integer;
+    active_row_rect: TRect;
+    indicator_rect: TRect;
+    indicator_width: Integer;
+    indicator_height: Integer;
     preedit_rect: TRect;
     page_rect: TRect;
     completion_rect: TRect;
@@ -1822,9 +1853,33 @@ begin
     begin
         content_height := content_height + m_weight_gap + weight_text_height;
     end;
-    y := m_list_rect.Top;
     corner_radius := nc_scale_for_dpi(6, m_current_dpi);
     edge_padding := m_list_padding;
+    active_row := -1;
+    if (m_row_count > 1) and (m_selected_index >= 0) and
+        (m_selected_index < Length(m_candidate_rows)) then
+    begin
+        active_row := m_candidate_rows[m_selected_index];
+        active_row_rect := m_list_rect;
+        active_row_rect.Top := m_list_rect.Top + active_row * line_height;
+        active_row_rect.Bottom := active_row_rect.Top + line_height;
+        Canvas.Brush.Style := bsSolid;
+        Canvas.Brush.Color := m_color_theme.active_row_background_color;
+        Canvas.FillRect(active_row_rect);
+
+        // Use the existing left gutter without shifting text or hit targets.
+        indicator_width := nc_scale_for_dpi(2, m_current_dpi);
+        indicator_height := Min(main_text_height,
+            line_height - nc_scale_for_dpi(8, m_current_dpi));
+        indicator_rect.Left := active_row_rect.Left + nc_scale_for_dpi(1, m_current_dpi);
+        indicator_rect.Right := indicator_rect.Left + indicator_width;
+        indicator_rect.Top := active_row_rect.Top + (line_height - indicator_height) div 2;
+        indicator_rect.Bottom := indicator_rect.Top + indicator_height;
+        Canvas.Brush.Color := m_color_theme.active_row_indicator_color;
+        Canvas.Pen.Color := m_color_theme.active_row_indicator_color;
+        Canvas.RoundRect(indicator_rect.Left, indicator_rect.Top,
+            indicator_rect.Right, indicator_rect.Bottom, indicator_width, indicator_width);
+    end;
     for i := 0 to m_candidate_lines.Count - 1 do
     begin
         if (i >= Length(m_candidate_offsets)) or (i >= Length(m_candidate_widths)) then
@@ -1835,6 +1890,7 @@ begin
         item_left := m_list_rect.Left + edge_padding + m_candidate_offsets[i];
         item_right := item_left + m_candidate_widths[i];
         candidate_right := item_right;
+        y := m_list_rect.Top + m_candidate_rows[i] * line_height;
         x := item_left + m_list_padding;
         candidate_source := cs_rule;
         if i < Length(m_candidate_sources) then
@@ -1873,7 +1929,10 @@ begin
         end
         else
         begin
-            Canvas.Brush.Color := Color;
+            if m_candidate_rows[i] = active_row then
+                Canvas.Brush.Color := m_color_theme.active_row_background_color
+            else
+                Canvas.Brush.Color := Color;
             Canvas.FillRect(line_rect);
             Canvas.Font.Color := get_candidate_text_color(candidate_source,
                 candidate_display_kind);
@@ -1940,13 +1999,17 @@ procedure TncCandidateWindow.update_candidates(const candidates: TncCandidateLis
     const one_key_completion: TncOneKeyCompletion;
     const one_key_completion_key: TncOneKeyCompletionKey;
     const debug_mode: Boolean;
-    const pinyin_scheme: TncPinyinInputScheme);
+    const pinyin_scheme: TncPinyinInputScheme;
+    const pages: TncCandidatePages; const generation: UInt64);
 const
     c_show_page_label = False;
 var
     i: Integer;
     count: Integer;
+    row, slot, offset, label_index, active_slot: Integer;
+    displayed: TncCandidateList;
 begin
+    m_generation := generation;
     m_debug_mode := debug_mode;
     m_one_key_completion_text := Trim(one_key_completion.text);
     m_one_key_completion_source := one_key_completion.source;
@@ -1957,16 +2020,54 @@ begin
     try
         m_candidate_lines.Clear;
         m_candidate_weight_lines.Clear;
+        m_row_count := 1;
+        if Length(pages) > 0 then m_row_count := Min(c_candidate_viewport_rows, Length(pages));
         count := Length(candidates);
-        m_selected_index := selected_index;
-        if m_selected_index < 0 then
+        if Length(pages) > 0 then
         begin
-            m_selected_index := 0;
-        end
-        else if m_selected_index >= count then
-        begin
-            m_selected_index := count - 1;
+            count := 0;
+            for row := 0 to m_row_count - 1 do Inc(count, Length(pages[row].candidates));
         end;
+        SetLength(displayed, count);
+        SetLength(m_candidate_rows, count);
+        SetLength(m_candidate_pages, count);
+        SetLength(m_candidate_slots, count);
+        m_selected_index := -1;
+        offset := 0;
+        active_slot := Max(0, selected_index);
+        for row := 0 to m_row_count - 1 do
+        begin
+            if Length(pages) > 0 then
+            begin
+                for slot := 0 to High(pages[row].candidates) do
+                begin
+                    displayed[offset] := pages[row].candidates[slot];
+                    m_candidate_rows[offset] := row;
+                    m_candidate_pages[offset] := pages[row].page_index;
+                    m_candidate_slots[offset] := slot;
+                    if (pages[row].page_index = page_index) and
+                        (slot = Min(active_slot, High(pages[row].candidates))) then
+                        m_selected_index := offset;
+                    Inc(offset);
+                end;
+            end
+            else
+                for slot := 0 to High(candidates) do
+                begin
+                    displayed[slot] := candidates[slot];
+                    m_candidate_rows[slot] := 0;
+                    m_candidate_pages[slot] := page_index;
+                    m_candidate_slots[slot] := slot;
+                    if slot = Min(active_slot, High(candidates)) then m_selected_index := slot;
+                end;
+        end;
+        if (m_selected_index < 0) and (count > 0) then
+            for i := 0 to count - 1 do
+                if m_candidate_pages[i] = page_index then
+                begin
+                    m_selected_index := i;
+                    Break;
+                end;
         m_show_weight_row := m_debug_mode and (count > 0);
         SetLength(m_candidate_sources, count);
         SetLength(m_candidate_display_kinds, count);
@@ -1975,30 +2076,33 @@ begin
 
         for i := 0 to count - 1 do
         begin
-            if candidate_has_pinyin_tail(candidates[i]) then
+            if candidate_has_pinyin_tail(displayed[i]) then
             begin
                 // A partial candidate is only an anchor for the remaining pinyin.
                 // Do not present it as a removable user word, but retain an LM
                 // compound marker on the generated Chinese prefix.
                 m_candidate_sources[i] := cs_rule;
-                m_candidate_display_kinds[i] := candidates[i].display_kind;
+                m_candidate_display_kinds[i] := displayed[i].display_kind;
             end
             else
             begin
-                m_candidate_sources[i] := candidates[i].source;
-                m_candidate_display_kinds[i] := candidates[i].display_kind;
+                m_candidate_sources[i] := displayed[i].source;
+                m_candidate_display_kinds[i] := displayed[i].display_kind;
             end;
-            m_candidate_is_user[i] := candidate_can_remove(candidates[i]);
-            m_candidate_show_weight[i] := m_debug_mode and candidates[i].has_dict_weight;
+            m_candidate_is_user[i] := (m_candidate_pages[i] = page_index) and
+                candidate_can_remove(displayed[i]);
+            m_candidate_show_weight[i] := m_debug_mode and displayed[i].has_dict_weight;
             if m_candidate_show_weight[i] then
             begin
-                m_candidate_weight_lines.Add(IntToStr(candidates[i].dict_weight));
+                m_candidate_weight_lines.Add(IntToStr(displayed[i].dict_weight));
             end
             else
             begin
                 m_candidate_weight_lines.Add('');
             end;
-            m_candidate_lines.Add(format_candidate_line(i, candidates[i]));
+            label_index := -1;
+            if m_candidate_pages[i] = page_index then label_index := m_candidate_slots[i];
+            m_candidate_lines.Add(format_candidate_line(label_index, displayed[i]));
         end;
     finally
         m_candidate_weight_lines.EndUpdate;
