@@ -8,6 +8,7 @@ uses
     System.Classes,
     System.IOUtils,
     System.Generics.Collections,
+    nc_types in '..\src\common\nc_types.pas',
     nc_pinyin_parser in '..\src\engine\nc_pinyin_parser.pas',
     nc_sqlite in '..\src\common\nc_sqlite.pas';
 
@@ -252,7 +253,7 @@ begin
         (document_score >= 0) and (document_score <= 1000) and
         (source_count >= 0) and (source_count <= 8) and
         (vertical_penalty >= 0) and (vertical_penalty <= 1000) and
-        (layer_kind >= 0) and (layer_kind <= 3) and
+        (layer_kind >= 0) and (layer_kind <= c_completion_layer_exact_only_specialist) and
         (path_score >= 0) and (path_score <= 1000);
 end;
 
@@ -306,7 +307,7 @@ begin
         (source_count >= 0) and (source_count <= 8) and
         (path_score >= 0) and (path_score <= 1000) and
         (vertical_penalty >= 0) and (vertical_penalty <= 1000) and
-        (layer_kind >= 0) and (layer_kind <= 3) and
+        (layer_kind >= 0) and (layer_kind <= c_completion_layer_exact_only_specialist) and
         (prefix_anchored in [0, 1]) and
         (rank_order >= 0) and (rank_order < 32);
 end;

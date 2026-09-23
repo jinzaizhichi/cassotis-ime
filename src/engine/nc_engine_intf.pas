@@ -45967,11 +45967,16 @@ var
             c_min_particle_bigram_score = -6144;
             c_min_conditional_score = -12288;
             c_min_competitor_margin = 1024;
+            c_min_tail_context_lift = 512;
+            c_min_lift_head_weight = 200;
+            c_min_lift_tail_weight = 420;
+            c_grams_per_pair = 5;
             // Below the display-stage dictionary-exact override threshold.
             c_char_evidence = 350;
         var
             ngrams_local: TArray<string>;
             observed_scores_local: TArray<Integer>;
+            observed_backoffs_local: TArray<Integer>;
             text_scores_local: TArray<Integer>;
             context_scores_local: TArray<Integer>;
             units_local: TArray<string>;
@@ -45981,33 +45986,97 @@ var
             left_context_local: string;
             particle_query_local, attested_local: Boolean;
 
+            function has_attested_tail_context_lift_local(
+                const index: Integer): Boolean;
+            var
+                offset_local, gram_idx_local: Integer;
+            begin
+                Result := False;
+                if (pair_splits_local[index] <> 1) or
+                    (not is_one_plus_two_supported_head_single_local(
+                    Copy(pair_texts_local[index], 1, 1))) or
+                    (Length(observed_backoffs_local) <> Length(observed_scores_local)) or
+                    (pair_head_weights_local[index] < c_min_lift_head_weight) or
+                    (pair_tail_weights_local[index] < c_min_lift_tail_weight) then Exit;
+                offset_local := index * c_grams_per_pair;
+                for gram_idx_local := 0 to c_grams_per_pair - 1 do
+                    if observed_scores_local[offset_local + gram_idx_local] =
+                        Low(Integer) then Exit;
+                // A retained higher-order continuation makes this weak trigram
+                // boundary inconclusive. Leave it to the original evidence
+                // channels rather than approving a clipped longer expression.
+                if observed_backoffs_local[offset_local] <> 0 then Exit;
+                // Compare P(BC|A) with P(BC), as well as P(C|AB) with
+                // P(C|B). A familiar exact tail must gain observed contextual
+                // support, not merely inherit a high backoff word probability.
+                // Productive heads avoid treating a word's last character as
+                // an independent head (e.g. a noun fragment before its verb).
+                Result := (Int64(observed_scores_local[offset_local]) -
+                    observed_scores_local[offset_local + 1] >= c_min_tail_context_lift) and
+                    (Int64(observed_scores_local[offset_local + 3]) +
+                    observed_scores_local[offset_local] -
+                    observed_scores_local[offset_local + 4] -
+                    observed_scores_local[offset_local + 1] >= c_min_tail_context_lift);
+            end;
+
             function path_is_attested_local(const index: Integer): Boolean;
             begin
-                Result := observed_scores_local[index * 3] >= c_min_trigram_score;
+                Result := (observed_scores_local[index * c_grams_per_pair] >=
+                    c_min_trigram_score) or has_attested_tail_context_lift_local(index);
                 if (not Result) and particle_query_local and
                     (pair_splits_local[index] = 2) and
                     (Copy(pair_texts_local[index], Length(pair_texts_local[index]),
                     1) = particle_text_local) then
-                    Result := observed_scores_local[index * 3 + 1] >=
+                    Result := observed_scores_local[index * c_grams_per_pair + 1] >=
                         c_min_particle_bigram_score;
+            end;
+
+            function has_independent_left_boundary_local(const index: Integer): Boolean;
+            var
+                reversed_local: string;
+                reverse_scores_local, reverse_backoffs_local: TArray<Integer>;
+            begin
+                Result := False;
+                reversed_local := Copy(pair_texts_local[index], 3, 1) +
+                    Copy(pair_texts_local[index], 2, 1) +
+                    Copy(pair_texts_local[index], 1, 1);
+                if not m_dictionary.get_char_lm_parameters(
+                    TArray<string>.Create(reversed_local, reversed_local + #3),
+                    reverse_scores_local, reverse_backoffs_local, True) or
+                    (Length(reverse_scores_local) <> 2) or
+                    (Length(reverse_backoffs_local) <> 2) or
+                    (reverse_scores_local[0] = Low(Integer)) then Exit;
+                // A retained preceding context can be the start of a clipped
+                // word. Require observed sentence-start support in that case;
+                // neither missing data nor a backoff estimate proves a boundary.
+                Result := (reverse_backoffs_local[0] = 0) or
+                    (reverse_scores_local[1] <> Low(Integer));
             end;
         begin
             // This is a bounded fallback for missing word transitions, not a
             // replacement for them. Backoff probability alone cannot admit a path.
             if has_usable_model_evidence_local or
                 (Length(pair_texts_local) < 2) then Exit;
-            SetLength(ngrams_local, Length(pair_texts_local) * 3);
+            SetLength(ngrams_local, Length(pair_texts_local) * c_grams_per_pair);
             for idx_local := 0 to High(pair_texts_local) do
             begin
                 units_local := split_text_units(pair_texts_local[idx_local]);
                 if Length(units_local) <> 3 then Exit;
-                ngrams_local[idx_local * 3] := pair_texts_local[idx_local];
-                ngrams_local[idx_local * 3 + 1] := units_local[1] + units_local[2];
-                ngrams_local[idx_local * 3 + 2] := units_local[0];
+                ngrams_local[idx_local * c_grams_per_pair] := pair_texts_local[idx_local];
+                ngrams_local[idx_local * c_grams_per_pair + 1] := units_local[1] + units_local[2];
+                ngrams_local[idx_local * c_grams_per_pair + 2] := units_local[0];
+                ngrams_local[idx_local * c_grams_per_pair + 3] := units_local[0] + units_local[1];
+                ngrams_local[idx_local * c_grams_per_pair + 4] := units_local[1];
             end;
-            if (not m_dictionary.get_char_lm_attested_scores(ngrams_local,
-                observed_scores_local)) or
-                (Length(observed_scores_local) <> Length(ngrams_local)) then Exit;
+            SetLength(observed_backoffs_local, 0);
+            if not m_dictionary.get_char_lm_parameters(ngrams_local,
+                observed_scores_local, observed_backoffs_local) then
+            begin
+                SetLength(observed_backoffs_local, 0);
+                if not m_dictionary.get_char_lm_attested_scores(ngrams_local,
+                    observed_scores_local) then Exit;
+            end;
+            if Length(observed_scores_local) <> Length(ngrams_local) then Exit;
             particle_query_local := try_get_short_particle_tail_query_parts(
                 lookup_text, particle_key_local, particle_text_local,
                 particle_head_local);
@@ -46027,7 +46096,7 @@ var
             next_score_local := Low(Integer);
             for idx_local := 0 to High(pair_texts_local) do
             begin
-                if observed_scores_local[idx_local * 3 + 2] = Low(Integer) then Continue;
+                if observed_scores_local[idx_local * c_grams_per_pair + 2] = Low(Integer) then Continue;
                 // Rank whole phrases, without an artificial sentence end. The
                 // scorer returns a per-character mean; all paths have three units.
                 score_local := 3 * text_scores_local[idx_local];
@@ -46043,13 +46112,14 @@ var
                 m_last_full_path_debug_info := m_last_full_path_debug_info +
                     Format(' [s3char=%s score=%d next=%d obs=%d/%d w=%d/%d]',
                     [pair_texts_local[best_idx_local], best_score_local,
-                    next_score_local, observed_scores_local[best_idx_local * 3],
-                    observed_scores_local[best_idx_local * 3 + 1],
+                    next_score_local, observed_scores_local[best_idx_local * c_grams_per_pair],
+                    observed_scores_local[best_idx_local * c_grams_per_pair + 1],
                     pair_head_weights_local[best_idx_local],
                     pair_tail_weights_local[best_idx_local]]);
             if (best_idx_local < 0) or (next_score_local = Low(Integer)) or
-                (best_score_local - observed_scores_local[
-                best_idx_local * 3 + 2] < c_min_conditional_score) or
+                ((best_score_local - Int64(observed_scores_local[
+                best_idx_local * c_grams_per_pair + 2]) < c_min_conditional_score) and
+                (not has_attested_tail_context_lift_local(best_idx_local))) or
                 (best_score_local - next_score_local < c_min_competitor_margin) or
                 (pair_head_weights_local[best_idx_local] < c_min_component_weight) or
                 (pair_tail_weights_local[best_idx_local] < c_min_component_weight) or
@@ -46057,6 +46127,17 @@ var
                 pair_paths_local[best_idx_local]) > 0) then Exit;
 
             if not path_is_attested_local(best_idx_local) then Exit;
+
+            if ((observed_scores_local[best_idx_local * c_grams_per_pair] <
+                c_min_trigram_score) or
+                (best_score_local - Int64(observed_scores_local[
+                best_idx_local * c_grams_per_pair + 2]) < c_min_conditional_score)) and
+                has_attested_tail_context_lift_local(best_idx_local) and
+                (not has_independent_left_boundary_local(best_idx_local)) then Exit;
+
+            if m_config.debug_mode and has_attested_tail_context_lift_local(best_idx_local) then
+                m_last_full_path_debug_info := m_last_full_path_debug_info +
+                    ' [s3char-tail-lift]';
 
             // A context-free phrase preference must not overrule a conflicting
             // preceding context. Leave that decision to the contextual ranker.

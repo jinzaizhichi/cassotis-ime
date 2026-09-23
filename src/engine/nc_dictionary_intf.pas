@@ -98,7 +98,8 @@ type
         function get_char_lm_attested_scores(const ngrams: TArray<string>;
             out scores: TArray<Integer>): Boolean; virtual;
         function get_char_lm_parameters(const ngrams: TArray<string>;
-            out scores, backoffs: TArray<Integer>): Boolean; virtual;
+            out scores, backoffs: TArray<Integer>;
+            const reverse_model: Boolean = False): Boolean; virtual;
         function get_char_reverse_lm_suffix_scores(const texts: TArray<string>;
             out scores: TArray<Integer>): Boolean; virtual;
         function get_char_lm_cached_span_scores(const texts: TArray<string>;
@@ -460,7 +461,8 @@ begin
 end;
 
 function TncDictionaryProvider.get_char_lm_parameters(const ngrams: TArray<string>;
-    out scores, backoffs: TArray<Integer>): Boolean;
+    out scores, backoffs: TArray<Integer>;
+    const reverse_model: Boolean): Boolean;
 begin
     scores := nil;
     backoffs := nil;

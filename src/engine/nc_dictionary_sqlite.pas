@@ -383,7 +383,8 @@ type
         function get_char_lm_attested_scores(const ngrams: TArray<string>;
             out scores: TArray<Integer>): Boolean; override;
         function get_char_lm_parameters(const ngrams: TArray<string>;
-            out scores, backoffs: TArray<Integer>): Boolean; override;
+            out scores, backoffs: TArray<Integer>;
+            const reverse_model: Boolean = False): Boolean; override;
         function get_char_reverse_lm_suffix_scores(const texts: TArray<string>;
             out scores: TArray<Integer>): Boolean; override;
         function get_char_lm_cached_span_scores(const texts: TArray<string>;
@@ -3482,6 +3483,7 @@ const
         'LEFT JOIN dict_base_completion_prior p ON p.pinyin=b.pinyin AND p.text=b.text ';
     query_sql = 'WITH prefix_probe AS (' + select_sql +
         'WHERE b.pinyin > ?1 AND b.pinyin < ?2 AND b.weight > 0 AND b.comment='''' ' +
+        'AND COALESCE(p.layer_kind, 0) <> 4 ' +
         'ORDER BY CASE WHEN p.corpus_score > 0 OR p.path_score >= 120 ' +
         'THEN 1 ELSE 0 END DESC, ' +
         '(COALESCE(p.popularity_prior,0) + b.weight) DESC, b.pinyin, b.text LIMIT ?3) ' +
@@ -3566,6 +3568,7 @@ const
         'ON p.pinyin = b.pinyin AND p.text = b.text ' +
         'WHERE b.pinyin >= ?1 AND b.pinyin < ?2 ' +
         'AND b.weight > 0 AND COALESCE(b.comment, '''') = '''' ' +
+        'AND COALESCE(p.layer_kind, 0) <> 4 ' +
         'ORDER BY COALESCE(p.popularity_prior, -1) DESC, b.weight DESC, ' +
         'length(b.text) ASC, b.text ASC LIMIT ?3';
     base_completion_weight_sql =
@@ -3578,12 +3581,14 @@ const
         'ON p.pinyin = b.pinyin AND p.text = b.text ' +
         'WHERE b.pinyin >= ?1 AND b.pinyin < ?2 ' +
         'AND b.weight > 0 AND COALESCE(b.comment, '''') = '''' ' +
+        'AND COALESCE(p.layer_kind, 0) <> 4 ' +
         'ORDER BY b.weight DESC, length(b.text) ASC, b.text ASC LIMIT ?3';
     base_completion_lookup_sql =
         'SELECT full_pinyin, text, weight, popularity_prior, ' +
         'corpus_score, document_score, source_count, path_score, ' +
         'vertical_penalty, layer_kind, prefix_anchored ' +
         'FROM dict_base_completion_lookup WHERE typed_prefix = ?1 ' +
+        'AND layer_kind <> 4 ' +
         'ORDER BY rank_order ASC LIMIT 16';
     user_completion_sql =
         'SELECT pinyin, text, weight, last_used FROM dict_user ' +
@@ -3940,6 +3945,8 @@ var
         item_idx: Integer;
         worst_idx: Integer;
     begin
+        if (candidate_source = okcs_base_exact) and
+            (vertical_layer_kind = c_completion_layer_exact_only_specialist) then Exit;
         if (Trim(candidate_text) = '') or
             (not candidate_matches_prefix(candidate_pinyin, candidate_text,
             candidate_compact_pinyin)) then
@@ -16862,8 +16869,10 @@ begin
 end;
 
 function TncSqliteDictionary.get_char_lm_parameters(const ngrams: TArray<string>;
-    out scores, backoffs: TArray<Integer>): Boolean;
+    out scores, backoffs: TArray<Integer>;
+    const reverse_model: Boolean): Boolean;
 var
+    wanted: TDictionary<string, Boolean>;
     entries: TDictionary<string, TncCharLmCacheEntry>;
     entry: TncCharLmCacheEntry;
     idx: Integer;
@@ -16873,10 +16882,14 @@ begin
     SetLength(backoffs, Length(ngrams));
     for idx := 0 to High(scores) do scores[idx] := Low(Integer);
     if (Length(ngrams) = 0) or (Length(ngrams) > 4096) or
-        not ensure_char_lm_available then Exit;
+        not ensure_char_lm_available(reverse_model) then Exit;
+    wanted := TDictionary<string, Boolean>.Create;
     entries := TDictionary<string, TncCharLmCacheEntry>.Create;
     try
-        if not load_char_lm_entries(ngrams, entries) then Exit;
+        for idx := 0 to High(ngrams) do
+            if ngrams[idx] <> '' then
+                wanted.AddOrSetValue(ngrams[idx], True);
+        if not load_char_lm_entries(wanted.Keys.ToArray, entries, reverse_model) then Exit;
         for idx := 0 to High(ngrams) do
             if entries.TryGetValue(ngrams[idx], entry) and entry.found then
             begin
@@ -16886,6 +16899,7 @@ begin
         Result := True;
     finally
         entries.Free;
+        wanted.Free;
     end;
 end;
 

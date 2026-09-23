@@ -33,6 +33,7 @@ uses
     nc_status_widget_policy,
     nc_status_widget_appearance,
     nc_tray_icon_appearance,
+    nc_tray_menu,
     nc_settings_form,
     nc_types;
 
@@ -56,7 +57,7 @@ type
     TncTrayHost = class(TForm)
     private
         m_tray_icon: TTrayIcon;
-        m_menu: TPopupMenu;
+        m_menu: TncTrayPopupMenu;
         m_item_input_mode: TMenuItem;
         m_item_dictionary_variant: TMenuItem;
         m_item_full_width: TMenuItem;
@@ -115,7 +116,7 @@ type
         m_last_style_refresh_tick: UInt64;
         m_last_profile_activate_tick: UInt64;
         m_last_profile_inactive_tick: UInt64;
-        m_menu_popup_active: Boolean;
+        m_open_settings_pending: Boolean;
         m_status_scaled_dpi: Integer;
         m_active_state_event: TEvent;
         m_inactive_state_event: TEvent;
@@ -186,14 +187,17 @@ type
         procedure on_reload_click(Sender: TObject);
         procedure on_website_click(Sender: TObject);
         procedure on_exit_click(Sender: TObject);
+        procedure on_tray_mouse_up(Sender: TObject; Button: TMouseButton;
+            Shift: TShiftState; X, Y: Integer);
         procedure on_menu_popup(Sender: TObject);
+        procedure on_menu_closed(Sender: TObject);
+        procedure log_menu(const detail: string);
+        function menu_active: Boolean;
         procedure on_timer(Sender: TObject);
         procedure WMNcActiveStateChanged(var Message: TMessage); message WM_NC_ACTIVE_STATE_CHANGED;
         procedure WMNcInactiveStateChanged(var Message: TMessage); message WM_NC_INACTIVE_STATE_CHANGED;
         procedure WMNcOpenSettings(var Message: TMessage); message WM_NC_OPEN_SETTINGS;
         procedure WMNcStatusFormMetricsChanged(var Message: TMessage); message WM_NC_STATUS_FORM_METRICS_CHANGED;
-        procedure WMEnterMenuLoop(var Message: TMessage); message WM_ENTERMENULOOP;
-        procedure WMExitMenuLoop(var Message: TMessage); message WM_EXITMENULOOP;
     protected
         procedure CreateParams(var Params: TCreateParams); override;
         procedure WndProc(var Message: TMessage); override;
@@ -372,11 +376,6 @@ begin
     Result := MulDiv(value, effective_dpi, 96);
 end;
 
-function has_popup_menu_window: Boolean;
-begin
-    Result := FindWindow(PChar('#32768'), nil) <> 0;
-end;
-
 function scale_float_for_dpi(const value: Single; const dpi: Integer): Single;
 var
     effective_dpi: Integer;
@@ -500,7 +499,7 @@ begin
     m_last_style_refresh_tick := 0;
     m_last_profile_activate_tick := 0;
     m_last_profile_inactive_tick := 0;
-    m_menu_popup_active := False;
+    m_open_settings_pending := False;
     m_status_scaled_dpi := 96;
     m_status_metrics_refresh_pending := False;
     m_active_state_event := TEvent.Create(nil, False, False, get_nc_active_event);
@@ -515,6 +514,7 @@ begin
     configure_menu;
     configure_status_widget;
     load_config;
+    log_menu('ready version=' + m_product_version);
     load_status_widget_state;
     start_active_state_thread;
 end;
@@ -1138,9 +1138,12 @@ procedure TncTrayHost.configure_menu;
 var
     separator: TMenuItem;
 begin
-    m_menu := TPopupMenu.Create(Self);
+    m_menu := TncTrayPopupMenu.Create(Self);
+    m_menu.PopupOwner := Handle;
     m_menu.AutoHotkeys := maManual;
     m_menu.OnPopup := on_menu_popup;
+    m_menu.OnClosed := on_menu_closed;
+    m_menu.OnTrace := log_menu;
 
     m_item_input_mode := TMenuItem.Create(m_menu);
     m_item_input_mode.OnClick := on_input_mode_click;
@@ -1211,7 +1214,9 @@ begin
     m_item_exit.OnClick := on_exit_click;
     m_menu.Items.Add(m_item_exit);
 
-    m_tray_icon.PopupMenu := m_menu;
+    // VCL's automatic path pumps messages before OnPopup, when profile IPC
+    // and menu rebuilding are still unguarded. Own the complete popup lifetime.
+    m_tray_icon.OnMouseUp := on_tray_mouse_up;
 
     m_timer := TTimer.Create(Self);
     m_timer.Interval := c_tray_timer_interval_ms;
@@ -2077,6 +2082,7 @@ var
     should_show: Boolean;
     status_visible: Boolean;
 begin
+    if menu_active then Exit;
     if (m_status_form = nil) or (m_item_status_widget = nil) then
     begin
         Exit;
@@ -2093,7 +2099,7 @@ begin
 
     should_show := m_item_status_widget.Checked and m_engine_active and
         (m_profile_active or m_profile_active_pending);
-    if m_profile_inactive_pending and (not m_menu_popup_active) then
+    if m_profile_inactive_pending then
     begin
         // Hide promptly on focus loss unless a tray menu popup is active.
         // The widget will be restored after debounce if the new focus is
@@ -2210,6 +2216,7 @@ var
     current_tick: UInt64;
     should_poll_variant: Boolean;
 begin
+    if menu_active then Exit;
     if (m_ipc_client = nil) or (m_session_id = '') then
     begin
         Exit;
@@ -2314,6 +2321,12 @@ end;
 
 procedure TncTrayHost.WMNcOpenSettings(var Message: TMessage);
 begin
+    if menu_active then
+    begin
+        m_open_settings_pending := True;
+        Message.Result := 0;
+        Exit;
+    end;
     show_settings_dialog;
     Message.Result := 0;
 end;
@@ -2321,6 +2334,12 @@ end;
 procedure TncTrayHost.WMNcStatusFormMetricsChanged(var Message: TMessage);
 begin
     m_status_metrics_refresh_pending := False;
+    if menu_active then
+    begin
+        m_last_style_refresh_tick := 0;
+        Message.Result := 0;
+        Exit;
+    end;
     if m_status_form <> nil then
     begin
         refresh_status_widget_frame;
@@ -2497,6 +2516,7 @@ var
     target_icon: TIcon;
     should_refresh_icon: Boolean;
 begin
+    if menu_active then Exit;
     target_icon := nil;
     should_refresh_icon := (not m_tray_state_inited) or (m_last_tray_mode <> m_engine_config.input_mode);
     if m_engine_config.input_mode = im_chinese then
@@ -2845,9 +2865,56 @@ begin
     Application.Terminate;
 end;
 
+function TncTrayHost.menu_active: Boolean;
+begin
+    Result := (m_menu <> nil) and m_menu.Tracking;
+end;
+
+procedure TncTrayHost.log_menu(const detail: string);
+var
+    logger: TncLogger;
+    windows_session: DWORD;
+begin
+    if not m_log_config.enabled then Exit;
+    windows_session := 0;
+    ProcessIdToSessionId(GetCurrentProcessId, windows_session);
+    logger := TncLogger.create(m_log_config.log_path, m_log_config.max_size_kb);
+    try
+        logger.set_level(m_log_config.level);
+        logger.info(Format('Tray menu %s pid=%d session=%d remote=%d dpi=%d screen=%dx%d',
+            [detail, GetCurrentProcessId, windows_session,
+             GetSystemMetrics(SM_REMOTESESSION), get_window_dpi(Handle),
+             GetSystemMetrics(SM_CXVIRTUALSCREEN), GetSystemMetrics(SM_CYVIRTUALSCREEN)]));
+    finally
+        logger.Free;
+    end;
+end;
+
+procedure TncTrayHost.on_tray_mouse_up(Sender: TObject; Button: TMouseButton;
+    Shift: TShiftState; X, Y: Integer);
+begin
+    if (Button <> mbRight) or (m_menu = nil) then Exit;
+    m_menu.PopupOwner := Handle;
+    m_menu.PopupComponent := Self;
+    m_menu.Popup(X, Y);
+end;
+
 procedure TncTrayHost.on_menu_popup(Sender: TObject);
 begin
-    m_menu_popup_active := True;
+    hide_status_hint;
+end;
+
+procedure TncTrayHost.on_menu_closed(Sender: TObject);
+begin
+    m_last_state_poll_tick := 0;
+    m_last_style_refresh_tick := 0;
+    m_last_config_poll_tick := 0;
+    queue_status_widget_metrics_refresh;
+    if m_open_settings_pending then
+    begin
+        m_open_settings_pending := False;
+        PostMessage(Handle, WM_NC_OPEN_SETTINGS, 0, 0);
+    end;
 end;
 
 procedure TncTrayHost.on_timer(Sender: TObject);
@@ -2857,6 +2924,9 @@ var
     state_poll_interval: UInt64;
     style_refresh_interval: UInt64;
 begin
+    // The native menu has its own message loop. No synchronous host calls,
+    // configuration reloads or window/notification-icon changes while tracking.
+    if menu_active then Exit;
     now_tick := GetTickCount64;
 
     if (m_last_tray_theme_check_tick = 0) or
@@ -2866,13 +2936,7 @@ begin
         m_last_tray_theme_check_tick := now_tick;
     end;
 
-    if m_menu_popup_active and (not has_popup_menu_window) then
-    begin
-        m_menu_popup_active := False;
-    end;
-
     if m_profile_inactive_pending and (m_last_profile_inactive_tick <> 0) and
-        (not m_menu_popup_active) and
         (now_tick - m_last_profile_inactive_tick >= c_profile_inactive_debounce_ms) then
     begin
         m_profile_inactive_pending := False;
@@ -2924,15 +2988,12 @@ begin
 
     if (m_last_style_refresh_tick = 0) or (now_tick - m_last_style_refresh_tick >= style_refresh_interval) then
     begin
-        if not m_menu_popup_active then
+        enforce_application_toolwindow_style;
+        enforce_host_form_toolwindow_style;
+        if (m_status_form <> nil) and m_status_form.Visible then
         begin
-            enforce_application_toolwindow_style;
-            enforce_host_form_toolwindow_style;
-            if (m_status_form <> nil) and m_status_form.Visible then
-            begin
-                enforce_status_form_toolwindow_style;
-                refresh_status_widget_frame;
-            end;
+            enforce_status_form_toolwindow_style;
+            refresh_status_widget_frame;
         end;
         m_last_style_refresh_tick := now_tick;
     end;
@@ -2949,26 +3010,9 @@ begin
 
     if (m_last_state_poll_tick = 0) or (now_tick - m_last_state_poll_tick >= state_poll_interval) then
     begin
-        if not m_menu_popup_active then
-        begin
-            refresh_state_from_host;
-        end;
+        refresh_state_from_host;
         m_last_state_poll_tick := now_tick;
     end;
-end;
-
-procedure TncTrayHost.WMEnterMenuLoop(var Message: TMessage);
-begin
-    m_menu_popup_active := True;
-    inherited;
-end;
-
-procedure TncTrayHost.WMExitMenuLoop(var Message: TMessage);
-begin
-    m_menu_popup_active := False;
-    m_last_state_poll_tick := 0;
-    m_last_style_refresh_tick := 0;
-    inherited;
 end;
 
 end.

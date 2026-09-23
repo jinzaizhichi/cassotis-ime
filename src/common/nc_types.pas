@@ -19,6 +19,8 @@ const
     c_default_candidate_color_scheme = 0;
     c_min_candidate_color_scheme = 0;
     c_max_candidate_color_scheme = 5;
+    // Catalogue coverage is selectable by exact input, not predictive evidence.
+    c_completion_layer_exact_only_specialist = 4;
 
 type
     TncFuzzyPinyinRule = (
