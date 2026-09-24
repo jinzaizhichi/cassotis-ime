@@ -91,8 +91,28 @@ $runtimePayloadFiles = @(
     'out\local_repair\query_int8.onnx',
     'out\local_repair\vocab.json',
     'out\local_repair\readings.json',
-    'out\local_repair\runtime_manifest.json'
+    'out\local_repair\runtime_manifest.json',
+    'out\short_context\runtime_manifest.json',
+    'out\short_context\exit0.int8.onnx',
+    'out\short_context\exit1.int8.onnx',
+    'out\short_context\exit2.int8.onnx',
+    'out\short_context\exit3.int8.onnx',
+    'out\short_context\final.int8.onnx',
+    'out\short_context\tokenizer.bin',
+    'out\short_context\policy.bin'
 )
+
+$shortManifestPath = Join-Path $resolvedSourceRoot 'out\short_context\runtime_manifest.json'
+require-path $shortManifestPath
+$shortManifest = Get-Content -LiteralPath $shortManifestPath -Raw -Encoding UTF8 | ConvertFrom-Json
+foreach ($item in $shortManifest.files.PSObject.Properties) {
+    if ([IO.Path]::GetFileName($item.Name) -ne $item.Name) { throw "Invalid short-context asset: $($item.Name)" }
+    $path = Join-Path (Split-Path -Parent $shortManifestPath) $item.Name
+    require-path $path
+    if ((Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash -ine $item.Value) {
+        throw "Short-context runtime hash mismatch: $path"
+    }
+}
 
 $repairManifestPath = Join-Path $resolvedSourceRoot 'out\local_repair\runtime_manifest.json'
 require-path $repairManifestPath
@@ -123,7 +143,8 @@ $requiredFiles = @(
     'third_party\onnxruntime\LICENSE',
     'third_party\onnxruntime\ThirdPartyNotices.txt',
     'third_party\macbert\LICENSE',
-    'third_party\macbert\NOTICE'
+    'third_party\macbert\NOTICE',
+    'third_party\rbt3\NOTICE'
 )
 
 foreach ($relativePath in $requiredFiles) {

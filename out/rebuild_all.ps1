@@ -1061,6 +1061,17 @@ function build_and_copy_pinyin_transformer_runtime
     $local_completion_target = Join-Path $script_dir 'local_completion'
     $repair_source = Join-Path $root_dir 'data\models\local_repair'
     $repair_target = Join-Path $script_dir 'local_repair'
+    $short_source = Join-Path $root_dir 'data\models\short_context'
+    $short_target = Join-Path $script_dir 'short_context'
+    $short_manifest = Get-Content -LiteralPath (Join-Path $short_source 'runtime_manifest.json') -Raw -Encoding UTF8 | ConvertFrom-Json
+    $short_files = @($short_manifest.files.PSObject.Properties.Name)
+    foreach ($name in $short_files) {
+        if ([IO.Path]::GetFileName($name) -ne $name) { throw "Invalid short-context asset: $name" }
+        if ((Get-FileHash -LiteralPath (Join-Path $short_source $name) -Algorithm SHA256).Hash -ine $short_manifest.files.$name) {
+            throw "Short-context asset hash mismatch: $name"
+        }
+    }
+    $short_files += 'runtime_manifest.json'
     $repair_files = @('context_int8.onnx', 'query_int8.onnx', 'vocab.json', 'readings.json')
     $repair_manifest_path = Join-Path $repair_source 'runtime_manifest.json'
     if (Test-Path -LiteralPath $repair_manifest_path)
@@ -1092,6 +1103,7 @@ function build_and_copy_pinyin_transformer_runtime
         (Join-Path $local_completion_source 'model_manifest.json')
     )
     foreach ($name in $repair_files) { $required_sources += Join-Path $repair_source $name }
+    foreach ($name in $short_files) { $required_sources += Join-Path $short_source $name }
     foreach ($required_source in $required_sources)
     {
         if (-not (Test-Path -LiteralPath $required_source))
@@ -1135,6 +1147,10 @@ function build_and_copy_pinyin_transformer_runtime
     foreach ($name in $repair_files)
     {
         publish_runtime_file (Join-Path $repair_source $name) (Join-Path $repair_target $name)
+    }
+    New-Item -ItemType Directory -Force -Path $short_target | Out-Null
+    foreach ($name in $short_files) {
+        publish_runtime_file (Join-Path $short_source $name) (Join-Path $short_target $name)
     }
 }
 

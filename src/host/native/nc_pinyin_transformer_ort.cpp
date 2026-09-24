@@ -151,6 +151,8 @@ std::wstring Utf8ToWide(const char* message) {
 
 }  // namespace
 
+#include "nc_short_context_runtime.h"
+
 extern "C" __declspec(dllexport) void* __cdecl nc_pt_create(
     const wchar_t* model_path,
     int intra_threads,

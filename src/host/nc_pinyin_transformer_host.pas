@@ -9,7 +9,8 @@ uses
     System.SyncObjs,
     System.Generics.Collections,
     nc_engine_intf,
-    nc_local_repair_host, nc_dictionary_intf, nc_local_repair_guard;
+    nc_local_repair_host, nc_dictionary_intf, nc_local_repair_guard,
+    nc_short_context_ranker, nc_short_context_host;
 
 type
     TncPinyinTransformerHostReranker = class;
@@ -51,7 +52,7 @@ type
 
     TncPinyinTransformerHostReranker = class(TInterfacedObject,
         IncLongNeuralReranker, IncLongLocalRepair, IncLongLocalRepairPolicy, IncLongJointRepair,
-        IncLongStyleRepair)
+        IncLongStyleRepair, IncShortContextReranker)
     private type
         TncPtCreate = function(const model_path: PWideChar;
             const intra_threads: Integer; const error_text: PWideChar;
@@ -78,6 +79,7 @@ type
     private
         m_base_directory: string;
         m_local_repair: TncLocalRepairHost;
+        m_short_context: IncShortContextReranker;
         m_state_lock: TCriticalSection;
         m_run_lock: TCriticalSection;
         m_loader: TncPinyinTransformerLoadThread;
@@ -189,6 +191,8 @@ type
         function last_error: string;
         procedure set_audit_enabled(const value: Boolean);
         function get_last_audit(out audit: TncPinyinTransformerAudit): Boolean;
+        function short_context_ready: Boolean;
+        function try_switch_short_context(const request: TncShortContextRequest): Boolean;
     end;
 
 implementation
@@ -790,6 +794,18 @@ begin
         if not m_local_repair.wait_until_ready(60000) then
             raise Exception.Create('Local repair initialization timed out');
     end;
+    m_short_context := TncShortContextHost.Create(m_base_directory, background_load);
+end;
+
+function TncPinyinTransformerHostReranker.short_context_ready: Boolean;
+begin
+    Result := (m_short_context <> nil) and m_short_context.short_context_ready;
+end;
+
+function TncPinyinTransformerHostReranker.try_switch_short_context(
+    const request: TncShortContextRequest): Boolean;
+begin
+    Result := (m_short_context <> nil) and m_short_context.try_switch_short_context(request);
 end;
 
 destructor TncPinyinTransformerHostReranker.Destroy;

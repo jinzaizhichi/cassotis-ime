@@ -17,6 +17,7 @@ uses
     nc_dictionary_intf,
     nc_local_repair_guard,
     nc_short_particle_evidence,
+    nc_short_context_ranker,
 {$IFDEF CASSOTIS_TAB_HANDOFF_DIAGNOSTICS}
     nc_tab_repair_handoff,
 {$ENDIF}
@@ -827,6 +828,7 @@ type
             TncLongCompletePoolRuntimeCandidateArray;
         m_runtime_long_retained_exact_edges: TncLongRetainedExactEdgeArray;
         m_long_neural_reranker: IncLongNeuralReranker;
+        m_short_context_reranker: IncShortContextReranker;
         m_long_local_repair: IncLongLocalRepair;
         m_long_local_repair_policy: IncLongLocalRepairPolicy;
         m_long_joint_repair: IncLongJointRepair;
@@ -1148,6 +1150,7 @@ type
         procedure set_dictionary_provider(const dictionary: TncDictionaryProvider);
         procedure set_long_neural_reranker(
             const reranker: IncLongNeuralReranker);
+        procedure set_short_context_reranker(const reranker: IncShortContextReranker);
         function detach_dictionary_provider: TncDictionaryProvider;
         procedure adopt_ready_dictionary_provider(
             const dictionary: TncDictionaryProvider);
@@ -5224,10 +5227,17 @@ begin
     clear_lookup_bonus_caches;
 end;
 
+procedure TncEngine.set_short_context_reranker(const reranker: IncShortContextReranker);
+begin
+    m_short_context_reranker := reranker;
+end;
+
 procedure TncEngine.set_long_neural_reranker(
     const reranker: IncLongNeuralReranker);
 begin
     m_long_neural_reranker := reranker;
+    m_short_context_reranker := nil;
+    Supports(reranker, IncShortContextReranker, m_short_context_reranker);
     m_long_local_repair := nil;
     m_long_local_repair_policy := nil;
     m_long_joint_repair := nil;
@@ -159170,6 +159180,7 @@ var
     short_nocontext_promoted_exact_lead: Integer;
     short_context_promoted_exact_text: string;
     short_context_promoted_exact_lead: Integer;
+    short_context_swapped: Boolean;
     promoted_repeated_initial_count: Integer;
     repeated_initial_display_source_candidates: TncCandidateList;
     explicit_apostrophe_entry_top_partial_candidate: TncCandidate;
@@ -192230,7 +192241,7 @@ var
         var idx, count: Integer; value: TncCandidate; key: string;
             pool: TncCandidateList; sources: TArray<Integer>;
         begin
-            if not m_config.candidate_expand_on_paging or (m_page_index <> 0) or
+            if ((not m_config.candidate_expand_on_paging) and (not short_context_swapped)) or (m_page_index <> 0) or
                 long_visible_candidate_pool_cache_is_current(visible_page_size) then Exit;
             // Most queries already have a final pool. Freeze the same filtered
             // tail for single syllables/long exacts without another search.
@@ -192442,6 +192453,20 @@ var
             apply_visible_local_repair(Result, visible_source_indices, expected_units);
             apply_visible_style_repair(Result, visible_source_indices, expected_units);
             add_decreasing_sentence_prefixes_local;
+            if (m_page_index = 0) and (not m_candidate_navigation_started) and
+                (expected_units >= 2) and (expected_units <= 4) and
+                (not is_shuangpin_input) and (not is_fuzzy_pinyin_active) then
+            begin
+                if m_segment_left_context <> '' then
+                    short_context_swapped := nc_rerank_short_context(m_short_context_reranker, m_dictionary,
+                        m_segment_left_context, normalized_pinyin, Result, visible_source_indices)
+                else if m_external_left_context <> '' then
+                    short_context_swapped := nc_rerank_short_context(m_short_context_reranker, m_dictionary,
+                        m_external_left_context, normalized_pinyin, Result, visible_source_indices)
+                else
+                    short_context_swapped := nc_rerank_short_context(m_short_context_reranker, m_dictionary,
+                        m_left_context, normalized_pinyin, Result, visible_source_indices);
+            end;
             if (Length(Result) > 0) and
                 (Trim(Result[0].comment) = '') and
                 (get_candidate_text_unit_count(Trim(Result[0].text)) =
@@ -192462,6 +192487,12 @@ var
                     end;
                 end;
             end;
+            if short_context_swapped and long_visible_candidate_pool_cache_is_current(visible_page_size) then
+                for page_idx := 0 to 1 do
+                begin
+                    m_long_visible_candidate_pool_cache[page_idx] := Result[page_idx];
+                    m_long_visible_candidate_pool_source_indices_cache[page_idx] := visible_source_indices[page_idx];
+                end;
             freeze_remaining_pages;
             cache_visible_candidate_page(Result, visible_source_indices, visible_page_size);
         finally
@@ -192730,6 +192761,7 @@ begin
     short_nocontext_promoted_exact_lead := 0;
     short_context_promoted_exact_text := '';
     short_context_promoted_exact_lead := 0;
+    short_context_swapped := False;
     promoted_repeated_initial_count := 0;
     if not is_fuzzy_pinyin_active then
     begin

@@ -66,6 +66,18 @@ This file lists third-party software/data used by Cassotis IME and the related l
 - The offline teacher and training documents are not bundled. CPU inference
   takes place in the host only; neither model loading nor inference runs in TSF.
 
+## 7) RBT3-Derived Contextual Short-Word Ranking
+
+- Source: [hfl/rbt3](https://huggingface.co/hfl/rbt3), from the HFL Chinese BERT project.
+- Local artifact: `data/models/short_context/`.
+- License: Apache-2.0; attribution is in `third_party/rbt3/NOTICE`; the license
+  text is also distributed with the installer.
+- Changes: independent contextual candidate-pair fine-tuning, shared early
+  exits, context-evidence veto and ONNX INT8 export.
+- Only the final two competing base exact words with preceding context are
+  considered. Inference and background loading run in the host, not TSF;
+  unavailable models leave the existing ranking unchanged.
+
 ## GPL-3.0 Notice
 
 This project is licensed under GPL-3.0. The redistributed third-party items listed above are generally GPL-compatible:
