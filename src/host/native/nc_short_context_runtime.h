@@ -1,7 +1,7 @@
 // Host-only frozen contextual short-word inference. Included after ORT helpers.
 namespace {
 struct ShortContextHandle {
-    std::array<std::unique_ptr<Ort::Session>, 5> sessions;
+    std::array<std::unique_ptr<Ort::Session>, 4> sessions;
     std::unordered_map<std::wstring, int64_t> vocabulary;
     std::array<std::wstring, 65536> normal;
     std::array<uint8_t, 65536> flags{};
@@ -190,7 +190,7 @@ public:
 };
 
 std::vector<Ort::Value> ShortRun(Ort::Session& session, ShortInputs& input,
-    Ort::Value* previous, Ort::RunOptions& options, bool final) {
+    Ort::Value* previous, Ort::RunOptions& options) {
     auto memory = Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault);
     const std::array<int64_t, 2> tokens_shape{1, static_cast<int64_t>(input.tokens.size())};
     const std::array<int64_t, 3> masks_shape{1, 2, tokens_shape[1]};
@@ -205,8 +205,7 @@ std::vector<Ort::Value> ShortRun(Ort::Session& session, ShortInputs& input,
         previous->GetTensorMutableData<float>(), input.tokens.size()*768, states_shape.data(), 3));
     const char* names[] = {"tokens", "types", "masks", "features", "previous"};
     const char* outputs[] = {"states", "logits"};
-    return session.Run(options, names, tensors.data(), tensors.size(),
-        final ? outputs + 1 : outputs, final ? 1 : 2);
+    return session.Run(options, names, tensors.data(), tensors.size(), outputs, 2);
 }
 
 double ShortVeto(const ShortContextHandle& h, const std::wstring& context,
@@ -245,6 +244,10 @@ double ShortVeto(const ShortContextHandle& h, const std::wstring& context,
 }
 } // namespace
 
+extern "C" __declspec(dllexport) int __cdecl nc_sc_runtime_format() {
+    return 2;
+}
+
 extern "C" __declspec(dllexport) void* __cdecl nc_sc_create(
     const wchar_t* directory, wchar_t* error, int capacity) {
     SetError(error, capacity, L"");
@@ -259,10 +262,11 @@ extern "C" __declspec(dllexport) void* __cdecl nc_sc_create(
         options.SetExecutionMode(ORT_SEQUENTIAL);
         options.SetIntraOpNumThreads(1); options.SetInterOpNumThreads(1);
         options.AddConfigEntry("session.intra_op.allow_spinning", "0");
+        UseReleasableInitializers(options);
         options.SetGraphOptimizationLevel(ORT_ENABLE_ALL);
-        for (int i = 0; i < 5; ++i) {
+        for (int i = 0; i < 4; ++i) {
             std::wstring path = std::wstring(directory) + L"\\" +
-                (i == 4 ? L"final.int8.onnx" : L"exit" + std::to_wstring(i) + L".int8.onnx");
+                L"exit" + std::to_wstring(i) + L".int8.onnx";
             h->sessions[i] = std::make_unique<Ort::Session>(Environment(), path.c_str(), options);
         }
         return h.release();
@@ -305,7 +309,7 @@ extern "C" __declspec(dllexport) int __cdecl nc_sc_run(void* handle,
         std::vector<Ort::Value> output;
         int chosen = -1;
         for (int depth = 0; depth < 4; ++depth) {
-            auto next = ShortRun(*h.sessions[depth], input, depth ? &output[0] : nullptr, options, false);
+            auto next = ShortRun(*h.sessions[depth], input, depth ? &output[0] : nullptr, options);
             output = std::move(next);
             auto p = probabilities[depth] = ShortProbability(output[1].GetTensorData<float>(), h.temperature[depth]);
             if (audit) std::copy(p.begin(), p.end(), audit+4+3*depth);
@@ -317,8 +321,15 @@ extern "C" __declspec(dllexport) int __cdecl nc_sc_run(void* handle,
         }
         if (audit) { audit[0] = chosen; audit[1] = 1; }
         auto empty_input = ShortEncode(h, L"", q, a, b, values);
-        auto counter = ShortRun(*h.sessions[4], empty_input, nullptr, options, true);
-        auto empty = ShortProbability(counter[0].GetTensorData<float>(), h.temperature[3]);
+        // The counterfactual uses the same encoder and final head. Reuse the
+        // segments instead of retaining a second complete copy of the network.
+        output.clear();
+        for (int depth = 0; depth < 4; ++depth) {
+            auto next = ShortRun(*h.sessions[depth], empty_input,
+                depth ? &output[0] : nullptr, options);
+            output = std::move(next);
+        }
+        auto empty = ShortProbability(output[1].GetTensorData<float>(), h.temperature[3]);
         if (audit) std::copy(empty.begin(), empty.end(), audit+16);
         double confidence = ShortVeto(h, c, a, b, values, probabilities, empty, chosen, audit);
         QueryPerformanceCounter(&now);

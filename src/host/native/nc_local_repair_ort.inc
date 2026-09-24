@@ -45,6 +45,7 @@ extern "C" __declspec(dllexport) void* __cdecl cassotis_lr_create(
         // Keep operator parallelism, but yield the CPU back to lattice decoding
         // as soon as this infrequent correction request completes.
         options.AddConfigEntry("session.force_spinning_stop", "1");
+        UseReleasableInitializers(options);
         options.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
         auto handle = std::make_unique<LocalRepairHandle>();
         handle->context_session = std::make_unique<Ort::Session>(Environment(), context_path, options);

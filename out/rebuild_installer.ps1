@@ -97,7 +97,6 @@ $runtimePayloadFiles = @(
     'out\short_context\exit1.int8.onnx',
     'out\short_context\exit2.int8.onnx',
     'out\short_context\exit3.int8.onnx',
-    'out\short_context\final.int8.onnx',
     'out\short_context\tokenizer.bin',
     'out\short_context\policy.bin'
 )
@@ -105,6 +104,9 @@ $runtimePayloadFiles = @(
 $shortManifestPath = Join-Path $resolvedSourceRoot 'out\short_context\runtime_manifest.json'
 require-path $shortManifestPath
 $shortManifest = Get-Content -LiteralPath $shortManifestPath -Raw -Encoding UTF8 | ConvertFrom-Json
+if ($shortManifest.format -ne 2 -or $shortManifest.files.PSObject.Properties.Name -contains 'final.int8.onnx') {
+    throw 'Short-context runtime is stale; run rebuild_all_except_tsf.ps1 before packaging.'
+}
 foreach ($item in $shortManifest.files.PSObject.Properties) {
     if ([IO.Path]::GetFileName($item.Name) -ne $item.Name) { throw "Invalid short-context asset: $($item.Name)" }
     $path = Join-Path (Split-Path -Parent $shortManifestPath) $item.Name

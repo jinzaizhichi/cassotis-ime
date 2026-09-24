@@ -8,6 +8,7 @@ uses Winapi.Windows, System.SysUtils, System.Classes, System.SyncObjs,
 type
     TncShortContextHost = class(TInterfacedObject, IncShortContextReranker)
     private type
+        TModelFormat = function: Integer; cdecl;
         TCreateModel = function(directory, error_text: PWideChar; capacity: Integer): Pointer; cdecl;
         TRunModel = function(handle: Pointer; context, query, first, second: PWideChar;
             values: PInteger; timeout_ms: Integer; audit: PDouble; audit_count: Integer;
@@ -90,12 +91,14 @@ procedure TncShortContextHost.load;
 const
     required_files: array[0..6] of string = ('exit0.int8.onnx',
         'exit1.int8.onnx', 'exit2.int8.onnx', 'exit3.int8.onnx',
-        'final.int8.onnx', 'tokenizer.bin', 'policy.bin');
+        'tokenizer.bin', 'policy.bin', 'final.int8.onnx');
 var
     root, hash_value: TJSONValue;
     manifest: TJSONObject;
     files: TJSONObject;
     path, folder, name: string;
+    model_format, file_count: Integer;
+    runtime_format: TModelFormat;
     create_model: TCreateModel;
     error_text: array[0..1023] of WideChar;
 begin
@@ -107,16 +110,20 @@ begin
         if not (root is TJSONObject) then
             raise EInvalidOp.Create('Invalid short-context manifest');
         manifest := TJSONObject(root);
+        model_format := manifest.GetValue<Integer>('format', 0);
         if (not manifest.GetValue<Boolean>('enabled', False)) or
-            (manifest.GetValue<Integer>('format', 0) <> 1) or
+            (not (model_format in [1, 2])) or
             (manifest.GetValue<Integer>('context_characters', 0) <> 48) or
             (manifest.GetValue<Integer>('max_inference_ms', 0) <> 30) then
             raise EInvalidOp.Create('Unsupported short-context manifest');
         files := manifest.GetValue('files') as TJSONObject;
-        if (files = nil) or (files.Count <> 7) then
+        file_count := 6;
+        if model_format = 1 then Inc(file_count);
+        if (files = nil) or (files.Count <> file_count) then
             raise EInvalidOp.Create('Incomplete short-context manifest');
         for name in required_files do
         begin
+            if (model_format = 2) and (name = 'final.int8.onnx') then Continue;
             hash_value := files.GetValue(name);
             if not (hash_value is TJSONString) then
                 raise EInvalidOp.Create('Missing short-context asset hash');
@@ -132,6 +139,11 @@ begin
             'cassotis_pinyin_transformer_ort.dll')), 0, LOAD_WITH_ALTERED_SEARCH_PATH);
         if (m_provider = 0) or (m_ort = 0) or (m_module = 0) then
             raise EInvalidOp.Create('Short-context runtime DLL unavailable');
+        runtime_format := TModelFormat(GetProcAddress(m_module, 'nc_sc_runtime_format'));
+        if not Assigned(runtime_format) then
+            raise EInvalidOp.Create('Short-context runtime must be rebuilt');
+        if runtime_format() <> 2 then
+            raise EInvalidOp.Create('Unsupported short-context runtime format');
         create_model := TCreateModel(GetProcAddress(m_module, 'nc_sc_create'));
         m_run := TRunModel(GetProcAddress(m_module, 'nc_sc_run'));
         m_destroy := TDestroyModel(GetProcAddress(m_module, 'nc_sc_destroy'));
@@ -140,7 +152,7 @@ begin
         m_handle := create_model(PChar(folder), @error_text[0], Length(error_text));
         if m_handle = nil then raise EInvalidOp.Create(string(PChar(@error_text[0])));
         TInterlocked.Exchange(m_ready, 1);
-        log_model_state('ready; final base-exact Top2; threads=1; deadline_ms=30');
+        log_model_state('ready; final base-exact Top2; shared_segments=4; threads=1; deadline_ms=30');
     except
         on E: Exception do
         begin

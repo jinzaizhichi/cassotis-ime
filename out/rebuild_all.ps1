@@ -1064,6 +1064,7 @@ function build_and_copy_pinyin_transformer_runtime
     $short_source = Join-Path $root_dir 'data\models\short_context'
     $short_target = Join-Path $script_dir 'short_context'
     $short_manifest = Get-Content -LiteralPath (Join-Path $short_source 'runtime_manifest.json') -Raw -Encoding UTF8 | ConvertFrom-Json
+    if ($short_manifest.format -ne 2) { throw 'Unsupported short-context model format' }
     $short_files = @($short_manifest.files.PSObject.Properties.Name)
     foreach ($name in $short_files) {
         if ([IO.Path]::GetFileName($name) -ne $name) { throw "Invalid short-context asset: $name" }
@@ -1151,6 +1152,10 @@ function build_and_copy_pinyin_transformer_runtime
     New-Item -ItemType Directory -Force -Path $short_target | Out-Null
     foreach ($name in $short_files) {
         publish_runtime_file (Join-Path $short_source $name) (Join-Path $short_target $name)
+    }
+    $obsolete_short_model = Join-Path $short_target 'final.int8.onnx'
+    if (Test-Path -LiteralPath $obsolete_short_model) {
+        Remove-Item -LiteralPath $obsolete_short_model -Force
     }
 }
 

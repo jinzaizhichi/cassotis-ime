@@ -81,7 +81,6 @@ Source: "{#RuntimeDir}\short_context\exit0.int8.onnx"; DestDir: "{#InstallRuntim
 Source: "{#RuntimeDir}\short_context\exit1.int8.onnx"; DestDir: "{#InstallRuntimeDir}\short_context"; Flags: ignoreversion onlyifdoesntexist
 Source: "{#RuntimeDir}\short_context\exit2.int8.onnx"; DestDir: "{#InstallRuntimeDir}\short_context"; Flags: ignoreversion onlyifdoesntexist
 Source: "{#RuntimeDir}\short_context\exit3.int8.onnx"; DestDir: "{#InstallRuntimeDir}\short_context"; Flags: ignoreversion onlyifdoesntexist
-Source: "{#RuntimeDir}\short_context\final.int8.onnx"; DestDir: "{#InstallRuntimeDir}\short_context"; Flags: ignoreversion onlyifdoesntexist
 Source: "{#RuntimeDir}\short_context\tokenizer.bin"; DestDir: "{#InstallRuntimeDir}\short_context"; Flags: ignoreversion onlyifdoesntexist
 Source: "{#RuntimeDir}\short_context\policy.bin"; DestDir: "{#InstallRuntimeDir}\short_context"; Flags: ignoreversion onlyifdoesntexist
 Source: "{#RuntimeDir}\short_context\runtime_manifest.json"; DestDir: "{#InstallRuntimeDir}\short_context"; Flags: ignoreversion onlyifdoesntexist

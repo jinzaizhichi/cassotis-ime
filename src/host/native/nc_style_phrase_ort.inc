@@ -29,10 +29,20 @@ std::set<int> StyleBoundaries(const StylePath& path) {
     for (const auto& word : path) { position += int(word.size()); result.insert(position); }
     return result;
 }
+// About 100k phrases stay resident; interned readings and a shared source pool
+// avoid per-phrase heap nodes without changing lookup or ranking semantics.
 struct StylePhrase {
     std::wstring text;
-    StylePath py;
-    std::set<int> sources;
+    std::array<uint16_t,5> py{};
+    uint32_t source_offset{};
+    uint16_t source_count{};
+};
+struct StyleRows {
+    const uint32_t* first{};
+    const uint32_t* last{};
+    const uint32_t* begin() const { return first; }
+    const uint32_t* end() const { return last; }
+    bool empty() const { return first==last; }
 };
 struct StyleSupport {
     double score{};
@@ -41,7 +51,7 @@ struct StyleSupport {
 struct StylePatch {
     int start{}, end{}, witness_start{}, witness_end{};
     std::wstring text, witness;
-    std::set<int> sources;
+    size_t sources{};
 };
 struct StyleProposal {
     std::wstring text;
@@ -52,7 +62,11 @@ struct StyleProposal {
 struct StylePhraseRuntime {
     Ort::Session head;
     std::vector<StylePhrase> phrases;
-    std::unordered_map<std::wstring,std::vector<size_t>> by_py, by_text;
+    std::vector<int> sources;
+    std::vector<std::wstring> syllables;
+    std::unordered_map<std::wstring,uint16_t> syllable_ids;
+    std::vector<uint32_t> by_text, by_py;
+    std::vector<std::pair<uint32_t,uint32_t>> py_groups;
     std::unordered_map<std::wstring,int64_t> vocab, py_vocab;
     std::map<wchar_t,StylePath> readings;
     float threshold{}, margin{};
@@ -87,33 +101,85 @@ struct StylePhraseRuntime {
             auto value=text(); auto n=number();
             if (value.size()!=1 || n>64) throw std::runtime_error("invalid character reading");
             auto& target=readings[value[0]];
-            for (uint32_t j=0;j<n;++j) target.push_back(text());
+            for (uint32_t j=0;j<n;++j) {
+                target.push_back(text());
+                if (target.back().find(L' ')!=std::wstring::npos) throw std::runtime_error("invalid character reading");
+            }
             std::sort(target.begin(),target.end());
         }
         count=number();
         if (count>200000) throw std::runtime_error("oversized style evidence");
+        phrases.reserve(count);
+        std::vector<int> row;
         for (uint32_t i=0;i<count;++i) {
-            StylePhrase p; p.text=text(); p.py=StyleSplit(text(),L' ');
+            StylePhrase p; p.text=text(); auto py=StyleSplit(text(),L' ');
             auto n=number();
-            if (p.text.size()<3 || p.text.size()>5 || p.py.size()!=p.text.size() || n<1 || n>4096)
+            if (p.text.size()<3 || p.text.size()>5 || py.size()!=p.text.size() || n<1 || n>4096)
                 throw std::runtime_error("invalid local phrase evidence");
-            for (uint32_t j=0;j<n;++j) p.sources.insert(int(number()));
-            by_py[StyleJoin(p.py,L' ')].push_back(phrases.size());
-            by_text[p.text].push_back(phrases.size());
+            row.clear();
+            for (uint32_t j=0;j<n;++j) row.push_back(int(number()));
+            std::sort(row.begin(),row.end()); row.erase(std::unique(row.begin(),row.end()),row.end());
+            p.source_offset=uint32_t(sources.size()); p.source_count=uint16_t(row.size());
+            sources.insert(sources.end(),row.begin(),row.end());
+            for (size_t j=0;j<py.size();++j) p.py[j]=intern(py[j]);
             phrases.push_back(std::move(p));
         }
         if (stream.peek()!=std::char_traits<char>::eof() || head.GetInputCount()!=5 || head.GetOutputCount()!=3)
             throw std::runtime_error("invalid style graph/index ABI");
-        for (auto& key : by_py) {
-            auto& values=key.second;
-            std::stable_sort(values.begin(),values.end(),[&](size_t a,size_t b) {
-                const auto& x=phrases[a]; const auto& y=phrases[b];
-                if(x.sources.size()!=y.sources.size()) return x.sources.size()>y.sources.size();
-                if(x.text.size()!=y.text.size()) return x.text.size()>y.text.size();
-                return x.text<y.text;
-            });
-            if(values.size()>8) values.resize(8);
+        by_text.resize(phrases.size());
+        for (uint32_t i=0;i<by_text.size();++i) by_text[i]=i;
+        std::stable_sort(by_text.begin(),by_text.end(),[&](uint32_t a,uint32_t b) { return phrases[a].text<phrases[b].text; });
+        // Reading groups keep the former per-key rank order and eight-row limit.
+        std::vector<uint32_t> ranked(by_text);
+        std::stable_sort(ranked.begin(),ranked.end(),[&](uint32_t a,uint32_t b) {
+            const auto& x=phrases[a]; const auto& y=phrases[b];
+            if(int order=compare_py(x,y)) return order<0;
+            if(x.source_count!=y.source_count) return x.source_count>y.source_count;
+            return x.text<y.text;
+        });
+        for (size_t i=0;i<ranked.size();) {
+            size_t j=i+1;
+            while (j<ranked.size() && !compare_py(phrases[ranked[i]],phrases[ranked[j]])) ++j;
+            const auto first=uint32_t(by_py.size());
+            by_py.insert(by_py.end(),ranked.begin()+i,ranked.begin()+std::min(j,i+8));
+            py_groups.emplace_back(first,uint32_t(by_py.size()));
+            i=j;
         }
+        by_py.shrink_to_fit(); sources.shrink_to_fit();
+    }
+    uint16_t intern(const std::wstring& value) {
+        auto found=syllable_ids.find(value); if(found!=syllable_ids.end()) return found->second;
+        if(syllables.size()>=65535) throw std::runtime_error("oversized style readings");
+        syllable_ids.emplace(value,uint16_t(syllables.size())); syllables.push_back(value);
+        return uint16_t(syllables.size()-1);
+    }
+    static int compare_py(const StylePhrase& a,const StylePhrase& b) {
+        if(a.text.size()!=b.text.size()) return a.text.size()<b.text.size()?-1:1;
+        for(size_t i=0;i<a.text.size();++i) if(a.py[i]!=b.py[i]) return a.py[i]<b.py[i]?-1:1;
+        return 0;
+    }
+    bool same_py(const StylePhrase& p,const StylePath& py,int start,int end) const {
+        if(int(p.text.size())!=end-start) return false;
+        for(int i=start;i<end;++i) if(syllables[p.py[i-start]]!=py[i]) return false;
+        return true;
+    }
+    StyleRows find_text(const std::wstring& text) const {
+        auto lo=std::lower_bound(by_text.begin(),by_text.end(),text,[&](uint32_t id,const std::wstring& t) { return phrases[id].text<t; });
+        auto hi=std::upper_bound(lo,by_text.end(),text,[&](const std::wstring& t,uint32_t id) { return t<phrases[id].text; });
+        return {by_text.data()+(lo-by_text.begin()),by_text.data()+(hi-by_text.begin())};
+    }
+    StyleRows find_py(const StylePath& py,int start,int end) const {
+        StylePhrase key; if(end-start<1 || end-start>5) return {};
+        key.text.assign(size_t(end-start),L' ');
+        for(int i=start;i<end;++i) {
+            auto found=syllable_ids.find(py[i]); if(found==syllable_ids.end()) return {};
+            key.py[i-start]=found->second;
+        }
+        auto group=std::lower_bound(py_groups.begin(),py_groups.end(),key,[&](const std::pair<uint32_t,uint32_t>& g,const StylePhrase& k) {
+            return compare_py(phrases[by_py[g.first]],k)<0;
+        });
+        if(group==py_groups.end() || compare_py(phrases[by_py[group->first]],key)) return {};
+        return {by_py.data()+group->first,by_py.data()+group->second};
     }
     StylePath align(const std::wstring& text,const std::wstring& query) const {
         std::wstring raw; std::set<int> boundaries;
@@ -142,10 +208,9 @@ struct StylePhraseRuntime {
         std::vector<double> weights(text.size());
         for(int start:bounds) for(int width=3;width<=5;++width) {
             int end=start+width; if(!bounds.count(end)) continue;
-            auto rows=by_text.find(text.substr(start,width)); if(rows==by_text.end()) continue;
-            for(auto idx:rows->second) {
-                const auto& p=phrases[idx]; if(p.py!=StyleSlice(py,start,end)) continue;
-                const double strength=1+std::min(2.,std::log2(double(p.sources.size())));
+            for(auto idx:find_text(text.substr(start,width))) {
+                const auto& p=phrases[idx]; if(!same_py(p,py,start,end)) continue;
+                const double strength=1+std::min(2.,std::log2(double(p.source_count)));
                 for(int i=start;i<end;++i) weights[i]=std::max(weights[i],strength);
                 result.matches.emplace_back(start,end,idx);
             }
@@ -207,25 +272,24 @@ struct StyleRequest {
         auto bounds=StyleBoundaries(words); std::vector<StylePatch> out;
         for(int start=0;start<int(text.size());++start) for(int width=3;width<=5;++width) {
             int end=start+width; if(end>int(text.size())) continue;
-            auto rows=model.by_py.find(StyleJoin(StyleSlice(py,start,end),L' ')); if(rows==model.by_py.end()) continue;
-            for(auto idx:rows->second) {
+            for(auto idx:model.find_py(py,start,end)) {
                 const auto& row=model.phrases[idx];
                 int lo=end,hi=start;
                 for(int i=0;i<width;++i) if(text[start+i]!=row.text[i]) {lo=std::min(lo,start+i);hi=start+i+1;}
-                if(lo>=hi || (width<4 && row.sources.size()<2)) continue;
+                if(lo>=hi || (width<4 && row.source_count<2)) continue;
                 int left=*std::prev(bounds.upper_bound(lo)),right=*bounds.lower_bound(hi);
                 if(left<start || right>end) continue;
                 auto replacement=row.text.substr(left-start,right-left);
                 if(path(replacement,StyleSlice(py,left,right)).empty()) continue;
-                StylePatch patch{left,right,start,end,replacement,row.text,row.sources};
+                StylePatch patch{left,right,start,end,replacement,row.text,row.source_count};
                 auto old=std::find_if(out.begin(),out.end(),[&](const StylePatch& p){return p.start==left && p.end==right && p.text==replacement;});
                 if(old==out.end()) out.push_back(std::move(patch));
-                else if(std::make_pair(width,patch.sources.size())>std::make_pair(old->witness_end-old->witness_start,old->sources.size())) *old=std::move(patch);
+                else if(std::make_pair(width,patch.sources)>std::make_pair(old->witness_end-old->witness_start,old->sources)) *old=std::move(patch);
             }
         }
         std::stable_sort(out.begin(),out.end(),[](const StylePatch& a,const StylePatch& b) {
-            return std::make_tuple(-int(a.sources.size()),a.witness_start-a.witness_end,a.start,a.text)<
-                   std::make_tuple(-int(b.sources.size()),b.witness_start-b.witness_end,b.start,b.text);
+            return std::make_tuple(-int(a.sources),a.witness_start-a.witness_end,a.start,a.text)<
+                   std::make_tuple(-int(b.sources),b.witness_start-b.witness_end,b.start,b.text);
         });
         if(out.size()>24) out.resize(24); return out;
     }
@@ -277,7 +341,7 @@ struct StyleRequest {
             // Cheap index preflight: do not touch SQLite when no local evidence exists.
             bool trigger=false;
             for(int start=0;start<int(py.size()) && !trigger;++start) for(int width=3;width<=5 && start+width<=int(py.size());++width)
-                if(model.by_py.count(StyleJoin(StyleSlice(py,start,start+width),L' '))) {trigger=true;break;}
+                if(!model.find_py(py,start,start+width).empty()) {trigger=true;break;}
             if(!trigger) continue;
             auto words=StyleSplit(paths[rank],L'\3'); if(words.empty()) words=path(seed,py);
             if(!valid(seed,py,words)) continue;
@@ -331,7 +395,8 @@ struct StyleRequest {
         }
         auto support=model.support(text,py,words);std::set<int> sources,covered;
         for(auto m:support.matches) if(std::get<1>(m)>lo && std::get<0>(m)<hi) {
-            const auto& p=model.phrases[std::get<2>(m)];sources.insert(p.sources.begin(),p.sources.end());
+            const auto& p=model.phrases[std::get<2>(m)];
+            sources.insert(model.sources.begin()+p.source_offset,model.sources.begin()+p.source_offset+p.source_count);
             for(int i=std::max(lo,std::get<0>(m));i<std::min(hi,std::get<1>(m));++i) covered.insert(i);
         }
         double sum=0;for(auto w:weights) sum+=w;

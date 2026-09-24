@@ -124,6 +124,14 @@ Ort::Env& Environment() {
     return env;
 }
 
+// The default initializer arena is one contiguous block per session. Kernels
+// pre-pack most weights, but that block cannot release the originals, so each
+// model would stay resident twice. Individually allocated initializers are
+// freed once packed; inference still uses the same packed weights.
+void UseReleasableInitializers(Ort::SessionOptions& options) {
+    options.AddConfigEntry("session.use_device_allocator_for_initializers", "1");
+}
+
 void SetError(wchar_t* destination, int capacity, const std::wstring& message) {
     if (destination == nullptr || capacity <= 0) {
         return;
@@ -174,6 +182,7 @@ extern "C" __declspec(dllexport) void* __cdecl nc_pt_create(
         options.SetInterOpNumThreads(1);
         // Sessions share the host CPU with lattice decoding and each other.
         options.AddConfigEntry("session.force_spinning_stop", "1");
+        UseReleasableInitializers(options);
         options.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
         auto handle = std::make_unique<SessionHandle>();
         handle->session = std::make_unique<Ort::Session>(Environment(), model_path, options);
@@ -369,6 +378,7 @@ extern "C" __declspec(dllexport) void* __cdecl nc_pg_create(
         options.SetIntraOpNumThreads(std::max(1, intra_threads));
         options.SetInterOpNumThreads(1);
         options.AddConfigEntry("session.force_spinning_stop", "1");
+        UseReleasableInitializers(options);
         options.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
         handle->session = std::make_unique<Ort::Session>(
             Environment(), model_path, options);
@@ -2370,6 +2380,7 @@ extern "C" __declspec(dllexport) void* __cdecl nc_lc_create(
         options.SetIntraOpNumThreads(std::max(1, intra_threads));
         options.SetInterOpNumThreads(1);
         options.AddConfigEntry("session.force_spinning_stop", "1");
+        UseReleasableInitializers(options);
         options.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
         handle->session = std::make_unique<Ort::Session>(
             Environment(), model_path, options);
@@ -2867,6 +2878,7 @@ extern "C" __declspec(dllexport) void* __cdecl nc_lcg_create(
         options.SetIntraOpNumThreads(std::max(1, intra_threads));
         options.SetInterOpNumThreads(1);
         options.AddConfigEntry("session.force_spinning_stop", "1");
+        UseReleasableInitializers(options);
         options.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
         handle->session = std::make_unique<Ort::Session>(
             Environment(), model_path, options);
