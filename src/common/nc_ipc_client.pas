@@ -9,6 +9,17 @@ uses
     nc_types,
     nc_caret_anchor_policy;
 
+const
+    // Upper bound for one request/reply exchange. The pipe availability wait
+    // alone never bounded the reply, so a host stuck inside a request (for
+    // example on the config mutex) froze the application's UI thread.
+    c_nc_ipc_transaction_timeout_ms = 3000;
+    // For callers that do not block an application: TSF background worker, tray.
+    c_nc_ipc_background_transaction_timeout_ms = 10000;
+    // After a timed-out exchange, fail fast for this long instead of stalling
+    // every keystroke while the host stays unresponsive.
+    c_nc_ipc_unresponsive_backoff_ms = 2000;
+
 type
     TncIpcClient = class
     private
@@ -18,6 +29,10 @@ type
         m_last_start_error: DWORD;
         m_last_start_detail: string;
         m_last_error: DWORD;
+        m_transaction_timeout_ms: DWORD;
+        m_unresponsive_until_tick: UInt64;
+        function transact(const request_bytes: TBytes; var response_bytes: TBytes;
+            out bytes_read: DWORD): Boolean;
         function call_pipe(const request_text: string; out response_text: string): Boolean;
         function ping_host: Boolean;
         function start_host: Boolean;
@@ -25,13 +40,18 @@ type
         function host_mutex_exists: Boolean;
         function get_module_directory: string;
     public
-        constructor create(const auto_start: Boolean = True);
+        // pipe_name overrides the per-session host pipe (tests only).
+        constructor create(const auto_start: Boolean = True;
+            const transaction_timeout_ms: DWORD = c_nc_ipc_transaction_timeout_ms;
+            const pipe_name: string = '');
         function is_host_running: Boolean;
         function test_key(const session_id: string; const key_code: Word; const key_state: TncKeyState;
             out handled: Boolean): Boolean;
+        // input_epoch orders PROCESS_KEY and RESET per session on the host; 0 omits it.
         function process_key(const session_id: string; const key_code: Word; const key_state: TncKeyState;
             out handled: Boolean; out commit_text: string; out display_text: string; out input_mode: TncInputMode;
-            out full_width_mode: Boolean; out punctuation_full_width: Boolean; out lookup_perf_info: string): Boolean;
+            out full_width_mode: Boolean; out punctuation_full_width: Boolean; out lookup_perf_info: string;
+            const input_epoch: UInt64 = 0): Boolean;
         function get_state(const session_id: string; out input_mode: TncInputMode; out full_width_mode: Boolean;
             out punctuation_full_width: Boolean): Boolean;
         function get_shortcut_config(const session_id: string;
@@ -54,7 +74,8 @@ type
         function reload_config(const session_id: string): Boolean;
         function clear_user_dictionary(const session_id: string): Boolean;
         function reset_session(const session_id: string;
-            const preserve_document_context: Boolean = False): Boolean;
+            const preserve_document_context: Boolean = False;
+            const input_epoch: UInt64 = 0): Boolean;
         property last_error: DWORD read m_last_error;
         property last_start_detail: string read m_last_start_detail;
     end;
@@ -116,11 +137,21 @@ begin
     end;
 end;
 
-constructor TncIpcClient.create(const auto_start: Boolean);
+constructor TncIpcClient.create(const auto_start: Boolean; const transaction_timeout_ms: DWORD;
+    const pipe_name: string);
 begin
     inherited create;
-    m_pipe_name := get_nc_pipe_name;
+    if pipe_name <> '' then
+    begin
+        m_pipe_name := pipe_name;
+    end
+    else
+    begin
+        m_pipe_name := get_nc_pipe_name;
+    end;
     m_auto_start := auto_start;
+    m_transaction_timeout_ms := transaction_timeout_ms;
+    m_unresponsive_until_tick := 0;
     m_last_start_tick := 0;
     m_last_start_error := 0;
     m_last_start_detail := '';
@@ -144,6 +175,110 @@ begin
     until elapsed_since(start_tick, timeout_ms);
 end;
 
+function TncIpcClient.transact(const request_bytes: TBytes; var response_bytes: TBytes;
+    out bytes_read: DWORD): Boolean;
+var
+    pipe_handle: THandle;
+    io_event: THandle;
+    overlapped: TOverlapped;
+    mode: DWORD;
+    err: DWORD;
+    timed_out: Boolean;
+begin
+    Result := False;
+    bytes_read := 0;
+    if (m_unresponsive_until_tick <> 0) and (GetTickCount64 < m_unresponsive_until_tick) then
+    begin
+        m_last_error := ERROR_TIMEOUT;
+        Exit;
+    end;
+    if (Length(request_bytes) = 0) or (Length(response_bytes) = 0) then
+    begin
+        m_last_error := ERROR_INVALID_PARAMETER;
+        Exit;
+    end;
+
+    // Same availability semantics as CallNamedPipe: one bounded wait for a
+    // free instance, then a second open attempt.
+    pipe_handle := CreateFile(PChar(m_pipe_name), GENERIC_READ or GENERIC_WRITE, 0, nil,
+        OPEN_EXISTING, FILE_FLAG_OVERLAPPED, 0);
+    if pipe_handle = INVALID_HANDLE_VALUE then
+    begin
+        if not WaitNamedPipe(PChar(m_pipe_name), c_pipe_timeout_ms) then
+        begin
+            m_last_error := GetLastError;
+            Exit;
+        end;
+        pipe_handle := CreateFile(PChar(m_pipe_name), GENERIC_READ or GENERIC_WRITE, 0, nil,
+            OPEN_EXISTING, FILE_FLAG_OVERLAPPED, 0);
+        if pipe_handle = INVALID_HANDLE_VALUE then
+        begin
+            m_last_error := GetLastError;
+            Exit;
+        end;
+    end;
+
+    io_event := 0;
+    try
+        mode := PIPE_READMODE_MESSAGE;
+        if not SetNamedPipeHandleState(pipe_handle, mode, nil, nil) then
+        begin
+            m_last_error := GetLastError;
+            Exit;
+        end;
+        io_event := CreateEvent(nil, True, False, nil);
+        if io_event = 0 then
+        begin
+            m_last_error := GetLastError;
+            Exit;
+        end;
+        FillChar(overlapped, SizeOf(overlapped), 0);
+        overlapped.hEvent := io_event;
+        if not TransactNamedPipe(pipe_handle, @request_bytes[0], Length(request_bytes),
+            @response_bytes[0], Length(response_bytes), bytes_read, @overlapped) then
+        begin
+            err := GetLastError;
+            if err <> ERROR_IO_PENDING then
+            begin
+                m_last_error := err;
+                Exit;
+            end;
+        end;
+        timed_out := WaitForSingleObject(io_event, m_transaction_timeout_ms) <> WAIT_OBJECT_0;
+        if timed_out then
+        begin
+            CancelIoEx(pipe_handle, @overlapped);
+        end;
+        // After a cancellation, wait for completion before the buffers and
+        // the OVERLAPPED record go out of scope.
+        if not GetOverlappedResult(pipe_handle, overlapped, bytes_read, timed_out) then
+        begin
+            err := GetLastError;
+            if timed_out and (err = ERROR_OPERATION_ABORTED) then
+            begin
+                // The host may still apply this request; callers must not
+                // resend it, and later calls fail fast for a short while.
+                m_unresponsive_until_tick := GetTickCount64 + c_nc_ipc_unresponsive_backoff_ms;
+                m_last_error := ERROR_TIMEOUT;
+            end
+            else
+            begin
+                m_last_error := err;
+            end;
+            Exit;
+        end;
+        m_unresponsive_until_tick := 0;
+        m_last_error := ERROR_SUCCESS;
+        Result := True;
+    finally
+        if io_event <> 0 then
+        begin
+            CloseHandle(io_event);
+        end;
+        CloseHandle(pipe_handle);
+    end;
+end;
+
 function TncIpcClient.ping_host: Boolean;
 var
     request_bytes: TBytes;
@@ -151,30 +286,18 @@ var
     bytes_read: DWORD;
     response_text: string;
     call_ok: Boolean;
-    err: DWORD;
 begin
     Result := False;
     request_bytes := TEncoding.UTF8.GetBytes('PING');
     SetLength(response_bytes, 32);
     bytes_read := 0;
 
-    call_ok := CallNamedPipe(PChar(m_pipe_name), @request_bytes[0], Length(request_bytes),
-        @response_bytes[0], Length(response_bytes), bytes_read, c_pipe_timeout_ms);
-    if not call_ok then
+    call_ok := transact(request_bytes, response_bytes, bytes_read);
+    if (not call_ok) and is_pipe_waitable_error(m_last_error) then
     begin
-        err := GetLastError;
-        m_last_error := err;
-        if is_pipe_waitable_error(err) then
+        if WaitNamedPipe(PChar(m_pipe_name), c_pipe_timeout_ms) then
         begin
-            if WaitNamedPipe(PChar(m_pipe_name), c_pipe_timeout_ms) then
-            begin
-                call_ok := CallNamedPipe(PChar(m_pipe_name), @request_bytes[0], Length(request_bytes),
-                    @response_bytes[0], Length(response_bytes), bytes_read, c_pipe_timeout_ms);
-                if not call_ok then
-                begin
-                    m_last_error := GetLastError;
-                end;
-            end;
+            call_ok := transact(request_bytes, response_bytes, bytes_read);
         end;
     end;
 
@@ -343,17 +466,19 @@ begin
     started_host := False;
     for retry_count := 0 to c_call_retry_max - 1 do
     begin
-        Result := CallNamedPipe(PChar(m_pipe_name), @request_bytes[0], Length(request_bytes),
-            @response_bytes[0], Length(response_bytes), bytes_read, c_pipe_timeout_ms);
+        Result := transact(request_bytes, response_bytes, bytes_read);
         if Result then
         begin
             response_text := TEncoding.UTF8.GetString(response_bytes, 0, bytes_read);
-            m_last_error := 0;
             Exit;
         end;
 
-        err := GetLastError;
-        m_last_error := err;
+        err := m_last_error;
+        if err = ERROR_TIMEOUT then
+        begin
+            // The request may be in progress on the host; never resend it.
+            Break;
+        end;
 
         if (err = ERROR_FILE_NOT_FOUND) and m_auto_start and (not started_host) then
         begin
@@ -419,7 +544,8 @@ end;
 
 function TncIpcClient.process_key(const session_id: string; const key_code: Word; const key_state: TncKeyState;
     out handled: Boolean; out commit_text: string; out display_text: string; out input_mode: TncInputMode;
-    out full_width_mode: Boolean; out punctuation_full_width: Boolean; out lookup_perf_info: string): Boolean;
+    out full_width_mode: Boolean; out punctuation_full_width: Boolean; out lookup_perf_info: string;
+    const input_epoch: UInt64): Boolean;
 var
     request_text: string;
     response_text: string;
@@ -436,6 +562,11 @@ begin
     request_text := Format('PROCESS_KEY'#9'%s'#9'%d'#9'%d'#9'%d'#9'%d'#9'%d',
         [session_id, key_code, Ord(key_state.shift_down), Ord(key_state.ctrl_down),
         Ord(key_state.alt_down), Ord(key_state.caps_lock)]);
+    if input_epoch <> 0 then
+    begin
+        // Older hosts ignore the extra field.
+        request_text := request_text + #9 + UIntToStr(input_epoch);
+    end;
     if not call_pipe(request_text, response_text) then
     begin
         Result := False;
@@ -854,7 +985,7 @@ begin
 end;
 
 function TncIpcClient.reset_session(const session_id: string;
-    const preserve_document_context: Boolean): Boolean;
+    const preserve_document_context: Boolean; const input_epoch: UInt64): Boolean;
 var
     request_text: string;
     response_text: string;
@@ -867,6 +998,10 @@ begin
     else
     begin
         request_text := 'RESET'#9 + session_id;
+    end;
+    if input_epoch <> 0 then
+    begin
+        request_text := request_text + #9 + UIntToStr(input_epoch);
     end;
     if not call_pipe(request_text, response_text) then
     begin

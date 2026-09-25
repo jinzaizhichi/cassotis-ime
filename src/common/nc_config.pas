@@ -1450,6 +1450,12 @@ begin
     finally
         ini.Free;
     end;
+    // Earlier releases stored the versioned install folder as the default.
+    // Standard processes cannot write there, and upgrades remove it.
+    if (Trim(Result.log_path) = '') or nc_log_path_is_under_program_files(Result.log_path) then
+    begin
+        Result.log_path := get_default_log_path;
+    end;
 end;
 
 procedure TncConfigManager.save_log_config(const config: TncLogConfig);

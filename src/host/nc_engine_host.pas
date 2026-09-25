@@ -19,6 +19,7 @@ uses
     nc_config,
     nc_ipc_common,
     nc_caret_anchor_policy,
+    nc_input_epoch,
     nc_local_completion_host;
 
 type
@@ -144,6 +145,17 @@ type
         m_long_neural_reranker: IncLongNeuralReranker;
         m_local_completion_host: TncLocalCompletionHost;
         m_last_lookup_perf_info: string;
+        m_input_epochs: TncInputEpochs;
+        function admit_input_epoch_locked(const session_id: string; const input_epoch: UInt64;
+            const command: string): TncInputEpochDecision;
+        function admit_reset_locked(const session_id: string; const input_epoch: UInt64): Boolean;
+        procedure trim_input_epochs_locked;
+        function process_key_admitted(const session_id: string; const key_code: Word; const key_state: TncKeyState;
+            out handled: Boolean; out commit_text: string; out display_text: string; out input_mode: TncInputMode;
+            out full_width_mode: Boolean; out punctuation_full_width: Boolean;
+            const input_epoch: UInt64): Boolean;
+        procedure reset_session_admitted(const session_id: string;
+            const preserve_document_context: Boolean; const input_epoch: UInt64);
         function get_config_write_time: TDateTime;
         procedure maybe_checkpoint_user_dictionary;
         procedure persist_engine_config(const config: TncEngineConfig);
@@ -176,7 +188,8 @@ type
             out handled: Boolean): Boolean;
         function process_key(const session_id: string; const key_code: Word; const key_state: TncKeyState;
             out handled: Boolean; out commit_text: string; out display_text: string; out input_mode: TncInputMode;
-            out full_width_mode: Boolean; out punctuation_full_width: Boolean): Boolean;
+            out full_width_mode: Boolean; out punctuation_full_width: Boolean;
+            const input_epoch: UInt64 = 0): Boolean;
         function get_last_lookup_perf_info: string;
         function get_state(const session_id: string; out input_mode: TncInputMode; out full_width_mode: Boolean;
             out punctuation_full_width: Boolean): Boolean;
@@ -198,7 +211,8 @@ type
             const left_context: string; const document_key: string = '';
             const document_snapshot: string = '');
         procedure reset_session(const session_id: string;
-            const preserve_document_context: Boolean = False);
+            const preserve_document_context: Boolean = False;
+            const input_epoch: UInt64 = 0);
     end;
 
     TncPipeServerThread = class(TThread)
@@ -206,6 +220,8 @@ type
         m_host: TncEngineHost;
         m_pipe_name: string;
         function handle_request(const request_text: string): string;
+        function wait_for_client(const pipe_handle: THandle; const io_event: THandle): Boolean;
+        function serve_client(const pipe_handle: THandle; const io_event: THandle): Boolean;
     protected
         procedure Execute; override;
     public
@@ -491,8 +507,6 @@ end;
 
 function get_host_log_path: string;
 var
-    path_buffer: array[0..MAX_PATH - 1] of Char;
-    path_len: DWORD;
     config_path: string;
 begin
     if g_host_log_inited then
@@ -513,15 +527,9 @@ begin
 
     if g_host_log_path = '' then
     begin
-        path_len := GetModuleFileName(HInstance, path_buffer, Length(path_buffer));
-        if path_len = 0 then
-        begin
-            g_host_log_path := 'logs\engine_host.log';
-        end
-        else
-        begin
-            g_host_log_path := IncludeTrailingPathDelimiter(ExtractFileDir(path_buffer)) + 'logs\engine_host.log';
-        end;
+        // Same writable directory as the shared log (per-user when installed).
+        g_host_log_path := IncludeTrailingPathDelimiter(ExtractFileDir(get_default_log_path)) +
+            'engine_host.log';
     end;
 
     Result := g_host_log_path;
@@ -1435,6 +1443,7 @@ begin
     m_session_prewarm_pending := TDictionary<string, Byte>.Create;
     m_lock := TCriticalSection.Create;
     m_session_create_lock := TCriticalSection.Create;
+    m_input_epochs := TncInputEpochs.create;
     m_standby_session := nil;
     m_standby_building := False;
     m_maintenance_wakeup := TEvent.Create(nil, False, False, '');
@@ -1507,6 +1516,7 @@ begin
         m_session_create_lock.Free;
         m_session_create_lock := nil;
     end;
+    FreeAndNil(m_input_epochs);
     if m_lock <> nil then
     begin
         m_lock.Free;
@@ -2533,9 +2543,69 @@ begin
     Result := True;
 end;
 
+procedure TncEngineHost.trim_input_epochs_locked;
+const
+    c_input_epoch_capacity = 1024;
+begin
+    // Floors of sessions with requests in flight are kept by the table itself.
+    m_input_epochs.trim(c_input_epoch_capacity,
+        function(live_session_id: string): Boolean
+        begin
+            Result := m_sessions.ContainsKey(live_session_id);
+        end);
+end;
+
+function TncEngineHost.admit_input_epoch_locked(const session_id: string; const input_epoch: UInt64;
+    const command: string): TncInputEpochDecision;
+begin
+    Result := m_input_epochs.admit(session_id, input_epoch);
+    if Result = ied_stale then
+    begin
+        host_log_at(ll_warn, Format('[WARN] dropped late %s session=%s epoch=%s floor=%s',
+            [command, session_id, UIntToStr(input_epoch), UIntToStr(m_input_epochs.floor(session_id))]));
+    end
+    else if Result = ied_advanced then
+    begin
+        trim_input_epochs_locked;
+    end;
+end;
+
+function TncEngineHost.admit_reset_locked(const session_id: string; const input_epoch: UInt64): Boolean;
+var
+    stale: Boolean;
+begin
+    Result := m_input_epochs.admit_reset(session_id, input_epoch, stale);
+    if stale then
+    begin
+        host_log_at(ll_warn, Format('[WARN] dropped late RESET session=%s epoch=%s floor=%s',
+            [session_id, UIntToStr(input_epoch), UIntToStr(m_input_epochs.floor(session_id))]));
+    end
+    else if Result and (input_epoch <> 0) then
+    begin
+        trim_input_epochs_locked;
+    end;
+end;
+
 function TncEngineHost.process_key(const session_id: string; const key_code: Word; const key_state: TncKeyState;
     out handled: Boolean; out commit_text: string; out display_text: string; out input_mode: TncInputMode;
-    out full_width_mode: Boolean; out punctuation_full_width: Boolean): Boolean;
+    out full_width_mode: Boolean; out punctuation_full_width: Boolean;
+    const input_epoch: UInt64): Boolean;
+begin
+    // Registered before config reload and session creation, where a request
+    // can stall past its client timeout, so its epoch floor is not trimmed.
+    m_input_epochs.enter(session_id);
+    try
+        Result := process_key_admitted(session_id, key_code, key_state, handled, commit_text,
+            display_text, input_mode, full_width_mode, punctuation_full_width, input_epoch);
+    finally
+        m_input_epochs.leave(session_id);
+    end;
+end;
+
+function TncEngineHost.process_key_admitted(const session_id: string; const key_code: Word;
+    const key_state: TncKeyState; out handled: Boolean; out commit_text: string; out display_text: string;
+    out input_mode: TncInputMode; out full_width_mode: Boolean; out punctuation_full_width: Boolean;
+    const input_epoch: UInt64): Boolean;
 const
     c_slow_host_process_key_ms = 12;
 var
@@ -2632,6 +2702,25 @@ begin
     candidate_content_generation := 0;
     m_lock.Acquire;
     try
+        // Decide under the lock that also serializes RESET, right before the
+        // engine changes: earlier stages (config reload, session creation) may
+        // have stalled this request past the client's timeout and its RESET.
+        case admit_input_epoch_locked(session_id, input_epoch, 'PROCESS_KEY') of
+            ied_stale:
+                begin
+                    input_mode := m_config.input_mode;
+                    full_width_mode := m_config.full_width_mode;
+                    punctuation_full_width := m_config.punctuation_full_width;
+                    Result := False;
+                    Exit;
+                end;
+            ied_advanced:
+                begin
+                    // The client started a new epoch; its RESET may be lost.
+                    session.engine.reset(True);
+                    session.clear_candidates;
+                end;
+        end;
         touch_session_activity(session_id);
         sync_session_config_locked(session);
         reload_start_tick := GetTickCount64;
@@ -3693,7 +3782,18 @@ begin
 end;
 
 procedure TncEngineHost.reset_session(const session_id: string;
-    const preserve_document_context: Boolean);
+    const preserve_document_context: Boolean; const input_epoch: UInt64);
+begin
+    m_input_epochs.enter(session_id);
+    try
+        reset_session_admitted(session_id, preserve_document_context, input_epoch);
+    finally
+        m_input_epochs.leave(session_id);
+    end;
+end;
+
+procedure TncEngineHost.reset_session_admitted(const session_id: string;
+    const preserve_document_context: Boolean; const input_epoch: UInt64);
 var
     session: TncHostSession;
     session_instance_id: UInt64;
@@ -3701,6 +3801,14 @@ begin
     session_instance_id := 0;
     m_lock.Acquire;
     try
+        // Recorded even when the session does not exist yet, so a PROCESS_KEY
+        // still creating it cannot apply its older key afterwards. A RESET
+        // resets only when it opens its epoch: a late copy of an older epoch,
+        // or one whose epoch its first key already opened, must not wipe input.
+        if not admit_reset_locked(session_id, input_epoch) then
+        begin
+            Exit;
+        end;
         if not m_sessions.TryGetValue(session_id, session) then
         begin
             Exit;
@@ -3808,6 +3916,19 @@ begin
     end;
 end;
 
+// Optional trailing field; absent or malformed means a client without epochs.
+function parse_input_epoch(const value: string): UInt64;
+var
+    parsed: Int64;
+begin
+    parsed := StrToInt64Def(Trim(value), 0);
+    if parsed < 0 then
+    begin
+        parsed := 0;
+    end;
+    Result := UInt64(parsed);
+end;
+
 function TncPipeServerThread.handle_request(const request_text: string): string;
 var
     fields: TArray<string>;
@@ -3835,6 +3956,7 @@ var
     active_flag: Boolean;
     shortcut_config: TncShortcutConfig;
     state_source: string;
+    input_epoch: UInt64;
 begin
     Result := 'ERROR'#9'bad_request';
     try
@@ -3872,8 +3994,13 @@ begin
         if SameText(cmd, 'RESET') or
             SameText(cmd, 'RESET_KEEP_DOCUMENT') then
         begin
+            input_epoch := 0;
+            if Length(fields) >= 3 then
+            begin
+                input_epoch := parse_input_epoch(fields[2]);
+            end;
             m_host.reset_session(session_id,
-                SameText(cmd, 'RESET_KEEP_DOCUMENT'));
+                SameText(cmd, 'RESET_KEEP_DOCUMENT'), input_epoch);
             Result := 'OK';
             Exit;
         end;
@@ -4201,6 +4328,11 @@ begin
             key_state.ctrl_down := flag_to_bool(fields[4]);
             key_state.alt_down := flag_to_bool(fields[5]);
             key_state.caps_lock := flag_to_bool(fields[6]);
+            input_epoch := 0;
+            if Length(fields) >= 8 then
+            begin
+                input_epoch := parse_input_epoch(fields[7]);
+            end;
             if host_log_enabled_for(ll_debug) then
             begin
                 host_log_debug(Format('process_key session=%s key=%d shift=%d ctrl=%d alt=%d caps=%d',
@@ -4208,7 +4340,7 @@ begin
                     Ord(key_state.alt_down), Ord(key_state.caps_lock)]));
             end;
             if m_host.process_key(session_id, Word(key_code), key_state, handled, commit_text, display_text, input_mode,
-                full_width_mode, punctuation_full_width) then
+                full_width_mode, punctuation_full_width, input_epoch) then
             begin
                 if host_log_enabled_for(ll_debug) then
                 begin
@@ -4236,16 +4368,253 @@ begin
     end;
 end;
 
+type
+    TncPipeIoResult = (pio_completed, pio_failed, pio_timed_out);
+
+const
+    // Clients send one short request right after connecting and close their
+    // handle as soon as the reply is read (CallNamedPipe). Windows suspends
+    // shell and AppContainer clients (SearchHost, TextInputHost, UWP apps)
+    // at arbitrary points, so no worker may wait on a client without a bound.
+    c_pipe_request_timeout_ms = 1000;
+    c_pipe_reply_timeout_ms = 1000;
+    c_pipe_drain_timeout_ms = 1000;
+    c_pipe_connect_poll_ms = 250;
+    c_pipe_slow_request_ms = 1000;
+    c_process_query_limited_information = $1000;
+
+function query_full_process_image_name(process: THandle; flags: DWORD; exe_name: PWideChar;
+    var size: DWORD): BOOL; stdcall; external kernel32 name 'QueryFullProcessImageNameW';
+
+// Completes an overlapped pipe call. On timeout the operation is cancelled
+// and its completion awaited, so the caller's buffers can be released.
+function finish_pipe_io(const pipe_handle: THandle; var overlapped: TOverlapped;
+    const call_ok: Boolean; const timeout_ms: DWORD; out bytes: DWORD; out err: DWORD): TncPipeIoResult;
+begin
+    bytes := 0;
+    err := ERROR_SUCCESS;
+    if not call_ok then
+    begin
+        err := GetLastError;
+        if err <> ERROR_IO_PENDING then
+        begin
+            Exit(pio_failed);
+        end;
+    end;
+    if WaitForSingleObject(overlapped.hEvent, timeout_ms) <> WAIT_OBJECT_0 then
+    begin
+        CancelIoEx(pipe_handle, @overlapped);
+        if GetOverlappedResult(pipe_handle, overlapped, bytes, True) then
+        begin
+            // Completed just before the cancellation took effect.
+            Exit(pio_completed);
+        end;
+        err := GetLastError;
+        if err = ERROR_OPERATION_ABORTED then
+        begin
+            err := ERROR_TIMEOUT;
+            Exit(pio_timed_out);
+        end;
+        Exit(pio_failed);
+    end;
+    if GetOverlappedResult(pipe_handle, overlapped, bytes, False) then
+    begin
+        Exit(pio_completed);
+    end;
+    err := GetLastError;
+    Result := pio_failed;
+end;
+
+function describe_pipe_client(const pipe_handle: THandle): string;
+var
+    process_id: ULONG;
+    process_handle: THandle;
+    image_path: array[0..MAX_PATH - 1] of WideChar;
+    image_length: DWORD;
+    image_name: string;
+begin
+    process_id := 0;
+    try
+        if not GetNamedPipeClientProcessId(pipe_handle, process_id) then
+        begin
+            Exit('client=unknown');
+        end;
+    except
+        Exit('client=unknown');
+    end;
+    image_name := '?';
+    process_handle := OpenProcess(c_process_query_limited_information, False, process_id);
+    if process_handle <> 0 then
+    begin
+        try
+            image_length := Length(image_path);
+            if query_full_process_image_name(process_handle, 0, @image_path[0], image_length) then
+            begin
+                SetString(image_name, PWideChar(@image_path[0]), image_length);
+                image_name := ExtractFileName(image_name);
+            end;
+        finally
+            CloseHandle(process_handle);
+        end;
+    end;
+    Result := Format('client_pid=%d client=%s', [process_id, image_name]);
+end;
+
+// Only the command name is logged; requests carry typed text and context.
+function pipe_request_command(const request_text: string): string;
+var
+    separator: Integer;
+begin
+    separator := Pos(#9, request_text);
+    if separator > 0 then
+    begin
+        Result := Copy(request_text, 1, separator - 1);
+    end
+    else
+    begin
+        Result := Copy(request_text, 1, 32);
+    end;
+    if Length(Result) > 32 then
+    begin
+        Result := Copy(Result, 1, 32);
+    end;
+end;
+
+function TncPipeServerThread.wait_for_client(const pipe_handle: THandle; const io_event: THandle): Boolean;
+var
+    overlapped: TOverlapped;
+    bytes: DWORD;
+    err: DWORD;
+begin
+    FillChar(overlapped, SizeOf(overlapped), 0);
+    overlapped.hEvent := io_event;
+    if ConnectNamedPipe(pipe_handle, @overlapped) then
+    begin
+        Exit(True);
+    end;
+    err := GetLastError;
+    if err = ERROR_PIPE_CONNECTED then
+    begin
+        Exit(True);
+    end;
+    if err <> ERROR_IO_PENDING then
+    begin
+        host_log(Format('ConnectNamedPipe failed err=%d', [err]));
+        Exit(False);
+    end;
+    // Idle workers poll Terminated, so shutdown no longer depends on a wake-up
+    // connection reaching every worker.
+    while WaitForSingleObject(io_event, c_pipe_connect_poll_ms) <> WAIT_OBJECT_0 do
+    begin
+        if Terminated then
+        begin
+            CancelIoEx(pipe_handle, @overlapped);
+            GetOverlappedResult(pipe_handle, overlapped, bytes, True);
+            Exit(False);
+        end;
+    end;
+    Result := GetOverlappedResult(pipe_handle, overlapped, bytes, False);
+    if not Result then
+    begin
+        host_log(Format('ConnectNamedPipe failed err=%d', [GetLastError]));
+    end;
+end;
+
+// Returns False when the client stalled while its reply was pending; the
+// caller then closes without DisconnectNamedPipe, which would discard a reply
+// that a resumed (typically suspended shell/AppContainer) client can still read.
+function TncPipeServerThread.serve_client(const pipe_handle: THandle; const io_event: THandle): Boolean;
+var
+    overlapped: TOverlapped;
+    request_bytes: TBytes;
+    response_bytes: TBytes;
+    drain_byte: Byte;
+    bytes: DWORD;
+    err: DWORD;
+    io: TncPipeIoResult;
+    request_text: string;
+    response_text: string;
+    handle_start_tick: UInt64;
+    handle_elapsed_ms: UInt64;
+    phase: string;
+    phase_timeout_ms: DWORD;
+begin
+    Result := True;
+    SetLength(request_bytes, c_pipe_in_buffer);
+    FillChar(overlapped, SizeOf(overlapped), 0);
+    overlapped.hEvent := io_event;
+    io := finish_pipe_io(pipe_handle, overlapped,
+        ReadFile(pipe_handle, request_bytes[0], Length(request_bytes), bytes, @overlapped),
+        c_pipe_request_timeout_ms, bytes, err);
+    if io <> pio_completed then
+    begin
+        if io = pio_timed_out then
+        begin
+            host_log_at(ll_warn, Format('[WARN] pipe request not received within %d ms from %s; releasing worker',
+                [c_pipe_request_timeout_ms, describe_pipe_client(pipe_handle)]));
+        end
+        else
+        begin
+            host_log(Format('ReadFile failed err=%d', [err]));
+        end;
+        Exit;
+    end;
+
+    request_text := TEncoding.UTF8.GetString(request_bytes, 0, bytes);
+    handle_start_tick := GetTickCount64;
+    response_text := handle_request(request_text);
+    handle_elapsed_ms := GetTickCount64 - handle_start_tick;
+    if handle_elapsed_ms >= c_pipe_slow_request_ms then
+    begin
+        host_log_at(ll_warn, Format('[WARN] slow pipe request cmd=%s elapsed=%d ms',
+            [pipe_request_command(request_text), handle_elapsed_ms]));
+    end;
+
+    response_bytes := TEncoding.UTF8.GetBytes(response_text);
+    io := pio_completed;
+    phase := '';
+    phase_timeout_ms := 0;
+    if Length(response_bytes) > 0 then
+    begin
+        FillChar(overlapped, SizeOf(overlapped), 0);
+        overlapped.hEvent := io_event;
+        io := finish_pipe_io(pipe_handle, overlapped,
+            WriteFile(pipe_handle, response_bytes[0], Length(response_bytes), bytes, @overlapped),
+            c_pipe_reply_timeout_ms, bytes, err);
+        phase := 'accept the reply';
+        phase_timeout_ms := c_pipe_reply_timeout_ms;
+    end;
+    if io = pio_completed then
+    begin
+        // Replaces FlushFileBuffers, which waits without limit for the client
+        // to read. CallNamedPipe closes its handle right after reading, which
+        // completes this read with ERROR_BROKEN_PIPE.
+        FillChar(overlapped, SizeOf(overlapped), 0);
+        overlapped.hEvent := io_event;
+        io := finish_pipe_io(pipe_handle, overlapped,
+            ReadFile(pipe_handle, drain_byte, 1, bytes, @overlapped),
+            c_pipe_drain_timeout_ms, bytes, err);
+        phase := 'read the reply';
+        phase_timeout_ms := c_pipe_drain_timeout_ms;
+        if io = pio_failed then
+        begin
+            io := pio_completed;
+        end;
+    end;
+    if io = pio_timed_out then
+    begin
+        host_log_at(ll_warn, Format('[WARN] pipe client did not %s within %d ms cmd=%s %s; releasing worker',
+            [phase, phase_timeout_ms, pipe_request_command(request_text),
+            describe_pipe_client(pipe_handle)]));
+        Result := False;
+    end;
+end;
+
 procedure TncPipeServerThread.Execute;
 var
     pipe_handle: THandle;
-    connected: Boolean;
-    bytes_read: DWORD;
-    bytes_written: DWORD;
-    request_bytes: TBytes;
-    response_bytes: TBytes;
-    request_text: string;
-    response_text: string;
+    io_event: THandle;
+    disconnect: Boolean;
     err: DWORD;
     last_error: DWORD;
     pipe_name: string;
@@ -4262,10 +4631,18 @@ begin
         security_attributes_ptr := @security_attributes;
     end;
     host_log('pipe thread start name=' + pipe_name);
+    io_event := CreateEvent(nil, True, False, nil);
+    if io_event = 0 then
+    begin
+        host_log(Format('pipe thread event creation failed err=%d', [GetLastError]));
+    end
+    else
     try
         while not Terminated do
         begin
-            pipe_handle := CreateNamedPipe(PChar(pipe_name), PIPE_ACCESS_DUPLEX,
+            // Overlapped I/O bounds every wait on a client; a worker blocked
+            // by one frozen client used to stall all applications.
+            pipe_handle := CreateNamedPipe(PChar(pipe_name), PIPE_ACCESS_DUPLEX or FILE_FLAG_OVERLAPPED,
                 PIPE_TYPE_MESSAGE or PIPE_READMODE_MESSAGE or PIPE_WAIT,
                 PIPE_UNLIMITED_INSTANCES, c_pipe_out_buffer, c_pipe_in_buffer, 0, security_attributes_ptr);
             if pipe_handle = INVALID_HANDLE_VALUE then
@@ -4281,39 +4658,23 @@ begin
             end;
 
             last_error := 0;
-            connected := ConnectNamedPipe(pipe_handle, nil);
-            if not connected then
-            begin
-                err := GetLastError;
-                if err = ERROR_PIPE_CONNECTED then
+            disconnect := True;
+            try
+                if wait_for_client(pipe_handle, io_event) then
                 begin
-                    connected := True;
-                end
-                else
+                    disconnect := serve_client(pipe_handle, io_event);
+                end;
+            except
+                on e: Exception do
                 begin
-                    host_log(Format('ConnectNamedPipe failed err=%d', [err]));
+                    // One failed request must not retire this worker.
+                    host_log_at(ll_error, Format('pipe request exception %s: %s', [e.ClassName, e.Message]));
                 end;
             end;
-
-            if connected then
+            if disconnect then
             begin
-                SetLength(request_bytes, c_pipe_in_buffer);
-                if ReadFile(pipe_handle, request_bytes[0], Length(request_bytes), bytes_read, nil) then
-                begin
-                    request_text := TEncoding.UTF8.GetString(request_bytes, 0, bytes_read);
-                    response_text := handle_request(request_text);
-                    response_bytes := TEncoding.UTF8.GetBytes(response_text);
-                    WriteFile(pipe_handle, response_bytes[0], Length(response_bytes), bytes_written, nil);
-                    FlushFileBuffers(pipe_handle);
-                end
-                else
-                begin
-                    err := GetLastError;
-                    host_log(Format('ReadFile failed err=%d', [err]));
-                end;
+                DisconnectNamedPipe(pipe_handle);
             end;
-
-            DisconnectNamedPipe(pipe_handle);
             CloseHandle(pipe_handle);
         end;
     except
@@ -4321,6 +4682,10 @@ begin
         begin
             host_log(Format('pipe thread exception %s: %s', [e.ClassName, e.Message]));
         end;
+    end;
+    if io_event <> 0 then
+    begin
+        CloseHandle(io_event);
     end;
     if security_descriptor <> nil then
     begin

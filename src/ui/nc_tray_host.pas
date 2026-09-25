@@ -26,6 +26,7 @@ uses
     nc_config,
     nc_ipc_common,
     nc_ipc_client,
+    nc_ipc_health,
     nc_log,
     nc_dpi_scale,
     nc_version_info,
@@ -110,6 +111,7 @@ type
         m_profile_inactive_pending: Boolean;
         m_profile_event_seen: Boolean;
         m_active_sync_fail_count: Integer;
+        m_host_ipc_health: TncIpcHealth;
         m_last_state_poll_tick: UInt64;
         m_last_variant_poll_tick: UInt64;
         m_last_config_poll_tick: UInt64;
@@ -192,6 +194,7 @@ type
         procedure on_menu_popup(Sender: TObject);
         procedure on_menu_closed(Sender: TObject);
         procedure log_menu(const detail: string);
+        procedure note_host_ipc_result(const ok: Boolean);
         function menu_active: Boolean;
         procedure on_timer(Sender: TObject);
         procedure WMNcActiveStateChanged(var Message: TMessage); message WM_NC_ACTIVE_STATE_CHANGED;
@@ -453,7 +456,7 @@ begin
     inherited CreateNew(AOwner);
     m_config_path := get_default_config_path;
     m_last_write_time := 0;
-    m_ipc_client := TncIpcClient.create(False);
+    m_ipc_client := TncIpcClient.create(False, c_nc_ipc_background_transaction_timeout_ms);
     m_session_id := '';
     if CreateGUID(guid) = S_OK then
     begin
@@ -493,6 +496,7 @@ begin
     m_profile_inactive_pending := False;
     m_profile_event_seen := False;
     m_active_sync_fail_count := 0;
+    m_host_ipc_health.reset;
     m_last_state_poll_tick := 0;
     m_last_variant_poll_tick := 0;
     m_last_config_poll_tick := 0;
@@ -2227,6 +2231,7 @@ begin
     active_now := False;
     if m_ipc_client.get_active(m_session_id, active_now) then
     begin
+        note_host_ipc_result(True);
         m_active_sync_fail_count := 0;
         if not active_now and (not m_profile_active_pending) then
         begin
@@ -2240,6 +2245,7 @@ begin
     end
     else
     begin
+        note_host_ipc_result(False);
         if m_active_sync_fail_count < MaxInt then
         begin
             Inc(m_active_sync_fail_count);
@@ -2885,6 +2891,47 @@ begin
             [detail, GetCurrentProcessId, windows_session,
              GetSystemMetrics(SM_REMOTESESSION), get_window_dpi(Handle),
              GetSystemMetrics(SM_CXVIRTUALSCREEN), GetSystemMetrics(SM_CYVIRTUALSCREEN)]));
+    finally
+        logger.Free;
+    end;
+end;
+
+procedure TncTrayHost.note_host_ipc_result(const ok: Boolean);
+var
+    error: DWORD;
+    report: TncIpcHealthReport;
+    logger: TncLogger;
+begin
+    error := ERROR_SUCCESS;
+    if not ok then
+    begin
+        error := m_ipc_client.last_error;
+        if error = ERROR_SUCCESS then
+        begin
+            error := ERROR_INVALID_DATA;
+        end;
+    end;
+    report := m_host_ipc_health.note(ok, error, GetTickCount64);
+    // The tray is the one process that polls the host continuously, so it
+    // records host outages even when no application is typing.
+    if (report.event = ihe_none) or (not m_log_config.enabled) then
+    begin
+        Exit;
+    end;
+    logger := TncLogger.create(m_log_config.log_path, m_log_config.max_size_kb);
+    try
+        logger.set_level(m_log_config.level);
+        if report.event = ihe_recovered then
+        begin
+            logger.warn(Format('Tray host IPC recovered after %d failed polls in %d ms (last err=%d)',
+                [report.failures, report.duration_ms, report.error]));
+        end
+        else
+        begin
+            logger.warn(Format('Tray host IPC failed err=%d (%s) failures=%d outage_ms=%d widget_active=%d',
+                [report.error, SysErrorMessage(report.error), report.failures, report.duration_ms,
+                Ord(m_engine_active)]));
+        end;
     finally
         logger.Free;
     end;

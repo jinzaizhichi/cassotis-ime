@@ -28,7 +28,8 @@ uses
     nc_tsf_edit_session,
     nc_caret_anchor_policy,
     nc_ipc_client,
-    nc_ipc_common;
+    nc_ipc_common,
+    nc_ipc_health;
 
 type
     TncTextService = class(TComObject, ITfTextInputProcessor, ITfTextInputProcessorEx,
@@ -83,6 +84,10 @@ type
         m_has_caret_point: Boolean;
         m_last_caret_line_height: Integer;
         m_last_ipc_error: DWORD;
+        m_ipc_health: TncIpcHealth;
+        m_host_resync_pending: Boolean;
+        // Current input epoch of this session; see nc_input_epoch on the host.
+        m_input_epoch: UInt64;
         m_pending_caret_update: Boolean;
         m_pending_canvas_caret: Boolean;
         m_session_dirty: Boolean;
@@ -150,6 +155,14 @@ type
         procedure deactivate_core;
         procedure mark_session_dirty;
         procedure reset_session_if_needed(const force: Boolean = False);
+        procedure note_ipc_result(const operation: string; const ok: Boolean);
+        procedure resync_host_session_after_timeout;
+        function process_key_on_host(const operation: string; const key_code: Word;
+            const key_state: TncKeyState; out handled: Boolean; out commit_text: string;
+            out display_text: string; out input_mode: TncInputMode; out full_width_mode: Boolean;
+            out punctuation_full_width: Boolean; out lookup_perf_info: string): Boolean;
+        function send_state_to_host(const input_mode: TncInputMode; const full_width_mode: Boolean;
+            const punctuation_full_width: Boolean; const source: string): Boolean;
         procedure invalidate_sent_caret;
         procedure refresh_pending_canvas_caret;
         procedure start_active_state_worker;
@@ -284,6 +297,7 @@ uses
     nc_imm_caret_query;
 
 procedure signal_tray_profile_event(const active: Boolean); forward;
+function next_input_epoch: UInt64; forward;
 procedure log_tsf_boundary_exception(const operation: string); forward;
 
 type
@@ -787,6 +801,7 @@ begin
         clear_state;
         m_compartment_deferred := TncTsfDeferredCompartmentSync.Create(flush_deferred_compartment_state);
         m_ipc_client := TncIpcClient.create(True);
+        m_input_epoch := next_input_epoch;
         m_active_state_lock := TCriticalSection.Create;
         m_active_state_event := TEvent.Create(nil, False, False, '');
         if CreateGUID(guid) = S_OK then
@@ -934,6 +949,8 @@ begin
     m_has_caret_point := False;
     m_last_caret_line_height := 0;
     m_last_ipc_error := 0;
+    m_ipc_health.reset;
+    m_host_resync_pending := False;
     m_pending_caret_update := False;
     m_session_dirty := False;
     m_pending_canvas_caret := False;
@@ -1196,7 +1213,11 @@ begin
         Exit;
     end;
 
-    if m_ipc_client.reset_session(m_session_id, not force) then
+    // Starting a new epoch fences requests that outlived a client timeout and
+    // are still running on the host. The host also resets the session at the
+    // first request of the new epoch if this RESET does not arrive.
+    m_input_epoch := next_input_epoch;
+    if m_ipc_client.reset_session(m_session_id, not force, m_input_epoch) then
     begin
         m_session_dirty := False;
         m_last_ipc_error := 0;
@@ -1207,6 +1228,91 @@ begin
         m_last_surrounding_request_tick := 0;
         m_last_context_activate_tick := 0;
         m_surrounding_needs_refresh := True;
+    end;
+end;
+
+procedure TncTextService.note_ipc_result(const operation: string; const ok: Boolean);
+var
+    error: DWORD;
+    report: TncIpcHealthReport;
+begin
+    error := ERROR_SUCCESS;
+    if not ok then
+    begin
+        error := m_ipc_client.last_error;
+        if error = ERROR_SUCCESS then
+        begin
+            // The host answered with a malformed or failed reply.
+            error := ERROR_INVALID_DATA;
+        end;
+    end;
+    report := m_ipc_health.note(ok, error, GetTickCount64);
+    if m_logger = nil then
+    begin
+        Exit;
+    end;
+    case report.event of
+        ihe_failure, ihe_still_failing:
+            m_logger.warn(Format('IPC %s failed err=%d (%s) failures=%d outage_ms=%d session=%s startup=[%s]',
+                [operation, report.error, SysErrorMessage(report.error), report.failures,
+                report.duration_ms, m_session_id, m_ipc_client.last_start_detail]));
+        ihe_recovered:
+            m_logger.warn(Format('IPC %s recovered after %d failed calls in %d ms (last err=%d) session=%s',
+                [operation, report.failures, report.duration_ms, report.error, m_session_id]));
+    end;
+end;
+
+procedure TncTextService.resync_host_session_after_timeout;
+begin
+    // A timed-out PROCESS_KEY may have been applied, or may still be applied
+    // later, by the host while the application received the key unprocessed.
+    // Cancel the composition and start a new input epoch: the host rejects the
+    // older request and resets the session at the first new-epoch request,
+    // even if this RESET is not confirmed.
+    mark_session_dirty;
+    cancel_composition;
+    m_host_resync_pending := False;
+    if m_logger <> nil then
+    begin
+        m_logger.warn(Format('IPC session resynchronized after a timed-out key session=%s epoch=%s reset_confirmed=%d',
+            [m_session_id, UIntToStr(m_input_epoch), Ord(not m_session_dirty)]));
+    end;
+end;
+
+// The only route for PROCESS_KEY: every key carries the session's input epoch,
+// so a copy that outlives its timeout is fenced on the host after a resync.
+function TncTextService.process_key_on_host(const operation: string; const key_code: Word;
+    const key_state: TncKeyState; out handled: Boolean; out commit_text: string;
+    out display_text: string; out input_mode: TncInputMode; out full_width_mode: Boolean;
+    out punctuation_full_width: Boolean; out lookup_perf_info: string): Boolean;
+begin
+    Result := m_ipc_client.process_key(m_session_id, key_code, key_state, handled, commit_text,
+        display_text, input_mode, full_width_mode, punctuation_full_width, lookup_perf_info,
+        m_input_epoch);
+    note_ipc_result(operation, Result);
+    if (not Result) and (m_ipc_client.last_error = ERROR_TIMEOUT) then
+    begin
+        m_host_resync_pending := True;
+    end;
+end;
+
+function TncTextService.send_state_to_host(const input_mode: TncInputMode;
+    const full_width_mode: Boolean; const punctuation_full_width: Boolean;
+    const source: string): Boolean;
+begin
+    Result := False;
+    if (m_ipc_client = nil) or (m_session_id = '') then
+    begin
+        Exit;
+    end;
+    // Mode toggles update the Windows indicator locally even when the host is
+    // unreachable; record the failure instead of letting it pass unnoticed.
+    Result := m_ipc_client.set_state(m_session_id, input_mode, full_width_mode,
+        punctuation_full_width, source);
+    note_ipc_result('set_state/' + source, Result);
+    if Result then
+    begin
+        mark_session_dirty;
     end;
 end;
 
@@ -1232,7 +1338,8 @@ begin
                 request_ok: Boolean;
             begin
                 try
-                    ipc_client := TncIpcClient.Create(True);
+                    // Off the application's UI thread; SET_ACTIVE may build a cold session.
+                    ipc_client := TncIpcClient.Create(True, c_nc_ipc_background_transaction_timeout_ms);
                     try
                         while True do
                         begin
@@ -2226,13 +2333,7 @@ begin
                 eaten := 1;
             end;
         end;
-        if (not handled) and (m_logger <> nil) and (m_ipc_client.last_error <> 0)
-            and (m_ipc_client.last_error <> m_last_ipc_error) then
-        begin
-            m_last_ipc_error := m_ipc_client.last_error;
-            m_logger.info(Format('IPC test_key failed err=%d (%s) startup=[%s]',
-                [m_last_ipc_error, SysErrorMessage(m_last_ipc_error), m_ipc_client.last_start_detail]));
-        end;
+        note_ipc_result('test_key', ipc_ok);
     end;
     total_elapsed_ms := Int64(GetTickCount64 - total_start_tick);
     if (m_logger <> nil) and ((m_logger.level <= ll_debug) or (total_elapsed_ms >= c_slow_test_key_ms)) then
@@ -2320,6 +2421,10 @@ begin
     caret_push_elapsed_ms := 0;
     lookup_perf_info := '';
     reload_config_if_needed;
+    if m_host_resync_pending then
+    begin
+        resync_host_session_after_timeout;
+    end;
     surrounding_start_tick := GetTickCount64;
     surrounding_sent := maybe_update_surrounding_text(context);
     surrounding_elapsed_ms := Int64(GetTickCount64 - surrounding_start_tick);
@@ -2413,8 +2518,8 @@ begin
     begin
         mark_session_dirty;
         process_start_tick := GetTickCount64;
-        ipc_ok := m_ipc_client.process_key(m_session_id, key_code, key_state, handled, commit_text, display_text,
-            input_mode, full_width_mode, punctuation_full_width, lookup_perf_info);
+        ipc_ok := process_key_on_host('process_key', key_code, key_state, handled, commit_text,
+            display_text, input_mode, full_width_mode, punctuation_full_width, lookup_perf_info);
         process_elapsed_ms := Int64(GetTickCount64 - process_start_tick);
         if ipc_ok then
         begin
@@ -2473,13 +2578,6 @@ begin
                     end_composition(context);
                 end;
             end;
-        end;
-        if (not handled) and (m_logger <> nil) and (m_ipc_client.last_error <> 0)
-            and (m_ipc_client.last_error <> m_last_ipc_error) then
-        begin
-            m_last_ipc_error := m_ipc_client.last_error;
-            m_logger.info(Format('IPC process_key failed err=%d (%s) startup=[%s]',
-                [m_last_ipc_error, SysErrorMessage(m_last_ipc_error), m_ipc_client.last_start_detail]));
         end;
     end;
     total_elapsed_ms := Int64(GetTickCount64 - total_start_tick);
@@ -2641,8 +2739,9 @@ begin
     FillChar(key_state, SizeOf(key_state), 0);
     // Switching to English follows Enter semantics: preserve what the user
     // typed instead of implicitly choosing the current Chinese candidate.
-    if not m_ipc_client.process_key(m_session_id, VK_RETURN, key_state, handled, commit_text, display_text,
-        input_mode, full_width_mode, punctuation_full_width, lookup_perf_info) then
+    if not process_key_on_host('process_key/mode_switch_enter', VK_RETURN, key_state, handled,
+        commit_text, display_text, input_mode, full_width_mode, punctuation_full_width,
+        lookup_perf_info) then
     begin
         Exit;
     end;
@@ -3170,12 +3269,7 @@ begin
     m_external_input_mode_transition_pending := True;
     m_external_input_mode_target := next_input_mode;
     m_external_input_mode_transition_tick := GetTickCount64;
-    if (m_ipc_client <> nil) and (m_session_id <> '') and
-        m_ipc_client.set_state(m_session_id, next_input_mode, full_width_mode,
-            punctuation_full_width, 'key_trace') then
-    begin
-        mark_session_dirty;
-    end;
+    send_state_to_host(next_input_mode, full_width_mode, punctuation_full_width, 'key_trace');
 
     m_last_input_mode := next_input_mode;
     m_last_full_width_mode := full_width_mode;
@@ -3244,14 +3338,7 @@ begin
         commit_pending_raw_text_before_mode_switch;
     end;
 
-    if (m_ipc_client <> nil) and (m_session_id <> '') then
-    begin
-        if m_ipc_client.set_state(m_session_id, next_input_mode,
-            full_width_mode, punctuation_full_width, 'shortcut') then
-        begin
-            mark_session_dirty;
-        end;
-    end;
+    send_state_to_host(next_input_mode, full_width_mode, punctuation_full_width, 'shortcut');
 
     apply_engine_state_to_compartments(next_input_mode, full_width_mode, punctuation_full_width);
     save_engine_state_to_config(next_input_mode, full_width_mode, punctuation_full_width);
@@ -3297,15 +3384,7 @@ begin
     end;
 
     full_width_mode := not full_width_mode;
-    if (m_ipc_client <> nil) and (m_session_id <> '') then
-    begin
-        if m_ipc_client.set_state(m_session_id, input_mode,
-            full_width_mode, punctuation_full_width,
-            'shortcut_full_width') then
-        begin
-            mark_session_dirty;
-        end;
-    end;
+    send_state_to_host(input_mode, full_width_mode, punctuation_full_width, 'shortcut_full_width');
 
     apply_engine_state_to_compartments(input_mode, full_width_mode, punctuation_full_width);
     save_engine_state_to_config(input_mode, full_width_mode, punctuation_full_width);
@@ -3345,15 +3424,7 @@ begin
     end;
 
     punctuation_full_width := not punctuation_full_width;
-    if (m_ipc_client <> nil) and (m_session_id <> '') then
-    begin
-        if m_ipc_client.set_state(m_session_id, input_mode,
-            full_width_mode, punctuation_full_width,
-            'shortcut_punctuation') then
-        begin
-            mark_session_dirty;
-        end;
-    end;
+    send_state_to_host(input_mode, full_width_mode, punctuation_full_width, 'shortcut_punctuation');
 
     apply_engine_state_to_compartments(input_mode, full_width_mode, punctuation_full_width);
     save_engine_state_to_config(input_mode, full_width_mode, punctuation_full_width);
@@ -4296,12 +4367,8 @@ begin
     end
     else if state_changed then
     begin
-        state_synced := m_ipc_client.set_state(m_session_id, next_input_mode,
-            next_full_width, next_punctuation_full_width, 'compartment');
-        if state_synced then
-        begin
-            mark_session_dirty;
-        end;
+        state_synced := send_state_to_host(next_input_mode, next_full_width,
+            next_punctuation_full_width, 'compartment');
     end;
 
     if state_synced then
@@ -4679,6 +4746,15 @@ begin
     except
         log_tsf_boundary_exception('SaveEngineState');
     end;
+end;
+
+var
+    g_input_epoch_counter: Int64 = 0;
+
+// Process-wide and monotonic, so the epochs of every session only increase.
+function next_input_epoch: UInt64;
+begin
+    Result := UInt64(AtomicIncrement(g_input_epoch_counter));
 end;
 
 procedure signal_tray_profile_event(const active: Boolean);

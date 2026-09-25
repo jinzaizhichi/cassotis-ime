@@ -30,15 +30,25 @@ type
     end;
 
 function get_default_log_path: string;
+function nc_log_path_is_under_program_files(const path: string): Boolean;
 procedure append_log_line_shared(const log_path: string; const line: string; const max_size_kb: Integer = 0);
 
 implementation
 
 uses
-    System.Hash;
+    System.Hash,
+    Winapi.ActiveX,
+    Winapi.KnownFolders,
+    Winapi.ShlObj;
 
 const
     c_log_mutex_timeout_ms = 250;
+    // After a timed-out wait, do not stall every later line for the full
+    // timeout; the holder may be a suspended or hung process.
+    c_log_mutex_stall_backoff_ms = 10000;
+
+var
+    g_log_mutex_stall_tick: UInt64 = 0;
 
 function get_log_mutex_name(const log_path: string): string;
 begin
@@ -49,17 +59,33 @@ end;
 function acquire_log_mutex(const log_path: string): THandle;
 var
     wait_result: DWORD;
+    timeout_ms: DWORD;
+    stall_tick: UInt64;
 begin
     Result := CreateMutex(nil, False, PChar(get_log_mutex_name(log_path)));
     if Result = 0 then
     begin
         Exit;
     end;
-    wait_result := WaitForSingleObject(Result, c_log_mutex_timeout_ms);
+    timeout_ms := c_log_mutex_timeout_ms;
+    stall_tick := g_log_mutex_stall_tick;
+    if (stall_tick <> 0) and (GetTickCount64 - stall_tick < c_log_mutex_stall_backoff_ms) then
+    begin
+        timeout_ms := 0;
+    end;
+    wait_result := WaitForSingleObject(Result, timeout_ms);
     if (wait_result <> WAIT_OBJECT_0) and (wait_result <> WAIT_ABANDONED) then
     begin
+        if wait_result = WAIT_TIMEOUT then
+        begin
+            g_log_mutex_stall_tick := GetTickCount64;
+        end;
         CloseHandle(Result);
         Result := 0;
+    end
+    else
+    begin
+        g_log_mutex_stall_tick := 0;
     end;
 end;
 
@@ -118,13 +144,12 @@ begin
             ForceDirectories(dir_path);
         end;
 
+        // The mutex only serializes rotation. FILE_APPEND_DATA writes land at
+        // the end of file atomically, so an unavailable mutex (a holder that
+        // is suspended or hung) must not silently drop the line.
         mutex_handle := acquire_log_mutex(log_path);
-        if mutex_handle = 0 then
-        begin
-            Exit;
-        end;
         try
-            if (max_size_kb > 0) and FileExists(log_path) then
+            if (mutex_handle <> 0) and (max_size_kb > 0) and FileExists(log_path) then
             begin
                 if try_open_log_handle(log_path, handle) then
                 begin
@@ -297,11 +322,72 @@ begin
     write_line(ll_error, msg);
 end;
 
+function known_folder_path(const folder_id: TGUID): string;
+const
+    c_kf_flag_no_package_redirection = $00010000;
+var
+    path_ptr: PWideChar;
+begin
+    Result := '';
+    path_ptr := nil;
+    if Succeeded(SHGetKnownFolderPath(folder_id, c_kf_flag_no_package_redirection, 0, path_ptr)) and
+        (path_ptr <> nil) then
+    begin
+        try
+            Result := Trim(string(path_ptr));
+        finally
+            CoTaskMemFree(path_ptr);
+        end;
+    end;
+end;
+
+function path_is_within(const path: string; const root: string): Boolean;
+var
+    normalized_root: string;
+begin
+    Result := False;
+    if (Trim(path) = '') or (Trim(root) = '') then
+    begin
+        Exit;
+    end;
+    normalized_root := IncludeTrailingPathDelimiter(ExpandFileName(Trim(root)));
+    Result := SameText(Copy(IncludeTrailingPathDelimiter(ExpandFileName(Trim(path))), 1,
+        Length(normalized_root)), normalized_root);
+end;
+
+function nc_log_path_is_under_program_files(const path: string): Boolean;
+begin
+    // ProgramW6432 also names the 64-bit folder inside 32-bit processes, which
+    // load the installed 32-bit TSF DLL from there.
+    Result := path_is_within(path, known_folder_path(FOLDERID_ProgramFiles)) or
+        path_is_within(path, known_folder_path(FOLDERID_ProgramFilesX86)) or
+        path_is_within(path, GetEnvironmentVariable('ProgramW6432'));
+end;
+
 function get_default_log_path: string;
 var
     module_dir: string;
+    local_app_data: string;
 begin
     module_dir := get_module_directory;
+    // An installed runtime lives under Program Files, which applications, the
+    // tray and the host cannot write with a standard token; lines were dropped
+    // silently. Use the per-user root that also holds config and dictionaries.
+    // Development and benchmark runtimes keep logs beside their binaries.
+    if (module_dir <> '') and nc_log_path_is_under_program_files(module_dir) then
+    begin
+        local_app_data := known_folder_path(FOLDERID_LocalAppData);
+        if local_app_data = '' then
+        begin
+            local_app_data := Trim(GetEnvironmentVariable('LOCALAPPDATA'));
+        end;
+        if local_app_data <> '' then
+        begin
+            Result := IncludeTrailingPathDelimiter(local_app_data) + 'CassotisIme\logs\cassotis_ime.log';
+            Exit;
+        end;
+    end;
+
     if module_dir = '' then
     begin
         Result := 'logs\cassotis_ime.log';
