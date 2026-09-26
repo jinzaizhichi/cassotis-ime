@@ -1016,7 +1016,10 @@ begin
                 session_id := 0;
                 if not ProcessIdToSessionId(entry.th32ProcessID, session_id) then
                 begin
-                    if get_process_name_by_pid(entry.th32ProcessID) <> '' then
+                    // Its session is unknown (often a session-0 service), so it is
+                    // not named; a protected process cannot load the TSF DLL.
+                    if (get_process_name_by_pid(entry.th32ProcessID) <> '') and
+                        not nc_process_cannot_load_tsf_module(entry.th32ProcessID) then
                         scan_succeeded := False;
                     Continue;
                 end;
@@ -1372,7 +1375,8 @@ var
     paths: TArray<string>;
     seen, excluded: TDictionary<Cardinal, Boolean>;
     inspector: TncTsfUpgradeInspector;
-    report, rows: TStringList;
+    report, rows, unverified_rows: TStringList;
+    index: Integer;
     info: TncProcessInfo;
     error_code, only_pid: DWORD;
     complete, scanned, changed: Boolean;
@@ -1392,6 +1396,7 @@ begin
         Exit;
     report := TStringList.Create;
     rows := TStringList.Create;
+    unverified_rows := TStringList.Create;
     seen := TDictionary<Cardinal, Boolean>.Create;
     excluded := build_excluded_pid_set;
     inspector := nil;
@@ -1399,6 +1404,11 @@ begin
     try
         try
             inspector := TncTsfUpgradeInspector.Create(incoming_dir);
+            // Setup runs this elevated. Without the debug privilege, SYSTEM-owned
+            // processes in the user's session (dwm, winlogon, vendor utilities)
+            // deny module reads and leave the scan incomplete.
+            if nc_enable_debug_privilege then
+                Writeln('Debug privilege enabled for module inspection');
             candidates := get_interactive_processes(only_pid, scanned);
             complete := complete and scanned;
             for info in candidates do
@@ -1413,11 +1423,15 @@ begin
                         [info.pid, Length(paths), error_code]));
                 if not scanned then
                 begin
-                    // An exited process no longer needs restarting. Other errors
-                    // must not be mistaken for a fully updated application.
-                    if get_process_name_by_pid(info.pid) <> '' then
+                    // An exited process no longer needs restarting, and a protected
+                    // process cannot load the TSF DLL at all. Other errors must not
+                    // be mistaken for a fully updated application; name them so
+                    // Setup can say which process it could not check.
+                    if (get_process_name_by_pid(info.pid) <> '') and
+                        not nc_process_cannot_load_tsf_module(info.pid) then
                     begin
                         complete := False;
+                        unverified_rows.Add(Format('unverified=%s (PID %d)', [info.name, info.pid]));
                         Writeln(Format('TSF inspection unverified: %s (PID %d), error %d',
                             [info.name, info.pid, error_code]));
                     end;
@@ -1441,7 +1455,15 @@ begin
                     end;
                 end;
                 if changed then
+                begin
                     rows.Add(Format('%s (PID %d)', [info.name, info.pid]));
+                    // A partial read that already shows an old module is a
+                    // restart target, not merely unverified.
+                    index := unverified_rows.IndexOf(Format('unverified=%s (PID %d)',
+                        [info.name, info.pid]));
+                    if index >= 0 then
+                        unverified_rows.Delete(index);
+                end;
             end;
         except
             on E: Exception do
@@ -1451,15 +1473,19 @@ begin
             end;
         end;
         rows.Sort;
+        unverified_rows.Sort;
         report.Add('cassotis_tsf_upgrade_report_v1');
         report.Add('complete=' + IntToStr(Ord(complete)));
         report.AddStrings(rows);
+        // Not restart targets: processes that could not be checked.
+        report.AddStrings(unverified_rows);
         report.SaveToFile(output_path, TEncoding.UTF8);
         Result := True;
     finally
         inspector.Free;
         excluded.Free;
         seen.Free;
+        unverified_rows.Free;
         rows.Free;
         report.Free;
     end;

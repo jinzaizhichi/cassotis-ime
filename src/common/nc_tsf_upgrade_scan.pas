@@ -24,6 +24,12 @@ function nc_resolve_tsf_module_path(const loaded_path: string;
     out canonical_path: string; out error_code: DWORD): Boolean;
 function nc_process_tsf_module_paths(const process_id: DWORD;
     out paths: TArray<string>; out error_code: DWORD): Boolean;
+// True only for protected processes whose code-integrity policy admits
+// Windows/antimalware-signed images alone; they can never load the TSF DLL.
+// Unknown or unqueryable processes return False and remain unverified.
+function nc_process_cannot_load_tsf_module(const process_id: DWORD): Boolean;
+// Best effort; succeeds only in an elevated token that holds the privilege.
+function nc_enable_debug_privilege: Boolean;
 
 implementation
 
@@ -198,6 +204,61 @@ begin
     finally
         found.Free;
         CloseHandle(snapshot);
+    end;
+end;
+
+function nc_process_cannot_load_tsf_module(const process_id: DWORD): Boolean;
+type
+    TGetProcessInformation = function(process: THandle; information_class: Integer;
+        information: Pointer; size: DWORD): BOOL; stdcall;
+const
+    c_process_query_limited_information = $1000;
+    c_process_protection_level_info = 7;
+    // PROTECTION_LEVEL_WINTCB_LIGHT .. PROTECTION_LEVEL_CODEGEN_LIGHT. Authenticode
+    // and app protection levels can admit third-party signers and stay unverified.
+    c_highest_microsoft_signer_level = 6;
+var
+    get_information: TGetProcessInformation;
+    process: THandle;
+    level: DWORD;
+begin
+    Result := False;
+    @get_information := GetProcAddress(GetModuleHandle(kernel32), 'GetProcessInformation');
+    if not Assigned(get_information) then
+        Exit;
+    process := OpenProcess(c_process_query_limited_information, False, process_id);
+    if process = 0 then
+        Exit;
+    try
+        level := DWORD(-1);
+        Result := get_information(process, c_process_protection_level_info, @level, SizeOf(level)) and
+            (level <= c_highest_microsoft_signer_level);
+    finally
+        CloseHandle(process);
+    end;
+end;
+
+function nc_enable_debug_privilege: Boolean;
+var
+    token: THandle;
+    privileges, previous: TTokenPrivileges;
+    returned: DWORD;
+begin
+    Result := False;
+    if not OpenProcessToken(GetCurrentProcess, TOKEN_ADJUST_PRIVILEGES or TOKEN_QUERY, token) then
+        Exit;
+    try
+        FillChar(privileges, SizeOf(privileges), 0);
+        if not LookupPrivilegeValue(nil, 'SeDebugPrivilege', privileges.Privileges[0].Luid) then
+            Exit;
+        privileges.PrivilegeCount := 1;
+        privileges.Privileges[0].Attributes := SE_PRIVILEGE_ENABLED;
+        returned := 0;
+        // Reports success with ERROR_NOT_ALL_ASSIGNED when the token lacks it.
+        Result := AdjustTokenPrivileges(token, False, privileges, SizeOf(previous), previous, returned) and
+            (GetLastError = ERROR_SUCCESS);
+    finally
+        CloseHandle(token);
     end;
 end;
 

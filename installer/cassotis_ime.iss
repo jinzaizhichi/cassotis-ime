@@ -169,6 +169,8 @@ chs.TsfUpgradeTitle=部分应用需要重启后才能使用新版输入组件
 chs.TsfUpgradeBefore=以下应用仍加载着与新版不同的输入组件。请先保存工作并完整退出这些应用，再选择“重新检查”；也可以稍后重启应用并继续安装。安装程序不会强制关闭这些应用。
 chs.TsfUpgradeAfter=新版已安装，但以下应用中的输入组件修复尚未生效。请保存工作并完整退出应用后重新打开；仅关闭窗口可能仍有后台进程。也可注销 Windows 后重新登录。
 chs.TsfUpgradeIncomplete=未能完整核实所有相关进程。为确保新版修复生效，请重启使用过输入法的应用，或保存工作后注销 Windows 再登录。
+chs.TsfUpgradeUnverified=以下进程无法检查是否仍在使用旧版输入组件（可能受系统或安全软件保护）。它们不一定需要重启；如果输入法在其中某个应用里表现异常，请完整退出并重新打开该应用，或注销 Windows 后重新登录：
+chs.TsfUpgradeUnverifiedFinished=安装完成。少数进程未能核实是否已使用新版输入组件，详见下方说明。
 chs.TsfUpgradeRecheck=重新检查
 chs.TsfUpgradeLater=稍后重启应用，继续安装
 chs.TsfUpgradeFinished=安装完成，部分应用仍需重启。相关修复将在这些应用完整退出并重新打开后生效。
@@ -192,6 +194,8 @@ english.TsfUpgradeTitle=Some applications need restarting to use the new text se
 english.TsfUpgradeBefore=These applications still have different text service code loaded. Save your work, fully exit them and choose Recheck, or continue and restart them later. Setup will not force-close these applications.
 english.TsfUpgradeAfter=The new version is installed, but its text service fixes are not yet active in these applications. Save your work, fully exit and reopen them; closing a window may leave a background process running. Alternatively, sign out of Windows and sign back in.
 english.TsfUpgradeIncomplete=Some related processes could not be fully verified. Restart applications that have used the input method, or save your work and sign out of Windows, to ensure the new fixes take effect.
+english.TsfUpgradeUnverified=Setup could not check whether these processes still use the previous text service (they may be protected by Windows or security software). They do not necessarily need restarting; if the input method misbehaves in one of them, fully exit and reopen it, or sign out of Windows and sign back in:
+english.TsfUpgradeUnverifiedFinished=Installation complete. A few processes could not be verified as using the new text service; see the note below.
 english.TsfUpgradeRecheck=Recheck
 english.TsfUpgradeLater=Restart applications later and continue
 english.TsfUpgradeFinished=Installation complete. Some applications still need restarting before the updated text service fixes take effect.
@@ -335,6 +339,8 @@ begin
     end;
     Log('TSF upgrade scan complete=' + IntToStr(Ord(TsfUpgradeScanComplete)) + #13#10 +
         TsfUpgradeApplications);
+    if TsfUpgradeUnverified <> '' then
+        Log('TSF upgrade scan could not check:' + #13#10 + TsfUpgradeUnverified);
 end;
 
 function GetTsfManualRestartApplications: string;
@@ -391,7 +397,7 @@ begin
         if WizardSilent then
         begin
             Log(TsfUpgradeNoticeText(CustomMessage('TsfUpgradeAfter'),
-                CustomMessage('TsfUpgradeIncomplete')));
+                CustomMessage('TsfUpgradeIncomplete'), CustomMessage('TsfUpgradeUnverified')));
             Result := True;
             Exit;
         end;
@@ -435,12 +441,16 @@ begin
     if TsfFinishedMemo = nil then
         Exit;
     TsfFinishedMemo.Visible := TsfUpgradeNoticeRequired;
-    TsfRecheckButton.Visible := TsfUpgradeNoticeRequired;
+    { An empty list with a Recheck button reads as an unfinished demand. }
+    TsfRecheckButton.Visible := TsfUpgradeNoticeListsProcesses;
     if TsfUpgradeNoticeRequired then
     begin
-        WizardForm.FinishedLabel.Caption := CustomMessage('TsfUpgradeFinished');
+        if TsfUpgradeApplications <> '' then
+            WizardForm.FinishedLabel.Caption := CustomMessage('TsfUpgradeFinished')
+        else
+            WizardForm.FinishedLabel.Caption := CustomMessage('TsfUpgradeUnverifiedFinished');
         TsfFinishedMemo.Text := TsfUpgradeNoticeText(CustomMessage('TsfUpgradeAfter'),
-            CustomMessage('TsfUpgradeIncomplete'));
+            CustomMessage('TsfUpgradeIncomplete'), CustomMessage('TsfUpgradeUnverified'));
         if TsfDesktopRecoveryRequired then
             TsfFinishedMemo.Text := TsfFinishedMemo.Text + #13#10#13#10 +
                 CustomMessage('TsfDesktopRecovery');
@@ -469,7 +479,7 @@ begin
     TsfUpgradeFinalized := True;
     if TsfUpgradeNoticeRequired then
         Log(TsfUpgradeNoticeText(CustomMessage('TsfUpgradeAfter'),
-            CustomMessage('TsfUpgradeIncomplete')));
+            CustomMessage('TsfUpgradeIncomplete'), CustomMessage('TsfUpgradeUnverified')));
 end;
 
 procedure RestartTsfShellApplications;
