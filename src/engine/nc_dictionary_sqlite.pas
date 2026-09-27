@@ -422,6 +422,15 @@ const
     c_recent_explicit_user_choice_bonus = 1200;
     c_recent_explicit_user_choice_bonus_min = 200;
 
+    // An additive reading is selectable, but is not another observation of the
+    // same text. With no counted reading, retain one strongest curated row.
+    c_base_text_evidence_scope_sql =
+        '(b.contains_popularity_eligible <> 0 OR NOT EXISTS (' +
+        'SELECT 1 FROM dict_base AS counted WHERE counted.text = b.text ' +
+        'AND (counted.contains_popularity_eligible <> 0 ' +
+        'OR counted.weight > b.weight ' +
+        'OR (counted.weight = b.weight AND counted.id < b.id))))';
+
     default_schema_sql =
         'CREATE TABLE IF NOT EXISTS meta (' + sLineBreak +
         '    key TEXT PRIMARY KEY,' + sLineBreak +
@@ -8881,7 +8890,8 @@ function TncSqliteDictionary.get_contains_popularity_score(const token: string):
 const
     indexed_query_sql =
         'SELECT weight FROM dict_base_contains_popularity WHERE token = ?1 LIMIT 1';
-    query_sql = 'SELECT COALESCE(SUM(weight), 0) FROM dict_base WHERE instr(text, ?1) > 0';
+    query_sql = 'SELECT COALESCE(SUM(b.weight), 0) FROM dict_base AS b ' +
+        'WHERE instr(b.text, ?1) > 0 AND ' + c_base_text_evidence_scope_sql;
 var
     stmt: Psqlite3_stmt;
     step_result: Integer;
@@ -8980,7 +8990,8 @@ end;
 
 function TncSqliteDictionary.get_prefix_popularity_score(const prefix: string): Integer;
 const
-    query_sql = 'SELECT COALESCE(SUM(weight), 0) FROM dict_base WHERE text >= ?1 AND text < ?2';
+    query_sql = 'SELECT COALESCE(SUM(b.weight), 0) FROM dict_base AS b ' +
+        'WHERE b.text >= ?1 AND b.text < ?2 AND ' + c_base_text_evidence_scope_sql;
 var
     step_result: Integer;
     upper_bound: string;
@@ -10875,7 +10886,8 @@ const
         'SELECT COALESCE(SUM(weight), 0) FROM dict_base ' +
         'WHERE pinyin >= ?1 AND pinyin < ?2 AND pinyin <> ?1';
     prefix_sql =
-        'SELECT COALESCE(SUM(weight), 0) FROM dict_base WHERE text >= ?1 AND text < ?2';
+        'SELECT COALESCE(SUM(b.weight), 0) FROM dict_base AS b ' +
+        'WHERE b.text >= ?1 AND b.text < ?2 AND ' + c_base_text_evidence_scope_sql;
     exact_weight_sql =
         'SELECT COALESCE(MAX(weight), 0) FROM dict_base ' +
         'WHERE pinyin = ?1 AND text = ?2 AND length(text) = 1';
@@ -17180,8 +17192,9 @@ const
         'SELECT COUNT(1), COALESCE(SUM(weight), 0), COALESCE(MAX(weight), 0) ' +
         'FROM dict_base_query_path WHERE path_text LIKE ?1';
     prefix_query_sql =
-        'SELECT COUNT(1), COALESCE(SUM(weight), 0), COALESCE(MAX(weight), 0) ' +
-        'FROM dict_base WHERE comment = '''' AND text LIKE ?1 AND text <> ?2';
+        'SELECT COUNT(1), COALESCE(SUM(b.weight), 0), COALESCE(MAX(b.weight), 0) ' +
+        'FROM dict_base AS b WHERE b.comment = '''' AND b.text LIKE ?1 ' +
+        'AND b.text <> ?2 AND ' + c_base_text_evidence_scope_sql;
     c_segment_path_separator = #3;
     c_prefix_productivity_support_cap = 1500;
 var
