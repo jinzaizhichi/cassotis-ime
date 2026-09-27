@@ -102,6 +102,7 @@ type
         m_stmt_exact_pair_path_evidence: Psqlite3_stmt;
         m_stmt_compound_tail_support: Psqlite3_stmt;
         m_stmt_compound_tail_prefix_support: Psqlite3_stmt;
+        m_stmt_compound_tail_prefix_range_support: Psqlite3_stmt;
         m_stmt_prefix_popularity: Psqlite3_stmt;
         m_stmt_pinyin_followup_popularity: Psqlite3_stmt;
         m_stmt_contains_popularity: Psqlite3_stmt;
@@ -1507,6 +1508,59 @@ begin
     end;
 end;
 
+// SQLite's default LIKE folds ASCII case, treats % and _ as wildcards and
+// stops at NUL, so it cannot use the BINARY text index. For other literals,
+// "text LIKE value || '%'" selects exactly the texts in [value, upper_bound),
+// where upper_bound increments the last code point: UTF-8 byte order is code
+// point order. Returns False when the rewrite would not be exact.
+function try_get_like_prefix_upper_bound(const value: string;
+    out upper_bound: string): Boolean;
+var
+    idx: Integer;
+    ch: Char;
+begin
+    Result := False;
+    upper_bound := '';
+    if value = '' then
+    begin
+        Exit;
+    end;
+
+    for idx := 1 to Length(value) do
+    begin
+        ch := value[idx];
+        if ((ch >= 'A') and (ch <= 'Z')) or ((ch >= 'a') and (ch <= 'z')) or
+            (ch = '%') or (ch = '_') or (ch = #0) then
+        begin
+            Exit;
+        end;
+        if (ch >= #$D800) and (ch <= #$DBFF) then
+        begin
+            if (idx = Length(value)) or (value[idx + 1] < #$DC00) or
+                (value[idx + 1] > #$DFFF) then
+            begin
+                Exit;
+            end;
+        end
+        else if (ch >= #$DC00) and (ch <= #$DFFF) then
+        begin
+            if (idx = 1) or (value[idx - 1] < #$D800) or
+                (value[idx - 1] > #$DBFF) then
+            begin
+                Exit;
+            end;
+        end;
+    end;
+
+    ch := value[Length(value)];
+    if ((ch >= #$D7FF) and (ch <= #$DFFF)) or (ch = #$FFFF) then
+    begin
+        Exit;
+    end;
+    upper_bound := Copy(value, 1, Length(value) - 1) + Char(Ord(ch) + 1);
+    Result := True;
+end;
+
 function calc_compound_tail_support_value(const path_count: Integer;
     const total_weight: Integer; const max_weight: Integer): Integer;
 const
@@ -2510,6 +2564,7 @@ begin
     m_stmt_exact_pair_path_evidence := nil;
     m_stmt_compound_tail_support := nil;
     m_stmt_compound_tail_prefix_support := nil;
+    m_stmt_compound_tail_prefix_range_support := nil;
     m_stmt_prefix_popularity := nil;
     m_stmt_pinyin_followup_popularity := nil;
     m_stmt_contains_popularity := nil;
@@ -10276,6 +10331,11 @@ begin
         m_base_connection.finalize(m_stmt_compound_tail_prefix_support);
         m_stmt_compound_tail_prefix_support := nil;
     end;
+    if (m_stmt_compound_tail_prefix_range_support <> nil) and (m_base_connection <> nil) then
+    begin
+        m_base_connection.finalize(m_stmt_compound_tail_prefix_range_support);
+        m_stmt_compound_tail_prefix_range_support := nil;
+    end;
     if (m_stmt_prefix_popularity <> nil) and (m_base_connection <> nil) then
     begin
         m_base_connection.finalize(m_stmt_prefix_popularity);
@@ -17195,6 +17255,12 @@ const
         'SELECT COUNT(1), COALESCE(SUM(b.weight), 0), COALESCE(MAX(b.weight), 0) ' +
         'FROM dict_base AS b WHERE b.comment = '''' AND b.text LIKE ?1 ' +
         'AND b.text <> ?2 AND ' + c_base_text_evidence_scope_sql;
+    // Same rows as prefix_query_sql through idx_dict_base_text_weight; see
+    // try_get_like_prefix_upper_bound.
+    prefix_range_query_sql =
+        'SELECT COUNT(1), COALESCE(SUM(b.weight), 0), COALESCE(MAX(b.weight), 0) ' +
+        'FROM dict_base AS b WHERE b.comment = '''' AND b.text >= ?1 ' +
+        'AND b.text < ?3 AND b.text <> ?2 AND ' + c_base_text_evidence_scope_sql;
     c_segment_path_separator = #3;
     c_prefix_productivity_support_cap = 1500;
 var
@@ -17206,6 +17272,9 @@ var
     total_weight: Integer;
     max_weight: Integer;
     prefix_support: Integer;
+    prefix_upper_bound: string;
+    prefix_stmt: Psqlite3_stmt;
+    prefix_bound: Boolean;
 begin
     Result := 0;
     if m_defer_optional_model_loads then
@@ -17262,45 +17331,63 @@ begin
     if Result <= 0 then
     begin
         prefix_pattern := normalized_tail + '%';
+        prefix_stmt := nil;
         try
-            if m_stmt_compound_tail_prefix_support = nil then
+            if try_get_like_prefix_upper_bound(normalized_tail, prefix_upper_bound) then
             begin
-                if not m_base_connection.prepare(prefix_query_sql,
-                    m_stmt_compound_tail_prefix_support) then
+                if m_stmt_compound_tail_prefix_range_support = nil then
                 begin
-                    m_stmt_compound_tail_prefix_support := nil;
-                    Exit;
+                    if not m_base_connection.prepare(prefix_range_query_sql,
+                        m_stmt_compound_tail_prefix_range_support) then
+                    begin
+                        m_stmt_compound_tail_prefix_range_support := nil;
+                        Exit;
+                    end;
                 end;
+                prefix_stmt := m_stmt_compound_tail_prefix_range_support;
+                prefix_bound := m_base_connection.reset(prefix_stmt) and
+                    m_base_connection.clear_bindings(prefix_stmt) and
+                    m_base_connection.bind_text(prefix_stmt, 1, normalized_tail) and
+                    m_base_connection.bind_text(prefix_stmt, 2, normalized_tail) and
+                    m_base_connection.bind_text(prefix_stmt, 3, prefix_upper_bound);
+            end
+            else
+            begin
+                if m_stmt_compound_tail_prefix_support = nil then
+                begin
+                    if not m_base_connection.prepare(prefix_query_sql,
+                        m_stmt_compound_tail_prefix_support) then
+                    begin
+                        m_stmt_compound_tail_prefix_support := nil;
+                        Exit;
+                    end;
+                end;
+                prefix_stmt := m_stmt_compound_tail_prefix_support;
+                prefix_bound := m_base_connection.reset(prefix_stmt) and
+                    m_base_connection.clear_bindings(prefix_stmt) and
+                    m_base_connection.bind_text(prefix_stmt, 1, prefix_pattern) and
+                    m_base_connection.bind_text(prefix_stmt, 2, normalized_tail);
             end;
-
-            if (not m_base_connection.reset(m_stmt_compound_tail_prefix_support)) or
-                (not m_base_connection.clear_bindings(m_stmt_compound_tail_prefix_support)) or
-                (not m_base_connection.bind_text(m_stmt_compound_tail_prefix_support, 1,
-                prefix_pattern)) or
-                (not m_base_connection.bind_text(m_stmt_compound_tail_prefix_support, 2,
-                normalized_tail)) then
+            if not prefix_bound then
             begin
                 Exit;
             end;
 
-            step_result := m_base_connection.step(m_stmt_compound_tail_prefix_support);
+            step_result := m_base_connection.step(prefix_stmt);
             if step_result = SQLITE_ROW then
             begin
-                path_count := m_base_connection.column_int(
-                    m_stmt_compound_tail_prefix_support, 0);
-                total_weight := m_base_connection.column_int(
-                    m_stmt_compound_tail_prefix_support, 1);
-                max_weight := m_base_connection.column_int(
-                    m_stmt_compound_tail_prefix_support, 2);
+                path_count := m_base_connection.column_int(prefix_stmt, 0);
+                total_weight := m_base_connection.column_int(prefix_stmt, 1);
+                max_weight := m_base_connection.column_int(prefix_stmt, 2);
                 prefix_support := calc_compound_tail_support_value(path_count,
                     total_weight, max_weight);
                 Result := Min(c_prefix_productivity_support_cap, prefix_support);
             end;
         finally
-            if m_stmt_compound_tail_prefix_support <> nil then
+            if prefix_stmt <> nil then
             begin
-                m_base_connection.reset(m_stmt_compound_tail_prefix_support);
-                m_base_connection.clear_bindings(m_stmt_compound_tail_prefix_support);
+                m_base_connection.reset(prefix_stmt);
+                m_base_connection.clear_bindings(prefix_stmt);
             end;
         end;
     end;

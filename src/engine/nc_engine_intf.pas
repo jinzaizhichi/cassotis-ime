@@ -731,6 +731,8 @@ type
         m_lookup_admin_place_alias_cache: TDictionary<string, Boolean>;
         m_full_pinyin_key_cache: TDictionary<string, Boolean>;
         m_effective_pinyin_parse_cache: TDictionary<string, TncPinyinParseResult>;
+        m_single_syllable_prefix_set: TDictionary<string, Boolean>;
+        m_single_syllable_prefix_max_length: Integer;
         m_build_lookup_cache: TDictionary<string, TncCandidateList>;
         m_long_local_single_options_cache: TDictionary<string, TncCandidateList>;
         m_current_segment_path_map: TDictionary<string, string>;
@@ -2133,6 +2135,11 @@ begin
     begin
         m_effective_pinyin_parse_cache.Free;
         m_effective_pinyin_parse_cache := nil;
+    end;
+    if m_single_syllable_prefix_set <> nil then
+    begin
+        m_single_syllable_prefix_set.Free;
+        m_single_syllable_prefix_set := nil;
     end;
     if m_build_lookup_cache <> nil then
     begin
@@ -149875,6 +149882,7 @@ var
     i: Integer;
     ch: Char;
     spelling: string;
+    needs_rewrite: Boolean;
 begin
     Result := '';
     if input_text = '' then
@@ -149883,6 +149891,23 @@ begin
     end;
 
     spelling := nc_normalize_umlaut_spelling(input_text);
+    needs_rewrite := False;
+    for i := 1 to Length(spelling) do
+    begin
+        ch := spelling[i];
+        if (ch = '''') or (ch = #0) or ((ch >= 'A') and (ch <= 'Z')) then
+        begin
+            needs_rewrite := True;
+            Break;
+        end;
+    end;
+    // Already lower-case with nothing to strip: the rewrite below would
+    // reproduce the same text.
+    if not needs_rewrite then
+    begin
+        Exit(spelling);
+    end;
+
     SetLength(Result, Length(spelling));
     for i := 1 to Length(spelling) do
     begin
@@ -150078,6 +150103,7 @@ var
     cache_key: string;
     cached_result: TncPinyinParseResult;
     current_composition_query: Boolean;
+    tail_lengths: TArray<Integer>;
 
     function is_initial_final_compatible_local(const initial_value: string;
         const final_value: string): Boolean;
@@ -150105,46 +150131,61 @@ var
         Result := True;
     end;
 
-    function is_single_syllable_prefix_text(const value: string): Boolean;
+    procedure ensure_single_syllable_prefix_set;
     var
-        lower_value: string;
         initial_idx: Integer;
         final_idx: Integer;
-        full_syllable: string;
+
+        procedure add_syllable_prefixes(const full_syllable: string);
+        var
+            prefix_length: Integer;
+        begin
+            for prefix_length := 1 to Length(full_syllable) do
+            begin
+                m_single_syllable_prefix_set.AddOrSetValue(
+                    Copy(full_syllable, 1, prefix_length), True);
+            end;
+            if Length(full_syllable) > m_single_syllable_prefix_max_length then
+            begin
+                m_single_syllable_prefix_max_length := Length(full_syllable);
+            end;
+        end;
     begin
-        Result := False;
-        lower_value := LowerCase(Trim(value));
-        if lower_value = '' then
+        if m_single_syllable_prefix_set <> nil then
         begin
             Exit;
         end;
 
+        m_single_syllable_prefix_set := TDictionary<string, Boolean>.Create;
+        m_single_syllable_prefix_max_length := 0;
         for initial_idx := Low(c_initials_local) to High(c_initials_local) do
         begin
             for final_idx := Low(c_finals_local) to High(c_finals_local) do
             begin
-                if not is_initial_final_compatible_local(c_initials_local[initial_idx],
+                if is_initial_final_compatible_local(c_initials_local[initial_idx],
                     c_finals_local[final_idx]) then
                 begin
-                    Continue;
-                end;
-
-                full_syllable := c_initials_local[initial_idx] + c_finals_local[final_idx];
-                if Copy(full_syllable, 1, Length(lower_value)) = lower_value then
-                begin
-                    Exit(True);
+                    add_syllable_prefixes(c_initials_local[initial_idx] +
+                        c_finals_local[final_idx]);
                 end;
             end;
         end;
 
         for final_idx := Low(c_finals_no_initial_local) to High(c_finals_no_initial_local) do
         begin
-            full_syllable := c_finals_no_initial_local[final_idx];
-            if Copy(full_syllable, 1, Length(lower_value)) = lower_value then
-            begin
-                Exit(True);
-            end;
+            add_syllable_prefixes(c_finals_no_initial_local[final_idx]);
         end;
+    end;
+
+    function is_single_syllable_prefix_text(const value: string): Boolean;
+    var
+        lower_value: string;
+    begin
+        // True when the text is a prefix of an initial+final syllable accepted
+        // by is_initial_final_compatible_local, or of a no-initial final.
+        lower_value := LowerCase(Trim(value));
+        Result := (lower_value <> '') and
+            m_single_syllable_prefix_set.ContainsKey(lower_value);
     end;
 
     function build_tail_text(const start_index: Integer): string;
@@ -150416,8 +150457,26 @@ begin
             Exit;
         end;
 
+        ensure_single_syllable_prefix_set;
+        SetLength(tail_lengths, Length(syllables) + 1);
+        tail_lengths[Length(syllables)] := 0;
+        for idx := High(syllables) downto 0 do
+        begin
+            tail_lengths[idx] := tail_lengths[idx + 1] + Length(syllables[idx].text);
+        end;
         for idx := 0 to High(syllables) do
         begin
+            // A tail longer than every syllable prefix cannot match unless Trim
+            // would shorten it, so skip building it.
+            if (tail_lengths[idx] > m_single_syllable_prefix_max_length) and
+                (syllables[idx].text <> '') and
+                (syllables[idx].text[1] > ' ') and
+                (syllables[High(syllables)].text <> '') and
+                (syllables[High(syllables)].text[
+                Length(syllables[High(syllables)].text)] > ' ') then
+            begin
+                Continue;
+            end;
             tail_text := build_tail_text(idx);
             if is_single_syllable_prefix_text(tail_text) then
             begin
