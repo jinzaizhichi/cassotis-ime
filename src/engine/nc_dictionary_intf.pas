@@ -16,6 +16,10 @@ type
             out results: TncCandidateList): Boolean; virtual;
         function lookup_full_pinyin_prefix(const pinyin_prefix: string;
             out results: TncCandidateList): Boolean; virtual;
+        { Words whose syllables match a mixed full/abbreviated input exactly,
+          e.g. "xiannrou" (xian + n + rou), user words first, then by weight. }
+        function lookup_mixed_abbreviation_words(const pinyin: string;
+            out results: TncCandidateList): Boolean; virtual;
         function lookup_candidate_prefix_completions(const pinyin_prefix: string;
             out results: TncOneKeyCompletionList): Boolean; virtual;
         function lookup_one_key_completions(const pinyin_prefix: string;
@@ -159,6 +163,13 @@ begin
 end;
 
 function TncDictionaryProvider.lookup_full_pinyin_prefix(const pinyin_prefix: string;
+    out results: TncCandidateList): Boolean;
+begin
+    SetLength(results, 0);
+    Result := False;
+end;
+
+function TncDictionaryProvider.lookup_mixed_abbreviation_words(const pinyin: string;
     out results: TncCandidateList): Boolean;
 begin
     SetLength(results, 0);

@@ -1,0 +1,21 @@
+{
+  "format": 1,
+  "architecture": "nc-gpt char GPT (pre-LN, no bias, tanh GELU, tied embeddings)",
+  "graph": "tools/char_lm_onnx.py tree-mask + KV cache",
+  "quantization": "int8_keep_mlp_out",
+  "float_mlp_out_layers": [
+    5
+  ],
+  "n_layer": 12,
+  "n_head": 8,
+  "n_embd": 512,
+  "block_size": 256,
+  "vocab_size": 11599,
+  "bos_id": 0,
+  "unk_id": 1,
+  "source_checkpoint_sha256": "3db86a87ec8c3d042c43b7e35d513f8bbb0342aa9e2143a5289fb07392783381",
+  "files": {
+    "char_lm.onnx": "c7aa1adfaf8468e57e358aaf2d969d9c18f9dc6e689612dc41dddbf457835aca",
+    "char_lm_vocab.bin": "200f41183daa0a07c79ecef6f16f37c344105f4bf5ae374ae30d5e53efb6d5aa"
+  }
+}

@@ -56,6 +56,10 @@ Name: "{localappdata}\CassotisIme"
 Name: "{localappdata}\CassotisIme\data"
 Name: "{localappdata}\CassotisIme\logs"
 
+[InstallDelete]
+; The short-word context model (rbt3) is no longer shipped; drop its notices on upgrade.
+Type: filesandordirs; Name: "{app}\licenses\rbt3"
+
 [Files]
 Source: "{#RuntimeDir}\cassotis_ime_host.exe"; DestDir: "{#InstallRuntimeDir}"; Flags: ignoreversion onlyifdoesntexist
 Source: "{#RuntimeDir}\cassotis_ime_tray_host.exe"; DestDir: "{#InstallRuntimeDir}"; Flags: ignoreversion onlyifdoesntexist
@@ -77,13 +81,9 @@ Source: "{#RuntimeDir}\local_completion\local_completion_path_ranker_int8.onnx";
 Source: "{#RuntimeDir}\local_completion\local_completion_generator_int8.onnx"; DestDir: "{#InstallRuntimeDir}\local_completion"; Flags: ignoreversion onlyifdoesntexist
 Source: "{#RuntimeDir}\local_completion\local_completion_index.bin"; DestDir: "{#InstallRuntimeDir}\local_completion"; Flags: ignoreversion onlyifdoesntexist
 Source: "{#RuntimeDir}\local_completion\model_manifest.json"; DestDir: "{#InstallRuntimeDir}\local_completion"; Flags: ignoreversion onlyifdoesntexist
-Source: "{#RuntimeDir}\short_context\exit0.int8.onnx"; DestDir: "{#InstallRuntimeDir}\short_context"; Flags: ignoreversion onlyifdoesntexist
-Source: "{#RuntimeDir}\short_context\exit1.int8.onnx"; DestDir: "{#InstallRuntimeDir}\short_context"; Flags: ignoreversion onlyifdoesntexist
-Source: "{#RuntimeDir}\short_context\exit2.int8.onnx"; DestDir: "{#InstallRuntimeDir}\short_context"; Flags: ignoreversion onlyifdoesntexist
-Source: "{#RuntimeDir}\short_context\exit3.int8.onnx"; DestDir: "{#InstallRuntimeDir}\short_context"; Flags: ignoreversion onlyifdoesntexist
-Source: "{#RuntimeDir}\short_context\tokenizer.bin"; DestDir: "{#InstallRuntimeDir}\short_context"; Flags: ignoreversion onlyifdoesntexist
-Source: "{#RuntimeDir}\short_context\policy.bin"; DestDir: "{#InstallRuntimeDir}\short_context"; Flags: ignoreversion onlyifdoesntexist
-Source: "{#RuntimeDir}\short_context\runtime_manifest.json"; DestDir: "{#InstallRuntimeDir}\short_context"; Flags: ignoreversion onlyifdoesntexist
+Source: "{#RuntimeDir}\char_lm\char_lm.onnx"; DestDir: "{#InstallRuntimeDir}\char_lm"; Flags: ignoreversion onlyifdoesntexist
+Source: "{#RuntimeDir}\char_lm\char_lm_vocab.bin"; DestDir: "{#InstallRuntimeDir}\char_lm"; Flags: ignoreversion onlyifdoesntexist
+Source: "{#RuntimeDir}\char_lm\runtime_manifest.json"; DestDir: "{#InstallRuntimeDir}\char_lm"; Flags: ignoreversion onlyifdoesntexist
 Source: "{#RuntimeDir}\local_repair\context_int8.onnx"; DestDir: "{#InstallRuntimeDir}\local_repair"; Flags: ignoreversion onlyifdoesntexist
 Source: "{#RuntimeDir}\local_repair\query_int8.onnx"; DestDir: "{#InstallRuntimeDir}\local_repair"; Flags: ignoreversion onlyifdoesntexist
 Source: "{#RuntimeDir}\local_repair\vocab.json"; DestDir: "{#InstallRuntimeDir}\local_repair"; Flags: ignoreversion onlyifdoesntexist
@@ -101,8 +101,6 @@ Source: "{#RuntimeDir}\local_repair\bilateral_head_int8.onnx"; DestDir: "{#Insta
 #endif
 Source: "{#SourceRoot}\third_party\macbert\LICENSE"; DestDir: "{app}\licenses\macbert"; Flags: ignoreversion
 Source: "{#SourceRoot}\third_party\macbert\NOTICE"; DestDir: "{app}\licenses\macbert"; Flags: ignoreversion
-Source: "{#SourceRoot}\third_party\macbert\LICENSE"; DestDir: "{app}\licenses\rbt3"; Flags: ignoreversion
-Source: "{#SourceRoot}\third_party\rbt3\NOTICE"; DestDir: "{app}\licenses\rbt3"; Flags: ignoreversion
 Source: "{#SourceRoot}\third_party\onnxruntime\LICENSE"; DestDir: "{app}\licenses\onnxruntime"; Flags: ignoreversion
 Source: "{#SourceRoot}\third_party\onnxruntime\ThirdPartyNotices.txt"; DestDir: "{app}\licenses\onnxruntime"; Flags: ignoreversion
 

@@ -18,6 +18,7 @@ uses
     nc_local_repair_guard,
     nc_short_particle_evidence,
     nc_short_context_ranker,
+    nc_char_lm,
 {$IFDEF CASSOTIS_TAB_HANDOFF_DIAGNOSTICS}
     nc_tab_repair_handoff,
 {$ENDIF}
@@ -438,6 +439,8 @@ type
         base_rank: Integer;
         replace_units: Integer;
         confidence: Single;
+        // Pool mode only: the ranker's ABSTAIN score beside candidates.
+        abstain_score: Single;
         candidates: TncLongNeuralCompletionCandidateArray;
     end;
 
@@ -831,6 +834,13 @@ type
         m_runtime_long_retained_exact_edges: TncLongRetainedExactEdgeArray;
         m_long_neural_reranker: IncLongNeuralReranker;
         m_short_context_reranker: IncShortContextReranker;
+        m_char_lm: IncCharLm;
+        m_char_lm_long_enabled: Boolean;
+        m_char_lm_short_enabled: Boolean;
+        // The last final complete ranking of the current lookup, in the
+        // ranking's input order with each candidate's final rank.
+        m_char_lm_long_pool: TncCandidateList;
+        m_char_lm_long_pool_ranks: TArray<Integer>;
         m_long_local_repair: IncLongLocalRepair;
         m_long_local_repair_policy: IncLongLocalRepairPolicy;
         m_long_joint_repair: IncLongJointRepair;
@@ -898,6 +908,17 @@ type
             const page_size: Integer): string;
         function long_visible_candidate_pool_cache_is_current(
             const page_size: Integer): Boolean;
+        procedure promote_char_lm_candidate(var candidates: TncCandidateList;
+            var source_indices: TArray<Integer>; const value: TncCandidate;
+            const source, page_size: Integer; const complete_units: Integer = 0);
+        function apply_char_lm_long_top(var candidates: TncCandidateList;
+            var source_indices: TArray<Integer>; const expected_units: Integer;
+            const page_size: Integer): Boolean;
+        function apply_char_lm_short_top(var candidates: TncCandidateList;
+            var source_indices: TArray<Integer>; const context, query: string;
+            const page_size: Integer): Boolean;
+        function apply_mixed_abbreviation_top(var candidates: TncCandidateList;
+            var source_indices: TArray<Integer>; const page_size: Integer): Boolean;
         function get_current_page_candidate_count(
             const page_size: Integer): Integer;
         function get_page_count_internal(const page_size: Integer): Integer;
@@ -1153,6 +1174,8 @@ type
         procedure set_long_neural_reranker(
             const reranker: IncLongNeuralReranker);
         procedure set_short_context_reranker(const reranker: IncShortContextReranker);
+        procedure set_char_lm(const model: IncCharLm; const long_enabled: Boolean;
+            const short_enabled: Boolean = False);
         function detach_dictionary_provider: TncDictionaryProvider;
         procedure adopt_ready_dictionary_provider(
             const dictionary: TncDictionaryProvider);
@@ -5239,6 +5262,16 @@ begin
     m_short_context_reranker := reranker;
 end;
 
+procedure TncEngine.set_char_lm(const model: IncCharLm; const long_enabled: Boolean;
+    const short_enabled: Boolean);
+begin
+    m_char_lm := model;
+    m_char_lm_long_enabled := long_enabled and (model <> nil);
+    m_char_lm_short_enabled := short_enabled and (model <> nil);
+    SetLength(m_char_lm_long_pool, 0);
+    SetLength(m_char_lm_long_pool_ranks, 0);
+end;
+
 procedure TncEngine.set_long_neural_reranker(
     const reranker: IncLongNeuralReranker);
 begin
@@ -9230,6 +9263,7 @@ var
     incremental_partial_reuse_applied: Boolean;
     multi_syllable_cap_limit: Integer;
     normalized_lookup_text: string;
+    mixed_abbreviation_words: TncCandidateList;
     repeated_two_syllable_query: Boolean;
     single_char_partial_min_count: Integer;
     runtime_phrase_added: Boolean;
@@ -123703,7 +123737,11 @@ var
         load_literal_user_candidates_local;
         has_safe_trailing_initial_typing_state :=
             detect_safe_trailing_initial_typing_state(m_composition_text);
-        if (not has_safe_trailing_initial_typing_state) and (not is_full_pinyin_key(lookup_text)) then
+        // A mixed full/abbreviated input (e.g. "nhaoma") that spells a whole
+        // dictionary word is not an adjacent-swap typo.
+        if (not has_safe_trailing_initial_typing_state) and (not is_full_pinyin_key(lookup_text)) and
+            not ((m_dictionary <> nil) and
+            m_dictionary.lookup_mixed_abbreviation_words(lookup_text, mixed_abbreviation_words)) then
         begin
             normalized_lookup_text := normalize_adjacent_swap_typo(lookup_text);
             if (normalized_lookup_text <> '') and (not SameText(normalized_lookup_text, lookup_text)) then
@@ -140651,6 +140689,8 @@ begin
     end;
     SetLength(m_debug_long_final_candidates, 0);
     SetLength(m_debug_long_ranking_stages, 0);
+    SetLength(m_char_lm_long_pool, 0);
+    SetLength(m_char_lm_long_pool_ranks, 0);
     ranking_stage_capture_count := 0;
     bidirectional_top1_swapped := False;
     settled_top2_feature_cache_valid := False;
@@ -141900,6 +141940,14 @@ begin
 
     flush_ranking_stages;
 
+    { The character LM reranks this same final pool once the visible list is
+      settled (apply_char_lm_long_top). }
+    if m_char_lm_long_enabled then
+    begin
+        m_char_lm_long_pool := Copy(legacy_candidates, 0, candidate_count);
+        m_char_lm_long_pool_ranks := Copy(final_ranks, 0, candidate_count);
+    end;
+
     { Final-state snapshots are an audit/training surface only. Building the
       large per-candidate records in normal input duplicates both the shadow
       and final ranking work without affecting candidate order. }
@@ -142178,6 +142226,255 @@ begin
         get_long_visible_candidate_pool_cache_key(page_size)) and
         (m_long_visible_candidate_pool_source_signature =
         get_candidate_state_signature);
+end;
+
+procedure TncEngine.promote_char_lm_candidate(var candidates: TncCandidateList;
+    var source_indices: TArray<Integer>; const value: TncCandidate;
+    const source, page_size: Integer; const complete_units: Integer);
+const
+    // Long input shows at most two complete sentences (the complete-pool rule);
+    // a promotion from the internal pool must not add a third.
+    c_long_visible_complete_limit = 2;
+
+    procedure promote_in(var list: TncCandidateList; var sources: TArray<Integer>;
+        const keep_length: Boolean);
+    var
+        idx, count, moved_source, complete_count: Integer;
+        moved: TncCandidate;
+    begin
+        count := Length(list);
+        moved := value;
+        moved_source := source;
+        for idx := 0 to High(list) do
+            if (Trim(list[idx].comment) = '') and (Trim(list[idx].text) = Trim(value.text)) then
+            begin
+                moved := list[idx];
+                moved_source := sources[idx];
+                Delete(list, idx, 1);
+                Delete(sources, idx, 1);
+                Break;
+            end;
+        Insert(moved, list, 0);
+        Insert(moved_source, sources, 0);
+        if complete_units > 0 then
+        begin
+            complete_count := 0;
+            idx := 0;
+            while idx < Length(list) do
+            begin
+                if (Trim(list[idx].text) <> '') and (Trim(list[idx].comment) = '') and
+                    (get_candidate_text_unit_count(Trim(list[idx].text)) = complete_units) then
+                begin
+                    Inc(complete_count);
+                    if complete_count > c_long_visible_complete_limit then
+                    begin
+                        Delete(list, idx, 1);
+                        Delete(sources, idx, 1);
+                        Continue;
+                    end;
+                end;
+                Inc(idx);
+            end;
+        end;
+        // A full page keeps its size; a short page may grow by the insert.
+        if keep_length and (Length(list) > count) and (count >= page_size) then
+        begin
+            SetLength(list, count);
+            SetLength(sources, count);
+        end;
+    end;
+
+var
+    pool: TncCandidateList;
+    sources: TArray<Integer>;
+begin
+    // The frozen paging pool keeps later pages consistent with this page.
+    if long_visible_candidate_pool_cache_is_current(page_size) and
+        (Length(m_long_visible_candidate_pool_cache) =
+        Length(m_long_visible_candidate_pool_source_indices_cache)) then
+    begin
+        pool := Copy(m_long_visible_candidate_pool_cache);
+        sources := Copy(m_long_visible_candidate_pool_source_indices_cache);
+        promote_in(pool, sources, False);
+        m_long_visible_candidate_pool_cache := pool;
+        m_long_visible_candidate_pool_source_indices_cache := sources;
+    end;
+    promote_in(candidates, source_indices, True);
+end;
+
+function TncEngine.apply_char_lm_long_top(var candidates: TncCandidateList;
+    var source_indices: TArray<Integer>; const expected_units: Integer;
+    const page_size: Integer): Boolean;
+var
+    texts: TArray<string>;
+    chosen: string;
+    idx: Integer;
+begin
+    Result := False;
+    try
+        // Explicit user choices and forced tops keep their place.
+        if (not m_char_lm_long_enabled) or (m_char_lm = nil) or
+            (m_page_index <> 0) or m_candidate_navigation_started or
+            m_has_forced_visible_top_candidate or (Length(candidates) = 0) or
+            (Length(candidates) <> Length(source_indices)) or
+            (candidates[0].source = cs_user) or (Length(m_char_lm_long_pool) = 0) then
+            Exit;
+        SetLength(texts, Length(m_char_lm_long_pool));
+        for idx := 0 to High(texts) do
+            texts[idx] := m_char_lm_long_pool[idx].text;
+        if not nc_char_lm_choose_long_top(m_char_lm, '', texts,
+            m_char_lm_long_pool_ranks, candidates[0].text, expected_units, chosen) then
+            Exit;
+        // The final pool can hold complete paths the visible merge left out.
+        idx := 0;
+        while (idx < Length(m_char_lm_long_pool)) and
+            ((Trim(m_char_lm_long_pool[idx].text) <> chosen) or
+            (Trim(m_char_lm_long_pool[idx].comment) <> '')) do
+            Inc(idx);
+        if idx >= Length(m_char_lm_long_pool) then
+            Exit;
+        promote_char_lm_candidate(candidates, source_indices,
+            m_char_lm_long_pool[idx], -1, page_size, expected_units);
+        Result := True;
+    finally
+        SetLength(m_char_lm_long_pool, 0);
+        SetLength(m_char_lm_long_pool_ranks, 0);
+    end;
+end;
+
+function TncEngine.apply_char_lm_short_top(var candidates: TncCandidateList;
+    var source_indices: TArray<Integer>; const context, query: string;
+    const page_size: Integer): Boolean;
+var
+    texts: TArray<string>;
+    positions: TArray<Integer>;
+    text: string;
+    idx, other, best: Integer;
+    value: TncCandidate;
+begin
+    Result := False;
+    // Without left context the dev set gains nothing (+3 of 4,489 cases) and
+    // the no-context benchmark track loses; keep dictionary order there.
+    if (not m_char_lm_short_enabled) or (m_char_lm = nil) or (Trim(context) = '') or
+        (Length(candidates) < 2) or (Length(candidates) <> Length(source_indices)) or
+        (candidates[0].source = cs_user) then
+        Exit;
+    // Learned query choices keep their place, as in nc_rerank_short_context.
+    if (m_dictionary <> nil) and (Trim(candidates[0].comment) = '') and
+        ((m_dictionary.get_query_choice_bonus(query, Trim(candidates[0].text)) > 0) or
+        (m_dictionary.get_context_query_choice_bonus(context, query,
+        Trim(candidates[0].text)) > 0)) then
+        Exit;
+    // The competition group is the exact entries for the whole input. A
+    // prefix completion (e.g. "luoxianguan" for "luoxia") has no comment
+    // either, but it is not an alternative reading and must not win here.
+    if m_dictionary = nil then
+        Exit;
+    for idx := 0 to High(candidates) do
+    begin
+        if Length(texts) >= c_char_lm_short_limit then
+            Break;
+        text := Trim(candidates[idx].text);
+        if (text = '') or (Trim(candidates[idx].comment) <> '') or
+            not (m_dictionary.is_base_entry(query, text) or m_dictionary.is_user_entry(query, text)) then
+            Continue;
+        other := 0;
+        while (other < Length(texts)) and (texts[other] <> text) do
+            Inc(other);
+        if other < Length(texts) then
+            Continue;
+        texts := texts + [text];
+        positions := positions + [idx];
+    end;
+    // Only reorder within the group when the visible top belongs to it.
+    if (Length(positions) < 2) or (positions[0] <> 0) or
+        not nc_char_lm_choose_short_top(m_char_lm, context, texts, best) or
+        (positions[best] = 0) then
+        Exit;
+    value := candidates[positions[best]];
+    promote_char_lm_candidate(candidates, source_indices, value,
+        source_indices[positions[best]], page_size);
+    Result := True;
+end;
+
+function TncEngine.apply_mixed_abbreviation_top(var candidates: TncCandidateList;
+    var source_indices: TArray<Integer>; const page_size: Integer): Boolean;
+const
+    c_mixed_visible_limit = 5;
+var
+    words: TncCandidateList;
+    texts: TArray<string>;
+    order: TArray<Integer>;
+    lookup_text, context: string;
+    idx, count, best, chosen, complete_units: Integer;
+    found: Boolean;
+    value: TncCandidate;
+begin
+    // Full and abbreviated syllables mixed in one input ("xiannrou" for
+    // xian + n + rou): whole-word dictionary matches go first, as common
+    // input methods do. Valid full pinyin (e.g. "tamen") keeps its order.
+    Result := False;
+    if (m_dictionary = nil) or (m_page_index <> 0) or m_candidate_navigation_started or
+        m_has_forced_visible_top_candidate or (Length(candidates) <> Length(source_indices)) or
+        (Pos('''', m_composition_text) > 0) or is_shuangpin_input or is_fuzzy_pinyin_active then
+        Exit;
+    lookup_text := normalize_pinyin_text(m_composition_text);
+    if (lookup_text = '') or is_full_pinyin_key(lookup_text) or
+        not m_dictionary.lookup_mixed_abbreviation_words(lookup_text, words) then
+        Exit;
+    count := Min(Length(words), c_mixed_visible_limit);
+    // An explicit user word at the top that is not a match keeps its place.
+    if (Length(candidates) > 0) and (candidates[0].source = cs_user) and
+        (Trim(candidates[0].comment) = '') then
+    begin
+        found := False;
+        for idx := 0 to count - 1 do
+            if Trim(candidates[0].text) = words[idx].text then
+                found := True;
+        if not found then
+            Exit;
+    end;
+    SetLength(order, count);
+    for idx := 0 to count - 1 do
+        order[idx] := idx;
+    // The shared LM picks the first match (with the left context when any);
+    // the user's own words, listed first by the dictionary, keep that place.
+    if (count >= 2) and (words[0].source <> cs_user) and (m_char_lm <> nil) and
+        m_char_lm_short_enabled then
+    begin
+        if m_segment_left_context <> '' then
+            context := m_segment_left_context
+        else if m_external_left_context <> '' then
+            context := m_external_left_context
+        else
+            context := m_left_context;
+        SetLength(texts, count);
+        for idx := 0 to count - 1 do
+            texts[idx] := words[idx].text;
+        if nc_char_lm_choose_short_top(m_char_lm, context, texts, best) and (best > 0) then
+        begin
+            chosen := order[best];
+            Delete(order, best, 1);
+            Insert(chosen, order, 0);
+        end;
+    end;
+    if (Length(candidates) > 0) and (Trim(candidates[0].comment) = '') and
+        (Trim(candidates[0].text) = words[order[0]].text) then
+        Exit;
+    complete_units := nc_char_lm_code_point_count(words[order[0]].text);
+    if complete_units >= c_char_lm_long_min_units then
+    begin
+        // Long input keeps the long-sentence page shape: one promoted word.
+        promote_char_lm_candidate(candidates, source_indices, words[order[0]], -1,
+            page_size, complete_units);
+        Exit(True);
+    end;
+    for idx := count - 1 downto 0 do
+    begin
+        value := words[order[idx]];
+        promote_char_lm_candidate(candidates, source_indices, value, -1, page_size);
+    end;
+    Result := True;
 end;
 
 function TncEngine.get_current_page_candidate_count(
@@ -159240,6 +159537,7 @@ var
     short_context_promoted_exact_text: string;
     short_context_promoted_exact_lead: Integer;
     short_context_swapped: Boolean;
+    char_lm_context: string;
     promoted_repeated_initial_count: Integer;
     repeated_initial_display_source_candidates: TncCandidateList;
     explicit_apostrophe_entry_top_partial_candidate: TncCandidate;
@@ -192472,6 +192770,8 @@ var
             // Whole-query lexical/user exacts were already boundary-validated
             // and ordered above. Sentence models rank composed paths, not a
             // replacement for an exact entry that happens to be a long word.
+            SetLength(m_char_lm_long_pool, 0);
+            SetLength(m_char_lm_long_pool_ranks, 0);
             if (expected_units < c_long_sentence_full_path_min_syllables) or
                 (Length(protected_full_query_exacts) = 0) then
             begin
@@ -192525,7 +192825,23 @@ var
                 else
                     short_context_swapped := nc_rerank_short_context(m_short_context_reranker, m_dictionary,
                         m_left_context, normalized_pinyin, Result, visible_source_indices);
+                if m_segment_left_context <> '' then
+                    char_lm_context := m_segment_left_context
+                else if m_external_left_context <> '' then
+                    char_lm_context := m_external_left_context
+                else
+                    char_lm_context := m_left_context;
+                // Like the short-context swap, a promotion freezes later pages.
+                if apply_char_lm_short_top(Result, visible_source_indices,
+                    char_lm_context, normalized_pinyin, visible_page_size) then
+                    short_context_swapped := True;
             end;
+            if apply_char_lm_long_top(Result, visible_source_indices, expected_units,
+                visible_page_size) then
+                short_context_swapped := True;
+            if apply_mixed_abbreviation_top(Result, visible_source_indices,
+                visible_page_size) then
+                short_context_swapped := True;
             if (Length(Result) > 0) and
                 (Trim(Result[0].comment) = '') and
                 (get_candidate_text_unit_count(Trim(Result[0].text)) =
@@ -192547,7 +192863,8 @@ var
                 end;
             end;
             if short_context_swapped and long_visible_candidate_pool_cache_is_current(visible_page_size) then
-                for page_idx := 0 to 1 do
+                for page_idx := 0 to Min(1, Min(High(Result),
+                    High(m_long_visible_candidate_pool_cache))) do
                 begin
                     m_long_visible_candidate_pool_cache[page_idx] := Result[page_idx];
                     m_long_visible_candidate_pool_source_indices_cache[page_idx] := visible_source_indices[page_idx];

@@ -10,7 +10,7 @@ Benchmark-16300 fixes 16,300 eligible sentences, while Benchmark-65000 fixes 65,
 
 ## Shared Accuracy Equivalence Rule
 
-The following rule applies to visible-candidate accuracy metrics in the long-sentence and short-word context suites, including `Top1`, `Top2`, other reported `TopN` values, and the short-word `Contested` metrics:
+The following rule applies to visible-candidate accuracy metrics in the long-sentence and short-word context suites, including `Top1`, `Top2`, other reported `TopN` values, and the short-word `Contested` metrics. Starting with `v1.30.0`, it also applies to the Long-sentence One-key Completion Benchmark-16300 hit, whole-sentence hit, and visible-prefix metrics:
 
 - `他` and `她` are treated as equivalent only when they occur at the same character positions, because the benchmark Pinyin query cannot distinguish them.
 - `它`, all other homophones, missing or additional characters, and every other textual difference remain distinct.
@@ -18,6 +18,18 @@ The following rule applies to visible-candidate accuracy metrics in the long-sen
 - Raw-pool and Oracle recall scoring retains strict character equality so that the target label cannot influence search behavior. It is therefore not directly comparable with equivalence-aware visible `TopN` metrics.
 
 This equivalence rule applies to benchmark results starting with `v1.11.0`. Results for `v1.10.0` and earlier releases used strict character equality and should be rescored before direct comparison with `v1.11.0` or later results.
+
+For the Long-sentence One-key Completion Benchmark-16300, the rule starts with `v1.30.0`, recorded as completion scope `predictive_continuations_v2`. Results for `v1.29.0` and earlier used strict equality (`predictive_continuations_v1`). Scoring does not affect which completion is displayed, so saved result rows can be rescored exactly with `tools/rescore_long_completion_predictions.py`.
+
+## Shared Model Configuration
+
+Starting with `v1.30.0`, all four suites load the same model set that the Host deploys, so the results match the input method users actually run:
+
+- the long-sentence Transformer reranker and its local-repair models;
+- the shared character-level language model, which reranks long-sentence and short-word candidates and takes part in choosing long-sentence one-key continuations;
+- the short-word context reranker has been replaced by the shared character-level language model and is no longer shipped from `v1.30.0`.
+
+In `v1.29.0` and earlier, the Short-word Context Benchmark loaded only the short-word context reranker, and the One-key Completion Context Benchmark loaded no neural model. Keep this change in mind when comparing across versions.
 
 ## Long Sentence Benchmark-16300
 
@@ -121,7 +133,7 @@ This benchmark measures whether one-key completion can extend a partially decode
 - Leave the final four complete Pinyin syllables untyped while retaining at least the first four syllables as the visible composition prefix.
 - Decode that prefix in deterministic-work mode with the same long-sentence Transformer reranker used by the Host.
 - Run the same constrained local-completion model when the static layer requests asynchronous refinement, apply the same confidence, timeout, and exact-path validation, then read only the single settled completion that the UI would display.
-- Count a local-continuation hit when the displayed result strictly extends the intended typed prefix and the whole displayed text remains a prefix of the reference sentence. The completion may stop after the next one to three local words; it does not have to reproduce the rest of the sentence in one step.
+- Count a local-continuation hit when the displayed result extends the intended typed prefix and the whole displayed text remains a prefix of the reference sentence, both under the shared `他`/`她` rule from `v1.30.0`. The completion may stop after the next one to three local words; it does not have to reproduce the rest of the sentence in one step.
 - Disable the user dictionary and external document context, and use a snapshot of the simplified base dictionary selected for the tested release.
 - Query the immediately preceding syllable boundary before the scored query to measure whether a compatible completion remains stable as typing continues.
 
@@ -132,7 +144,7 @@ The public report uses four metrics suited to direct cross-version comparison un
 - `Total Keys Saved`: net keys saved across all correct local-continuation hits after charging one key for each acceptance.
 - `P95`: 95% of visible completion queries finish within this many milliseconds.
 
-The detailed report additionally retains average keys saved per hit, incremental stability, wrong-prompt counts, strict whole-sentence hits, and internal-pool Oracle ranks for attribution. Incremental stability is not published as a primary comparison because its eligible denominator depends on the prompts produced by each version and can be very small. Because the corpus supplies one reference, a plausible continuation with different wording still counts as a miss.
+The detailed report additionally retains average keys saved per hit, incremental stability, wrong-prompt counts, whole-sentence hits, and internal-pool Oracle ranks for attribution. Oracle ranks keep strict character equality. Incremental stability is not published as a primary comparison because its eligible denominator depends on the prompts produced by each version and can be very small. Because the corpus supplies one reference, a plausible continuation with different wording still counts as a miss.
 
 ### Latency Protocol
 

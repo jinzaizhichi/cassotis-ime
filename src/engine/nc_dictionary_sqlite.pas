@@ -133,6 +133,7 @@ type
         m_candidate_penalty_cache: TDictionary<string, Integer>;
         m_candidate_penalty_pinyin_loaded_cache: TDictionary<string, Boolean>;
         m_lookup_result_cache: TDictionary<string, TncCandidateList>;
+        m_mixed_abbreviation_cache: TDictionary<string, TncCandidateList>;
         m_lookup_result_cache_order: TQueue<string>;
         m_exact_lookup_result_cache: TDictionary<string, TncCandidateList>;
         m_exact_lookup_result_cache_order: TQueue<string>;
@@ -300,6 +301,8 @@ type
         function lookup_isolated_exact_component(const pinyin: string;
             out results: TncCandidateList): Boolean; override;
         function lookup_full_pinyin_prefix(const pinyin_prefix: string;
+            out results: TncCandidateList): Boolean; override;
+        function lookup_mixed_abbreviation_words(const pinyin: string;
             out results: TncCandidateList): Boolean; override;
         function lookup_candidate_prefix_completions(const pinyin_prefix: string;
             out results: TncOneKeyCompletionList): Boolean; override;
@@ -2646,6 +2649,7 @@ begin
     m_candidate_penalty_cache := TDictionary<string, Integer>.Create;
     m_candidate_penalty_pinyin_loaded_cache := TDictionary<string, Boolean>.Create;
     m_lookup_result_cache := TDictionary<string, TncCandidateList>.Create;
+    m_mixed_abbreviation_cache := TDictionary<string, TncCandidateList>.Create;
     m_lookup_result_cache_order := TQueue<string>.Create;
     m_exact_lookup_result_cache := TDictionary<string, TncCandidateList>.Create;
     m_exact_lookup_result_cache_order := TQueue<string>.Create;
@@ -2868,6 +2872,11 @@ begin
     begin
         m_lookup_result_cache.Free;
         m_lookup_result_cache := nil;
+    end;
+    if m_mixed_abbreviation_cache <> nil then
+    begin
+        m_mixed_abbreviation_cache.Free;
+        m_mixed_abbreviation_cache := nil;
     end;
     if m_lookup_result_cache_order <> nil then
     begin
@@ -3531,6 +3540,202 @@ begin
         m_prefix_lookup_result_cache.AddOrSetValue(normalized_prefix,
             Copy(results, 0, Length(results)));
     end;
+end;
+
+function TncSqliteDictionary.lookup_mixed_abbreviation_words(const pinyin: string;
+    out results: TncCandidateList): Boolean;
+const
+    c_cache_limit = 4096;
+    c_word_limit = 8;
+    base_sql =
+        'SELECT b.pinyin, b.text, b.comment, b.weight ' +
+        'FROM dict_jianpin j INNER JOIN dict_base b ON b.id = j.word_id ' +
+        'WHERE j.jianpin = ?1 ORDER BY b.weight DESC, b.text ASC LIMIT 512';
+    user_sql =
+        'SELECT pinyin, text, weight FROM dict_user WHERE pinyin LIKE ?1 ' +
+        'ORDER BY weight DESC, last_used DESC, text ASC LIMIT 256';
+var
+    query_key, like_pattern, jianpin_key, initial_value, candidate_pinyin, text_value: string;
+    parser: TncPinyinParser;
+    syllables: TncPinyinParseResult;
+    tokens: TncMixedQueryTokenList;
+    reconstructed: string;
+    has_full, has_initial: Boolean;
+    idx, merge_pass: Integer;
+    ch: Char;
+    stmt: Psqlite3_stmt;
+    step_result: Integer;
+    list: TList<TncCandidate>;
+    seen: TDictionary<string, Boolean>;
+    item: TncCandidate;
+
+    function text_units(const value: string): Integer;
+    var
+        position: Integer;
+    begin
+        Result := 0;
+        position := 1;
+        while position <= Length(value) do
+        begin
+            if (Ord(value[position]) >= $D800) and (Ord(value[position]) <= $DBFF) and
+                (position < Length(value)) then
+                Inc(position);
+            Inc(position);
+            Inc(Result);
+        end;
+    end;
+
+    procedure add_word(const value, word_pinyin, comment: string; const weight: Integer;
+        const source: TncCandidateSource);
+    begin
+        if (value = '') or (comment <> '') or seen.ContainsKey(value) or
+            (list.Count >= c_word_limit) or (text_units(value) <> Length(tokens)) or
+            (not candidate_matches_mixed_jianpin(parser, word_pinyin, tokens)) then
+            Exit;
+        seen.Add(value, True);
+        item := Default(TncCandidate);
+        item.text := value;
+        item.source := source;
+        item.score := weight;
+        item.has_dict_weight := True;
+        item.dict_weight := weight;
+        list.Add(item);
+    end;
+
+begin
+    SetLength(results, 0);
+    Result := False;
+    query_key := LowerCase(Trim(pinyin));
+    if (query_key = '') or (Length(query_key) > 48) then
+        Exit;
+    for ch in query_key do
+        if not CharInSet(ch, ['a' .. 'z']) then
+            Exit;
+    if (m_mixed_abbreviation_cache <> nil) and
+        m_mixed_abbreviation_cache.TryGetValue(query_key, results) then
+    begin
+        results := Copy(results, 0, Length(results));
+        Exit(Length(results) > 0);
+    end;
+    if not ensure_open then
+        Exit;
+
+    // A mixed reading keeps valid syllables and treats every lone consonant
+    // (including n, m and r, which are also syllables) as an abbreviation.
+    parser := TncPinyinParser.create;
+    list := TList<TncCandidate>.Create;
+    seen := TDictionary<string, Boolean>.Create;
+    try
+      // "zh" typed as abbreviations may be z+h (two words) or zh (one word).
+      for merge_pass := 0 to 1 do
+      begin
+        if list.Count > 0 then
+            Break;
+        syllables := parser.parse(query_key);
+        if merge_pass = 0 then
+            nc_merge_abbreviated_retroflex_initials(syllables)
+        else if not (query_key.Contains('zh') or query_key.Contains('ch') or query_key.Contains('sh')) then
+            Break;
+        SetLength(tokens, Length(syllables));
+        reconstructed := '';
+        has_full := False;
+        has_initial := False;
+        jianpin_key := '';
+        like_pattern := '';
+        for idx := 0 to High(syllables) do
+        begin
+            reconstructed := reconstructed + syllables[idx].text;
+            if ((Length(syllables[idx].text) = 1) and is_initial_letter(syllables[idx].text[1])) or
+                (syllables[idx].text = 'zh') or (syllables[idx].text = 'ch') or
+                (syllables[idx].text = 'sh') then
+            begin
+                tokens[idx].kind := mqt_initial;
+                tokens[idx].text := syllables[idx].text;
+                has_initial := True;
+                like_pattern := like_pattern + syllables[idx].text + '%';
+            end
+            else if is_valid_candidate_syllable(syllables[idx].text) then
+            begin
+                tokens[idx].kind := mqt_full;
+                tokens[idx].text := syllables[idx].text;
+                has_full := True;
+                like_pattern := like_pattern + syllables[idx].text;
+            end
+            else
+            begin
+                SetLength(tokens, 0);
+                Break;
+            end;
+            initial_value := extract_syllable_initial(syllables[idx].text);
+            if initial_value = '' then
+                initial_value := syllables[idx].text;
+            jianpin_key := jianpin_key + initial_value[1];
+        end;
+        if (Length(tokens) >= 2) and has_full and has_initial and
+            SameText(reconstructed, query_key) then
+        begin
+            if m_user_ready then
+            begin
+                stmt := nil;
+                try
+                    if m_user_connection.prepare(user_sql, stmt) and
+                        m_user_connection.bind_text(stmt, 1, like_pattern) then
+                    begin
+                        step_result := m_user_connection.step(stmt);
+                        while step_result = SQLITE_ROW do
+                        begin
+                            candidate_pinyin := m_user_connection.column_text(stmt, 0);
+                            text_value := m_user_connection.column_text(stmt, 1);
+                            add_word(text_value, StringReplace(candidate_pinyin, '''', '', [rfReplaceAll]),
+                                '', m_user_connection.column_int(stmt, 2), cs_user);
+                            step_result := m_user_connection.step(stmt);
+                        end;
+                    end;
+                finally
+                    if stmt <> nil then
+                        m_user_connection.finalize(stmt);
+                end;
+            end;
+            if m_base_ready then
+            begin
+                stmt := nil;
+                try
+                    if m_base_connection.prepare(base_sql, stmt) and
+                        m_base_connection.bind_text(stmt, 1, jianpin_key) then
+                    begin
+                        step_result := m_base_connection.step(stmt);
+                        while (step_result = SQLITE_ROW) and (list.Count < c_word_limit) do
+                        begin
+                            candidate_pinyin := m_base_connection.column_text(stmt, 0);
+                            text_value := m_base_connection.column_text(stmt, 1);
+                            add_word(text_value, StringReplace(candidate_pinyin, '''', '', [rfReplaceAll]),
+                                m_base_connection.column_text(stmt, 2),
+                                m_base_connection.column_int(stmt, 3), cs_rule);
+                            step_result := m_base_connection.step(stmt);
+                        end;
+                    end;
+                finally
+                    if stmt <> nil then
+                        m_base_connection.finalize(stmt);
+                end;
+            end;
+        end;
+      end;
+        SetLength(results, list.Count);
+        for idx := 0 to list.Count - 1 do
+            results[idx] := list[idx];
+    finally
+        seen.Free;
+        list.Free;
+        parser.Free;
+    end;
+    if m_mixed_abbreviation_cache <> nil then
+    begin
+        if m_mixed_abbreviation_cache.Count >= c_cache_limit then
+            m_mixed_abbreviation_cache.Clear;
+        m_mixed_abbreviation_cache.AddOrSetValue(query_key, Copy(results, 0, Length(results)));
+    end;
+    Result := Length(results) > 0;
 end;
 
 function TncSqliteDictionary.lookup_candidate_prefix_completions(
@@ -10760,6 +10965,10 @@ begin
     if m_lookup_result_cache <> nil then
     begin
         m_lookup_result_cache.Clear;
+    end;
+    if m_mixed_abbreviation_cache <> nil then
+    begin
+        m_mixed_abbreviation_cache.Clear;
     end;
     if m_lookup_result_cache_order <> nil then
     begin
