@@ -137,9 +137,11 @@ Cassotis v1.22.0 introduces Pinyin-constrained local correction with cross-sente
 
 Cassotis v1.26.0 extends local correction for long sentences from per-character decisions to joint selection among a small set of complete corrections. To reduce harmful edits, models trained on independent corpora compare the edited spans in context and recheck proposed corrections against the existing result, keeping that result when evidence is insufficient.
 
+Cassotis v1.30.0 adds a shared character-level autoregressive language model trained on independent Chinese corpora to select complete long-sentence candidates, context-sensitive short words, and long-sentence Tab continuations. The former RBT3 short-word context model has been removed; the new model combines sentence coherence and preceding context with the existing ranking and protections to improve homophone selection and continuation quality.
+
 To keep the deeper ranking pipeline responsive, search, second-stage ranking, residual comparison, and final selection reuse character-LM scores, exact dictionary lookups, path features, and context features. Expensive consensus and lookup work uses shared caches and explicit time budgets to limit long-tail latency. Exact and prefix candidate visibility remains protected, while repeated work across ranking stages is avoided.
 
-Statistical priors are quantized into the local dictionary database, while most compact rerankers are exported as deterministic native Pascal parameters. The v1.18.0 continuation fallback, v1.19.0 Pinyin-conditioned scorer, v1.20.0 constrained candidate and continuation generators, and v1.22.0 local correction model are deployed as quantized ONNX models; ONNX Runtime is loaded only by the external host process, never by the TSF DLL. Runtime scoring remains local and bounded, requires no network or GPU, and falls back to the existing result while a model is loading or unavailable. Long-sentence and short-word ranking remain separate paths, so improvements to one do not replace the other's matching rules.
+Statistical priors are quantized into the local dictionary database, while most compact rerankers are exported as deterministic native Pascal parameters. The v1.18.0 continuation fallback, v1.19.0 Pinyin-conditioned scorer, v1.20.0 constrained candidate and continuation generators, v1.22.0 local correction model, and v1.30.0 shared character language model are deployed as quantized ONNX models; ONNX Runtime is loaded only by the external host process, never by the TSF DLL. Runtime scoring remains local and bounded, requires no network or GPU, and falls back to the existing result while a model is loading or unavailable. Long-sentence and short-word ranking remain separate paths, so improvements to one do not replace the other's matching rules.
 
 ## Long Sentence Benchmark-16300
 See [BENCHMARK.md](BENCHMARK.md) for the Benchmark-16300 methodology, corpus source, and scoring rules.
@@ -148,6 +150,7 @@ Corpus: 16,300 eligible Chinese sentences from the developer's own novel [**Eleg
 
 | Version | Top1 | Top2 | Mean (ms) | P50 (ms) | P95 (ms) | Max (ms) |
 |---|---:|---:|---:|---:|---:|---:|
+| `v1.30.0` | 12828/16300 (78.70%) | 13514/16300 (82.91%) | 55.25 | 47 | 94 | 266 |
 | `v1.29.0` | 11997/16300 (73.60%) | 12970/16300 (79.57%) | 39.89 | 32 | 63 | 234 |
 | `v1.28.0` | 11987/16300 (73.54%) | 12964/16300 (79.53%) | 63.72 | 62 | 109 | 484 |
 | `v1.27.0` | 11978/16300 (73.48%) | 12955/16300 (79.48%) | 63.08 | 62 | 109 | 468 |
@@ -197,6 +200,7 @@ See [BENCHMARK.md](BENCHMARK.md) for the shared corpus source, short-word case c
 
 | Version | Top1 | Top2 | Contested Top1 | Contested Top2 | Mean (ms) | P50 (ms) | P95 (ms) | Max (ms) |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|
+| `v1.30.0` | 62926/65000 (96.81%) | 64073/65000 (98.57%) | 10449/11728 (89.09%) | 11169/11728 (95.23%) | 3.525 | 3.192 | 7.660 | 21.122 |
 | `v1.29.0` | 61971/65000 (95.34%) | 63568/65000 (97.80%) | 9675/11728 (82.49%) | 10776/11728 (91.88%) | 2.999 | 2.198 | 7.316 | 27.596 |
 | `v1.28.0` | 61860/65000 (95.17%) | 63562/65000 (97.79%) | 9596/11728 (81.82%) | 10775/11728 (91.87%) | 4.453 | 3.908 | 9.214 | 34.468 |
 | `v1.27.0`<br/>`v1.26.0` | 61860/65000 (95.17%) | 63549/65000 (97.77%) | 9596/11728 (81.82%) | 10775/11728 (91.87%) | 4.474 | 3.908 | 9.310 | 35.645 |
@@ -227,7 +231,7 @@ Public results retain four columns only: `Completion Hit`, `Avg Keys Saved`, `St
 
 | Version | Completion Hit | Avg Keys Saved | Stability | P95 (ms) |
 | --- | --- | --- | --- | --- |
-| `v1.29.0` | 9420/12831 (73.42%) | 2.548 | 1691/1749 (96.68%) | 0.968 |
+| `v1.30.0`<br/>`v1.29.0` | 9420/12831 (73.42%) | 2.548 | 1691/1749 (96.68%) | 0.968 |
 | `v1.18.0` - `v1.28.0` | 9419/12831 (73.41%) | 2.549 | 1691/1749 (96.68%) | 2.026 |
 | `v1.17.0` | 9273/12831 (72.27%) | 2.554 | 1652/1718 (96.16%) | 1.880 |
 | `v1.16.0` | 8752/12831 (68.21%) | 2.570 | 1649/1676 (98.39%) | 1.509 |
@@ -240,6 +244,7 @@ This benchmark leaves the final four complete Pinyin syllables untyped and evalu
 
 | Version | Local Completion Hit | Predictive Prompt Coverage | Total Keys Saved | P95 (ms) |
 | --- | --- | --- | --- | --- |
+| `v1.30.0` | 855/16300 (5.25%) | 7203/16300 (44.19%) | 1822 | 77.819 |
 | `v1.29.0` | 424/16300 (2.60%) | 6778/16300 (41.58%) | 987 | 53.085 |
 | `v1.28.0` | 426/16300 (2.61%) | 6776/16300 (41.57%) | 989 | 78.689 |
 | `v1.27.0` | 425/16300 (2.61%) | 6769/16300 (41.53%) | 987 | 80.099 |
